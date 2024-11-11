@@ -1,0 +1,6 @@
+[submodule "xacro2urdf"]
+	path = xacro2urdf
+	url = git@github.com:doctorsrn/xacro2urdf.git
+[submodule "datasets/robo_forms/jackal"]
+	path = datasets/robo_forms/jackal
+	url = git@github.com:jackal/jackal.git

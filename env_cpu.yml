@@ -1,0 +1,25 @@
+name: 24b
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - torchvision
+  - torchaudio
+  - pytorch
+  - cpuonly
+  - jupyter
+  - matplotlib
+  - numpy
+  - pandas
+  - scikit-learn
+  - scikit-image
+  - scipy
+  - seaborn
+  - plotly
+  - tqdm
+  - pip
+  - pip:
+      - deprecated
+      - pymoo
+      - svgpath2mpl
+      - jax 

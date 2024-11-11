@@ -1,0 +1,26 @@
+name: 24b
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - jupyter
+  - matplotlib
+  - numpy
+  - pandas
+  - scikit-learn
+  - scikit-image
+  - scipy
+  - seaborn
+  - plotly
+  - cuda-nvcc
+  - tqdm
+  - pip
+  - pip:
+      - deprecated
+      - pymoo
+      - svgpath2mpl
+      - jax[cuda]
