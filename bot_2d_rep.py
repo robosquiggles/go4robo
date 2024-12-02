@@ -1,13 +1,25 @@
 import shapely
 from shapely.geometry import Polygon
 
+import pointpats
+
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 
 import matplotlib.pyplot as plt
 import numpy as np
+import random
 
 def plot_polygon_with_holes(polygon, **kwargs):
+    """
+    Plots a polygon with holes using Matplotlib.
+    Parameters:
+        polygon (shapely.geometry.Polygon): The polygon to be plotted, which may contain holes.
+        **kwargs: Additional keyword arguments to be passed to the PathPatch constructor.
+    Returns:
+        None
+    """
+
     exterior_coords = list(polygon.exterior.coords)
     codes = [Path.MOVETO] + [Path.LINETO] * (len(exterior_coords) - 1) + [Path.CLOSEPOLY]
     vertices = exterior_coords + [exterior_coords[0]]
@@ -23,7 +35,7 @@ def plot_polygon_with_holes(polygon, **kwargs):
     plt.gca().add_patch(patch)
     
 class FOV2D:
-    def __init__(self, fov_polygon: Polygon, cost:float, bounds_polygon:Polygon=None, focal_point:tuple[float]=(0, 0), color: str = 'blue', rotation: float = 0):
+    def __init__(self, fov_polygon: Polygon, cost:float, bounds_polygon:Polygon=None, focal_point:tuple[float]=(0, 0), color: str = 'purple', rotation: float = 0):
         """
         Initialize a new instance of the class.
         Args:
@@ -35,10 +47,10 @@ class FOV2D:
         """
         self.bounds = bounds_polygon
         self.fov = fov_polygon
-        self.focal_point = focal_point
+        self.focal_point = (0,0)
         self.color = color
         self.rotation = rotation
-        self.translate(*self.focal_point)
+        self.translate(*focal_point)
         self.rotate(self.rotation)
         self.cost=cost
 
@@ -51,9 +63,8 @@ class FOV2D:
         Returns:
             None
         """
-
         x, y = self.fov.exterior.xy
-        plt.plot(x, y, color=self.color)
+        # plt.plot(x, y, color=self.color)
         plt.fill(x, y, alpha=0.5, color=self.color, edgecolor='none')
         if self.bounds is not None:
             bx, by = self.bounds.exterior.xy
@@ -74,7 +85,14 @@ class FOV2D:
         self.fov = shapely.affinity.translate(self.fov, xoff=dx, yoff=dy)
         if self.bounds is not None:
             self.bounds = shapely.affinity.translate(self.bounds, xoff=dx, yoff=dy)
+        self.focal_point = (self.focal_point[0] + dx, self.focal_point[1] + dy)
         return self
+    
+    def set_translation(self, x, y):
+        """Sets the absolute x and y of the focal point of the sensor."""
+        dx = x - self.focal_point[0]
+        dy = y - self.focal_point[1]
+        self.translate(dx, dy)
 
     def rotate(self, angle):
         """Rotates the FOV by the given angle (+ is ccw). Also returns the self (FOV2D object) for quick use."""
@@ -82,7 +100,12 @@ class FOV2D:
         self.fov = shapely.affinity.rotate(self.fov, angle, origin=center, use_radians=False)
         if self.bounds is not None:
             self.bounds = shapely.affinity.rotate(self.bounds, angle, origin=center, use_radians=False)
+        self.rotation = (self.rotation + angle) % 360
         return self
+    
+    def set_rotation(self, angle):
+        """Sets the absolute rotation of the FOV to the given angle."""
+        self.rotate(angle - self.rotation)
     
     def contained_in(self, fov:Polygon):
         """Returns whether or not the sensor is within the given polygon."""
@@ -93,7 +116,7 @@ class FOV2D:
 
 
 class FOV2D_Simple(FOV2D):
-    def __init__(self, hfov: float, distance: float, cost:float, color: str = 'blue', focal_point: tuple[float] = (0, 0), rotation: float = 0, bounds_polygon:Polygon=None):
+    def __init__(self, hfov: float, distance: float, cost:float, color: str = 'purple', focal_point: tuple[float] = (0, 0), rotation: float = 0, bounds_polygon:Polygon=None):
         """
         Initializes the 2D representation of a robot's field of view (FOV).
         Args:
@@ -107,22 +130,47 @@ class FOV2D_Simple(FOV2D):
             fov_polygon (Polygon): The polygon representing the FOV.
         """
 
-        half_angle = np.radians(hfov / 2)
+        self.half_angle = np.radians(hfov / 2)
+        self.dist = distance
         points = [
             (0, 0),  # origin
-            (distance * np.cos(np.pi/2 - half_angle), distance * np.sin(np.pi/2 - half_angle)),  # left edge
-            (distance * np.cos(np.pi/2 + half_angle), distance * np.sin(np.pi/2 + half_angle))  # right edge
+            (distance * np.cos(np.pi/2 - self.half_angle), distance * np.sin(np.pi/2 - self.half_angle)),  # left edge
+            (distance * np.cos(np.pi/2 + self.half_angle), distance * np.sin(np.pi/2 + self.half_angle))  # right edge
         ]
         num_points = 100  # number of points to create the arc
-        angles = np.linspace(-half_angle, half_angle, num_points)
+        angles = np.linspace(-self.half_angle, self.half_angle, num_points)
         arc_points = [(distance * np.cos(angle), distance * np.sin(angle)) for angle in angles]
         fov_points = [points[0]] + arc_points + [points[0]]
         fov_polygon = shapely.affinity.rotate(Polygon(fov_points), 90, (0,0))
         super().__init__(fov_polygon=fov_polygon, cost=cost, focal_point=focal_point, color=color, rotation=rotation, bounds_polygon=bounds_polygon)
+
+    def __eq__(self, other):
+        if not isinstance(other, FOV2D_Simple):
+            return False
+        if self.half_angle != other.half_angle:
+            return False
+        if self.dist != other.dist:
+            return False
+        return True
     
 
 class SimpleBot2d:
-    def __init__(self, shape:shapely.geometry.Polygon, sensor_coverage_requirement, bot_color:str="purple", sensor_pose_constraint=None):
+    def __init__(self, shape:shapely.geometry.Polygon, sensor_coverage_requirement, bot_color:str="blue", sensor_pose_constraint=None):
+        def __init__(self, shape: shapely.geometry.Polygon, sensor_coverage_requirement, bot_color: str = "blue", sensor_pose_constraint=None):
+            """
+            Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
+            Args:
+                shape (shapely.geometry.Polygon): The geometric shape representing the bot.
+                sensor_coverage_requirement (list or shapely.geometry.Polygon): The required sensor coverage areas. If a single polygon is provided, it will be converted to a list.
+                bot_color (str, optional): The color of the bot. Defaults to "blue".
+                sensor_pose_constraint (list or optional): Constraints on the sensor poses. If a single constraint is provided, it will be converted to a list. Defaults to None.
+            Attributes:
+                shape (shapely.geometry.Polygon): The geometric shape representing the bot.
+                color (str): The color of the bot.
+                sensors (list): A list to store sensors associated with the bot.
+                sensor_pose_constraint (list): Constraints on the sensor poses.
+                sensor_coverage_requirement (list): The required sensor coverage areas with the bot's shape removed from each.
+            """
         self.shape = shape
         self.color = bot_color
         self.sensors = []
@@ -136,8 +184,48 @@ class SimpleBot2d:
         else:
             self.sensor_coverage_requirement = sensor_coverage_requirement
 
+        # Remove self.shape from any of the sensor_coverage_requirement shapes
+        self.sensor_coverage_requirement = [
+            req.difference(self.shape) for req in self.sensor_coverage_requirement
+        ]
+
     def add_sensor_2d(self, sensor:FOV2D):
+        """
+        Adds a 2D sensor to the list of sensors.
+        Parameters:
+            sensor (FOV2D): The 2D sensor to be added.
+        """
         self.sensors.append(sensor)
+
+    def add_sensor_valid_pose(self, sensor:FOV2D, max_tries:int=25, verbose=True):
+        """
+        Adds a sensor to a valid location within the defined constraints.
+        This method generates random points within the bounding box of the 
+        sensor pose constraints and translates the sensor to these points. 
+        It checks if the new sensor pose is valid and, if so, adds the sensor 
+        to the list of sensors.
+        Args:
+            sensor (FOV2D): The sensor to be added, which will be translated 
+                    to a valid location within the constraints.
+        """
+        for i in range(max_tries):
+            x, y = pointpats.random.poisson(self.sensor_pose_constraint[0], size=1)
+            rotation = np.degrees(np.arctan2(y, x)) - 90
+
+            sensor.set_translation(x, y)
+            sensor.set_rotation(rotation) #this isn't quite right but good enough
+            
+            if self.is_valid_sensor_pose(sensor):
+                self.sensors.append(sensor)
+                break
+            if i == max_tries and verbose:
+                print(f"Did not find a valid sensor pose in {max_tries} tries. Quitting!")
+        return sensor
+
+    def remove_sensor_by_index(self, index):
+        """Removes a sensor from the sensors list by its index."""
+
+        del self.sensors[index]
 
     def add_sensors_2d(self, sensors:list[FOV2D]):
         for sensor in sensors:
@@ -162,8 +250,24 @@ class SimpleBot2d:
         ax.set_aspect('equal', adjustable='box')
         plt.show()
         return fig
+    
+    def is_valid_sensor_pose(self, sensor:FOV2D, verbose=False):
+        # Check if the sensor is within the sensor pose constraint
+        if not any(constraint.contains(sensor.bounds) for constraint in self.sensor_pose_constraint):
+            if verbose:
+                print(f"A Sensor at {sensor.focal_point} is invalid because it is outside of physical constraints.")
+            return False
 
-    def is_valid(self, verbose=True):
+        # Check if the sensor does not intersect with any existing sensors
+        for existing_sensor in self.sensors:
+            if sensor.bounds.intersects(existing_sensor.bounds):
+                if verbose:
+                    print(f"A Sensor at {sensor.focal_point} is invalid because it intersects with the sensor at {existing_sensor.focal_point}.")
+                return False
+
+        return True
+
+    def is_valid_pkg(self, verbose=True):
         """
         Check if the current configuration of sensors is valid.
         This method performs two checks:
@@ -212,68 +316,6 @@ class SimpleBot2d:
     
     def get_pkg_cost(self):
         return sum(sensor.cost for sensor in self.sensors)
-
-
-#################################
-##  This part doesn't work yet ##
-#################################
-
-import os
-import xml.etree.ElementTree as ET
-from shapely.geometry import Polygon, MultiPolygon
-import matplotlib.pyplot as plt
-
-# Define a dictionary to map package names to their base directories
-package_paths = {
-    'jackal_description': './_datasets/robo_forms/jackal/jackal_description'
-}
-
-def resolve_package_uri(uri):
-    if uri.startswith('package://'):
-        parts = uri.split('/')
-        package_name = parts[2]
-        relative_path = '/'.join(parts[3:])
-        if package_name in package_paths:
-            return os.path.join(package_paths[package_name], relative_path)
-    return uri
-
-def plot_robot_outline_from_urdf(urdf_path):
-    tree = ET.parse(urdf_path)
-    root = tree.getroot()
     
-    polygons = []
-    
-    for link in root.findall('link'):
-        for visual in link.findall('visual'):
-            for geometry in visual.findall('geometry'):
-                for mesh in geometry.findall('mesh'):
-                    filename = mesh.get('filename')
-                    if filename:
-                        # Resolve package:// URI to actual file path
-                        filename = resolve_package_uri(filename)
-                        
-                        # Assuming the mesh file is in STL format and contains 2D coordinates
-                        # You might need to adjust this part based on the actual format and content of your mesh files
-                        with open(filename, 'r') as f:
-                            points = []
-                            for line in f:
-                                if line.startswith('vertex'):
-                                    _, x, y, _ = line.split()
-                                    points.append((float(x), float(y)))
-                            if points:
-                                polygons.append(Polygon(points))
-    
-    if polygons:
-        multi_polygon = MultiPolygon(polygons)
-        x, y = multi_polygon.exterior.xy
-        plt.plot(x, y)
-        plt.fill(x, y, alpha=0.5, fc='r', ec='black')
-        plt.title('2D Top-Down View of Robot Outline')
-        plt.xlabel('X')
-        plt.ylabel('Y')
-        plt.show()
-    else:
-        print("No valid polygons found in the URDF file.")
-
-# Call the function with the URDF file path
-# plot_robot_outline_from_urdf('./_datasets/robo_forms/jackal/jackal_description/urdf/jackal.urdf.xacro')
+    def convert_to_1D():
+        return None
