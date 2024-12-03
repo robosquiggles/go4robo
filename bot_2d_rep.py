@@ -70,7 +70,7 @@ class FOV2D:
             bx, by = self.bounds.exterior.xy
             plt.plot(bx, by, color=self.color)
             plt.fill(bx, by, alpha=0.8, color=self.color, edgecolor='none')
-        plt.scatter(*self.focal_point, color=self.color)  # Add a dot at the focal point
+        plt.scatter(*self.focal_point, color=self.color,marker='.')  # Add a dot at the focal point
         if whole_plot:
             plt.title('Field of View')
             plt.xlabel('Distance (m)')
@@ -246,7 +246,7 @@ class SimpleBot2d:
         for sensor in sensors:
             self.add_sensor_2d(sensor)
 
-    def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True):
+    def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, title=None):
         """
         Plots the robot's shape, sensor constraints, coverage requirements, and sensors on a 2D plot.
         Parameters:
@@ -279,6 +279,8 @@ class SimpleBot2d:
                 sensor.plot_fov(whole_plot=False)
 
         ax.set_aspect('equal', adjustable='box')
+        if title is not None:
+            plt.title(title)
         plt.show()
         return fig
     
