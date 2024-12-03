@@ -129,7 +129,7 @@ class FOV2D_Simple(FOV2D):
         Attributes:
             fov_polygon (Polygon): The polygon representing the FOV.
         """
-
+        self.bounds_polygon_xy = list(bounds_polygon.exterior.coords)
         self.half_angle = np.radians(hfov / 2)
         self.dist = distance
         points = [
@@ -147,30 +147,32 @@ class FOV2D_Simple(FOV2D):
     def __eq__(self, other):
         if not isinstance(other, FOV2D_Simple):
             return False
-        if self.half_angle != other.half_angle:
-            return False
-        if self.dist != other.dist:
-            return False
-        return True
+        return (self.half_angle == other.half_angle and
+                self.dist == other.dist and
+                self.cost == other.cost and
+                self.color == other.color and
+                self.bounds_polygon_xy == other.bounds_polygon_xy)
+
+    def __hash__(self):
+        return hash((self.half_angle, self.dist, self.cost, self.color, self.bounds_polygon))
     
 
 class SimpleBot2d:
     def __init__(self, shape:shapely.geometry.Polygon, sensor_coverage_requirement, bot_color:str="blue", sensor_pose_constraint=None):
-        def __init__(self, shape: shapely.geometry.Polygon, sensor_coverage_requirement, bot_color: str = "blue", sensor_pose_constraint=None):
-            """
-            Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
-            Args:
-                shape (shapely.geometry.Polygon): The geometric shape representing the bot.
-                sensor_coverage_requirement (list or shapely.geometry.Polygon): The required sensor coverage areas. If a single polygon is provided, it will be converted to a list.
-                bot_color (str, optional): The color of the bot. Defaults to "blue".
-                sensor_pose_constraint (list or optional): Constraints on the sensor poses. If a single constraint is provided, it will be converted to a list. Defaults to None.
-            Attributes:
-                shape (shapely.geometry.Polygon): The geometric shape representing the bot.
-                color (str): The color of the bot.
-                sensors (list): A list to store sensors associated with the bot.
-                sensor_pose_constraint (list): Constraints on the sensor poses.
-                sensor_coverage_requirement (list): The required sensor coverage areas with the bot's shape removed from each.
-            """
+        """
+        Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
+        Args:
+            shape (shapely.geometry.Polygon): The geometric shape representing the bot.
+            sensor_coverage_requirement (list or shapely.geometry.Polygon): The required sensor coverage areas. If a single polygon is provided, it will be converted to a list.
+            bot_color (str, optional): The color of the bot. Defaults to "blue".
+            sensor_pose_constraint (list or optional): Constraints on the sensor poses. If a single constraint is provided, it will be converted to a list. Defaults to None.
+        Attributes:
+            shape (shapely.geometry.Polygon): The geometric shape representing the bot.
+            color (str): The color of the bot.
+            sensors (list): A list to store sensors associated with the bot.
+            sensor_pose_constraint (list): Constraints on the sensor poses.
+            sensor_coverage_requirement (list): The required sensor coverage areas with the bot's shape removed from each.
+        """
         self.shape = shape
         self.color = bot_color
         self.sensors = []
@@ -189,15 +191,20 @@ class SimpleBot2d:
             req.difference(self.shape) for req in self.sensor_coverage_requirement
         ]
 
-    def add_sensor_2d(self, sensor:FOV2D):
+    def add_sensor_2d(self, sensor:FOV2D|None):
         """
-        Adds a 2D sensor to the list of sensors.
+        Adds a 2D sensor to the list of sensors. Only adds a sensor if it is not None.
         Parameters:
-            sensor (FOV2D): The 2D sensor to be added.
+            sensor (FOV2D|None): The 2D sensor to be added (or None).
+        Returns:
+            bool: True if the sensor was added successfully, False otherwise.
         """
-        self.sensors.append(sensor)
+        if sensor is not None:
+            self.sensors.append(sensor)
+            return True
+        return False
 
-    def add_sensor_valid_pose(self, sensor:FOV2D, max_tries:int=25, verbose=True):
+    def add_sensor_valid_pose(self, sensor:FOV2D, max_tries:int=25, verbose=False):
         """
         Adds a sensor to a valid location within the defined constraints.
         This method generates random points within the bounding box of the 
@@ -216,7 +223,7 @@ class SimpleBot2d:
             sensor.set_rotation(rotation) #this isn't quite right but good enough
             
             if self.is_valid_sensor_pose(sensor):
-                self.sensors.append(sensor)
+                self.add_sensor_2d(sensor)
                 break
             if i == max_tries and verbose:
                 print(f"Did not find a valid sensor pose in {max_tries} tries. Quitting!")
@@ -224,14 +231,38 @@ class SimpleBot2d:
 
     def remove_sensor_by_index(self, index):
         """Removes a sensor from the sensors list by its index."""
-
         del self.sensors[index]
 
+    def clear_sensors(self):
+        """Removes all sensors from the sensors list."""
+        self.sensors = []
+
     def add_sensors_2d(self, sensors:list[FOV2D]):
+        """
+        Adds a list of 2D sensors to the current object.
+        Args:
+            sensors (list[FOV2D]): A list of FOV2D sensor objects to be added.
+        """
         for sensor in sensors:
-            self.sensors.append(sensor)
+            self.add_sensor_2d(sensor)
 
     def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True):
+        """
+        Plots the robot's shape, sensor constraints, coverage requirements, and sensors on a 2D plot.
+        Parameters:
+        -----------
+        show_constraint : bool, optional
+            If True, plots the sensor pose constraints (default is True).
+        show_coverage_requirement : bool, optional
+            If True, plots the sensor coverage requirements (default is True).
+        show_sensors : bool, optional
+            If True, plots the sensors' fields of view (default is True).
+        Returns:
+        --------
+        fig : matplotlib.figure.Figure
+            The matplotlib figure object containing the plot.
+        """
+
         fig, ax = plt.subplots()
         plot_polygon_with_holes(self.shape, facecolor=self.color, alpha=0.5, edgecolor=self.color)
 
@@ -252,6 +283,19 @@ class SimpleBot2d:
         return fig
     
     def is_valid_sensor_pose(self, sensor:FOV2D, verbose=False):
+        """
+        Verifies if the sensor's position is within the defined 
+        sensor pose constraints and does not intersect with any existing sensors.
+
+        Parameters:
+        sensor (FOV2D): The sensor object whose pose needs to be validated.
+        verbose (bool): If True, prints detailed information about why a sensor 
+                        pose is invalid. Default is False.
+
+        Returns:
+        bool: True if the sensor pose is valid, False otherwise.
+        """
+
         # Check if the sensor is within the sensor pose constraint
         if not any(constraint.contains(sensor.bounds) for constraint in self.sensor_pose_constraint):
             if verbose:
@@ -267,7 +311,7 @@ class SimpleBot2d:
 
         return True
 
-    def is_valid_pkg(self, verbose=True):
+    def is_valid_pkg(self, verbose=False):
         """
         Check if the current configuration of sensors is valid.
         This method performs two checks:
@@ -281,6 +325,8 @@ class SimpleBot2d:
 
         # Check if all sensors are within the sensor pose constraint
         for sensor in self.sensors:
+            if verbose:
+                print("Checking validity of", sensor, " in ", self.sensor_pose_constraint)
             if not any(constraint.contains(sensor.bounds) for constraint in self.sensor_pose_constraint):
                 valid = False
                 if verbose:
@@ -297,17 +343,26 @@ class SimpleBot2d:
                     break
             if not valid:
                 break
-        if valid:
+        if valid and verbose:
             print("Bot Sensor Package is Valid!") 
         return valid
     
     def get_sensor_coverage(self):
+        """
+        Calculate the coverage percentage of the sensors based on the required coverage area.
+        This method computes the total area covered by all sensors and compares it to the required 
+        coverage area. It returns the ratio of the covered area to the required area as a percentage.
+        Returns:
+            float: The coverage percentage of the sensors. Returns 0.0 if there is no coverage requirement.
+        """
+
         if not self.sensor_coverage_requirement:
             return 0.0
 
         total_coverage = shapely.geometry.Polygon()
         for sensor in self.sensors:
-            total_coverage = total_coverage.union(sensor.fov)
+            if sensor is not None:
+                total_coverage = total_coverage.union(sensor.fov)
         total_coverage = total_coverage.intersection(self.sensor_coverage_requirement[0])
         coverage_area = total_coverage.area
         requirement_area = self.sensor_coverage_requirement[0].area
@@ -315,7 +370,7 @@ class SimpleBot2d:
         return (coverage_area / requirement_area)
     
     def get_pkg_cost(self):
-        return sum(sensor.cost for sensor in self.sensors)
+        return sum([sensor.cost for sensor in self.sensors if sensor is not None])
     
     def convert_to_1D():
         return None
