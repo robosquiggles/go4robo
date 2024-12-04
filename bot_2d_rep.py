@@ -9,12 +9,15 @@ from matplotlib.patches import PathPatch
 import matplotlib.pyplot as plt
 import numpy as np
 import random
+from scipy.optimize import minimize as scipy_minimize
+from scipy.optimize import Bounds
 
-def plot_polygon_with_holes(polygon, **kwargs):
+def plot_polygon_with_holes(polygon, ax=None, **kwargs):
     """
     Plots a polygon with holes using Matplotlib.
     Parameters:
         polygon (shapely.geometry.Polygon): The polygon to be plotted, which may contain holes.
+        ax (matplotlib.axes.Axes, optional): The axes on which to plot. If None, plots on the current axes.
         **kwargs: Additional keyword arguments to be passed to the PathPatch constructor.
     Returns:
         None
@@ -32,7 +35,11 @@ def plot_polygon_with_holes(polygon, **kwargs):
     
     path = Path(vertices, codes)
     patch = PathPatch(path, **kwargs)
-    plt.gca().add_patch(patch)
+    
+    if ax is None:
+        ax = plt.gca()
+    
+    ax.add_patch(patch)
     
 class FOV2D:
     def __init__(self, fov_polygon: Polygon, cost:float, bounds_polygon:Polygon=None, focal_point:tuple[float]=(0, 0), color: str = 'purple', rotation: float = 0):
@@ -54,29 +61,32 @@ class FOV2D:
         self.rotate(self.rotation)
         self.cost=cost
 
-    def plot_fov(self, whole_plot=False, show=False) -> bool:
+    def plot_fov(self, whole_plot=False, show=False, ax=None) -> bool:
         """
         Plots the field of view (FOV) of the object.
         Parameters:
             whole_plot (bool): If True, adds title, labels, grid, and sets axis to equal. Default is False.
             show (bool): If True, displays the plot. Default is False.
+            ax (matplotlib.axes.Axes, optional): The axes on which to plot. If None, plots on the current axes.
         Returns:
             None
         """
+        if ax is None:
+            ax = plt.gca()
+
         x, y = self.fov.exterior.xy
-        # plt.plot(x, y, color=self.color)
-        plt.fill(x, y, alpha=0.5, color=self.color, edgecolor='none')
+        ax.fill(x, y, alpha=0.5, color=self.color, edgecolor='none')
         if self.bounds is not None:
             bx, by = self.bounds.exterior.xy
-            plt.plot(bx, by, color=self.color)
-            plt.fill(bx, by, alpha=0.8, color=self.color, edgecolor='none')
-        plt.scatter(*self.focal_point, color=self.color,marker='.')  # Add a dot at the focal point
+            ax.plot(bx, by, color=self.color)
+            ax.fill(bx, by, alpha=0.8, color=self.color, edgecolor='none')
+        ax.scatter(*self.focal_point, color=self.color, marker='.')  # Add a dot at the focal point
         if whole_plot:
-            plt.title('Field of View')
-            plt.xlabel('Distance (m)')
-            plt.ylabel('Distance (m)')
-            plt.grid(True)
-            plt.axis('equal')
+            ax.set_title('Field of View')
+            ax.set_xlabel('Distance (m)')
+            ax.set_ylabel('Distance (m)')
+            ax.grid(True)
+            ax.set_aspect('equal', adjustable='box')
         if show:
             plt.show()
 
@@ -246,7 +256,7 @@ class SimpleBot2d:
         for sensor in sensors:
             self.add_sensor_2d(sensor)
 
-    def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, title=None):
+    def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, title=None, ax=None):
         """
         Plots the robot's shape, sensor constraints, coverage requirements, and sensors on a 2D plot.
         Parameters:
@@ -257,31 +267,42 @@ class SimpleBot2d:
             If True, plots the sensor coverage requirements (default is True).
         show_sensors : bool, optional
             If True, plots the sensors' fields of view (default is True).
+        title : str, optional
+            The title of the plot (default is None).
+        ax : matplotlib.axes.Axes, optional
+            The axes on which to plot. If None, a new figure and axes are created (default is None).
         Returns:
         --------
         fig : matplotlib.figure.Figure
             The matplotlib figure object containing the plot.
         """
 
-        fig, ax = plt.subplots()
-        plot_polygon_with_holes(self.shape, facecolor=self.color, alpha=0.5, edgecolor=self.color)
+        if ax is None:
+            fig, ax = plt.subplots()
+        else:
+            fig = ax.figure
+
+        plot_polygon_with_holes(self.shape, ax=ax, facecolor=self.color, alpha=0.5, edgecolor=self.color)
 
         if show_constraint and self.sensor_pose_constraint:
             for constraint in self.sensor_pose_constraint:
-                plot_polygon_with_holes(constraint, facecolor='green', alpha=0.25)
+                plot_polygon_with_holes(constraint, ax=ax, facecolor='green', alpha=0.25)
         
         if show_coverage_requirement and self.sensor_coverage_requirement:
             for requirement in self.sensor_coverage_requirement:
-                plot_polygon_with_holes(requirement, facecolor='none', edgecolor='black', linestyle='dotted')
+                plot_polygon_with_holes(requirement, ax=ax, facecolor='none', edgecolor='black', linestyle='dotted')
         
         if show_sensors and self.sensors:
             for sensor in self.sensors:
-                sensor.plot_fov(whole_plot=False)
+                sensor.plot_fov(whole_plot=False, ax=ax)
 
         ax.set_aspect('equal', adjustable='box')
         if title is not None:
-            plt.title(title)
-        plt.show()
+            ax.set_title(title)
+        
+        if ax is None:
+            plt.show()
+        
         return fig
     
     def is_valid_sensor_pose(self, sensor:FOV2D, verbose=False):
@@ -374,5 +395,95 @@ class SimpleBot2d:
     def get_pkg_cost(self):
         return sum([sensor.cost for sensor in self.sensors if sensor is not None])
     
-    def convert_to_1D():
-        return None
+    def optimize_sensor_placement(self, plot=False):
+        def objective(params):
+            """
+            Objective function to minimize (negative coverage).
+            Args:
+                params (list): List of parameters [x1, y1, rotation1, x2, y2, rotation2, ...].
+            Returns:
+                float: Negative of the sensor coverage.
+            """
+            for i, sensor in enumerate(self.sensors):
+                x, y, rotation = params[i*3:(i+1)*3]
+                sensor.set_translation(x, y)
+                sensor.set_rotation(rotation)
+            return -self.get_sensor_coverage()
+        
+        def constraint_ineq(params):
+            """
+            Adjusts the translation and rotation of each sensor based on the provided parameters
+            and checks if the package configuration is valid.
+            Args:
+                params (list): A list of parameters where each set of three consecutive values
+                               represents the x, y translation and rotation for a sensor.
+            Returns:
+                int: Returns 0 if the package configuration is valid, otherwise returns 1.
+            """
+            for i, sensor in enumerate(self.sensors):
+                x, y, rotation = params[i*3:(i+1)*3]
+                sensor.set_translation(x, y)
+                sensor.set_rotation(rotation)
+            validity = self.is_valid_pkg()
+            print("Params:", params)
+            print(" Validity:", validity)
+            return 1 if validity else -1
+
+        def optimize_coverage():
+            """
+            Optimize the placement of sensors using gradient descent to maximize coverage.
+            Args:
+                method (str): Optimization method to use. Default is "scipy_gradient_descent".
+            """
+            initial_params = []
+            x_bounds = []
+            y_bounds = []
+            for bounds_polygon in self.sensor_pose_constraint:
+                x_bounds.append((bounds_polygon.bounds[0], bounds_polygon.bounds[2]))
+                y_bounds.append((bounds_polygon.bounds[1], bounds_polygon.bounds[3]))
+            lb = (min(x[0] for x in x_bounds), min(y[0] for y in y_bounds), 0)
+            ub = (max(x[1] for x in x_bounds), max(y[1] for y in y_bounds), 360)
+            bounds = Bounds(lb=[lb[0], lb[1], lb[2]] * len(self.sensors), ub=[ub[0], ub[1], ub[2]] * len(self.sensors))
+
+            print("Bounds:", bounds)
+            for sensor in self.sensors:
+                initial_params.extend([sensor.focal_point[0], sensor.focal_point[1], sensor.rotation])
+            print("Initial Params:", initial_params)
+
+            constraints = ({'type': 'ineq', 'fun': constraint_ineq})
+
+            result = scipy_minimize(objective, initial_params, method='SLSQP', bounds=bounds, constraints=constraints)
+            optimized_params = result.x
+
+            print("Optimized Params:", optimized_params)
+
+            for i, sensor in enumerate(self.sensors):
+                x, y, rotation = optimized_params[i*3:(i+1)*3]
+                sensor.set_translation(x, y)
+                sensor.set_rotation(rotation)
+
+            return (result.fun, result.x)
+        
+        def plot_convergence(results):
+            """
+            Plots the convergence of the sensor coverage over time.
+            Args:
+                results (list): List of tuples containing (result.fun, result.x).
+            """
+            iterations = list(range(len(results)))
+            coverages = [-result[0] for result in results]  # Negate because we minimized negative coverage
+
+            plt.figure()
+            plt.plot(iterations, coverages, marker='o')
+            plt.xlabel('Iteration')
+            plt.ylabel('Sensor Coverage')
+            plt.title('Convergence of Sensor Coverage Over Time')
+            plt.grid(True)
+            plt.show()
+            
+
+        results_v_time = optimize_coverage()
+        if plot:
+            plot_convergence(results_v_time)
+
+        return results_v_time[-1]

@@ -178,7 +178,6 @@ class SensorPkgOptimization(ElementwiseProblem):
         bot.add_sensors_2d([self.convert_1D_to_sensor(x, i) for i, x in enumerate(xs)])
         return bot
 
-        
 
     def _evaluate(self, x, out, *args, **kwargs):
         # print("In EVALUATE, eavulating:", x)
