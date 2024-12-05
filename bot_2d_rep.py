@@ -550,10 +550,17 @@ class SimpleBot2d:
             """
             iterations = list(range(len(results["fun"])))
             coverages = -1 * np.array(results["fun"])
-            colors = ['green' if v==0 else 'red' for v in results["validity"]]
+            colors = ['teal' if v==0 else 'orange' for v in results["validity"]]
+            labels = ['Valid' if v==0 else 'Invalid' for v in results["validity"]]
 
-            for i, coverage in enumerate(coverages):
-                plt.scatter(iterations[i], coverage, color=colors[i], marker='.')
+            unique_labels = list(set(labels))
+            for label in unique_labels:
+                label_indices = [i for i, lbl in enumerate(labels) if lbl == label]
+                plt.scatter([iterations[i] for i in label_indices], 
+                            [coverages[i] for i in label_indices], 
+                            color=colors[label_indices[0]], 
+                            marker='.', 
+                            label=label)
             if best_valid_iter is not None:
                 plt.scatter(best_valid_iter, coverages[best_valid_iter], color='blue', s=80, facecolors='none', edgecolors='blue', label="Best Valid")
             plt.xlabel('Optimization Iteration')
@@ -565,7 +572,7 @@ class SimpleBot2d:
             if ax is None:
                 plt.show()
 
-        def animate_optimization(results: dict, interval: int = 250):
+        def animate_optimization(results: dict, interval: int = 100):
             """
             Animates the optimization process by plotting the bot at each iteration.
             Args:
