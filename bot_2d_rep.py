@@ -6,11 +6,14 @@ import pointpats
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 
+import copy
+
 import matplotlib.pyplot as plt
 import numpy as np
 import random
 from scipy.optimize import minimize as scipy_minimize
-from scipy.optimize import Bounds
+from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
+from matplotlib.animation import FuncAnimation
 
 def plot_polygon_with_holes(polygon, ax=None, **kwargs):
     """
@@ -333,6 +336,34 @@ class SimpleBot2d:
                 return False
 
         return True
+    
+    def get_package_validity(self, verbose=False):
+        """
+        Check how valid the current configuration of sensors is. Validity is a 
+        measure of how much of the sensor body IS within the sensor pose constraints, 
+        and how much of the sensor body IS NOT intersecting with other sensors.
+        
+        Returns:
+            float: A value between -2 and 0 representing the validity of the sensor
+              package, where -2 is completely invalid (all sensors intersecting and
+              outside of the bounds) and 0 is completely valid (all sensors inside
+              the bounds and none intersecting).
+        """
+        total_sensor_area = sum(sensor.bounds.area for sensor in self.sensors if sensor is not None)
+        total_sensor_area_invalid = sum(sensor.bounds.difference(constraint).area for sensor in self.sensors for constraint in self.sensor_pose_constraint if sensor is not None)
+        total_intersection_area = 0.0
+        for i, sensor1 in enumerate(self.sensors):
+            for j, sensor2 in enumerate(self.sensors):
+                if i != j and sensor1.bounds.intersects(sensor2.bounds):
+                    intersection_area = sensor1.bounds.intersection(sensor2.bounds).area
+                    total_intersection_area += intersection_area
+        
+        if verbose:
+            print("Total Sensor Area:", total_sensor_area)
+            print("Total Sensor Area Invalid:", total_sensor_area_invalid)
+            print("Total Intersection Area:", total_intersection_area)
+
+        return -(total_sensor_area_invalid + total_intersection_area) / total_sensor_area
 
     def is_valid_pkg(self, verbose=False):
         """
@@ -395,7 +426,46 @@ class SimpleBot2d:
     def get_pkg_cost(self):
         return sum([sensor.cost for sensor in self.sensors if sensor is not None])
     
-    def optimize_sensor_placement(self, plot=False):
+    def optimize_sensor_placement(self, method='trust-constr', plot=False, ax=None, animate=False, verbose=False):
+
+        results_hist = {"fun":[],
+                        "x":[],
+                        "validity":[]}
+        
+        # Get the bounds of the perception area for normalization
+        largest_dimension = max(*[sr.bounds[i] for sr in self.sensor_coverage_requirement for i in range(4)])
+        print("Largest Dimension:", largest_dimension)
+        unnorm_bounds = Bounds(lb=[-largest_dimension, -largest_dimension, 0] * len(self.sensors), ub=[largest_dimension, largest_dimension, 360] * len(self.sensors))
+        print("Un-normalized Bounds:", unnorm_bounds)
+        
+        def normalize(params):
+            """
+            Normalize the parameters to the range [0, 1].
+            Args:
+                params (list): List of parameters [x1, y1, rotation1, x2, y2, rotation2, ...].
+            Returns:
+                list: Normalized parameters.
+            """
+            lb, ub = unnorm_bounds.lb, unnorm_bounds.ub
+            return [(p - l) / (u - l) for p, l, u in zip(params, lb, ub)]
+
+        def denormalize(params):
+            """
+            Denormalize the parameters from the range [0, 1] to their original scale.
+            Args:
+                params (list): List of normalized parameters [x1, y1, rotation1, x2, y2, rotation2, ...].
+            Returns:
+                list: Denormalized parameters.
+            """
+            lb, ub = unnorm_bounds.lb, unnorm_bounds.ub
+            return [p * (u - l) + l for p, l, u in zip(params, lb, ub)]
+        
+        def update_sensors_from_normalized_params(params):
+            for i, sensor in enumerate(self.sensors):
+                x, y, rotation = denormalize(params)[i*3:(i+1)*3]
+                sensor.set_translation(x, y)
+                sensor.set_rotation(rotation)
+
         def objective(params):
             """
             Objective function to minimize (negative coverage).
@@ -404,10 +474,9 @@ class SimpleBot2d:
             Returns:
                 float: Negative of the sensor coverage.
             """
-            for i, sensor in enumerate(self.sensors):
-                x, y, rotation = params[i*3:(i+1)*3]
-                sensor.set_translation(x, y)
-                sensor.set_rotation(rotation)
+            update_sensors_from_normalized_params(params)
+            if verbose:
+                print(" Objective:", -self.get_sensor_coverage())
             return -self.get_sensor_coverage()
         
         def constraint_ineq(params):
@@ -418,16 +487,27 @@ class SimpleBot2d:
                 params (list): A list of parameters where each set of three consecutive values
                                represents the x, y translation and rotation for a sensor.
             Returns:
-                int: Returns 0 if the package configuration is valid, otherwise returns 1.
+                int: Returns 1 if the package configuration is valid, otherwise returns -1.
             """
-            for i, sensor in enumerate(self.sensors):
-                x, y, rotation = params[i*3:(i+1)*3]
-                sensor.set_translation(x, y)
-                sensor.set_rotation(rotation)
-            validity = self.is_valid_pkg()
-            print("Params:", params)
-            print(" Validity:", validity)
-            return 1 if validity else -1
+            update_sensors_from_normalized_params(params)
+            validity = self.get_package_validity()
+            if verbose:
+                print(" Constraint:", validity)
+            return validity
+        
+        def track_history(intermediate_result:OptimizeResult|np.ndarray):
+            """
+            Tracks the history of the optimization process.
+            Args:
+                xk (list): The current set of parameters.
+            """
+            if isinstance(intermediate_result, np.ndarray):
+                intermediate_result = OptimizeResult({'fun': -self.get_sensor_coverage(), 'x': intermediate_result})
+            if verbose:
+                print(" Callback (norm):", intermediate_result)
+            results_hist["fun"].append(intermediate_result.fun)
+            results_hist["x"].append(intermediate_result.x)
+            results_hist["validity"].append(self.get_package_validity())
 
         def optimize_coverage():
             """
@@ -435,55 +515,110 @@ class SimpleBot2d:
             Args:
                 method (str): Optimization method to use. Default is "scipy_gradient_descent".
             """
-            initial_params = []
-            x_bounds = []
-            y_bounds = []
-            for bounds_polygon in self.sensor_pose_constraint:
-                x_bounds.append((bounds_polygon.bounds[0], bounds_polygon.bounds[2]))
-                y_bounds.append((bounds_polygon.bounds[1], bounds_polygon.bounds[3]))
-            lb = (min(x[0] for x in x_bounds), min(y[0] for y in y_bounds), 0)
-            ub = (max(x[1] for x in x_bounds), max(y[1] for y in y_bounds), 360)
-            bounds = Bounds(lb=[lb[0], lb[1], lb[2]] * len(self.sensors), ub=[ub[0], ub[1], ub[2]] * len(self.sensors))
 
-            print("Bounds:", bounds)
+            #PARAMS: x, y, rotation  <-- NORMALIZE
+            initial_params = []
             for sensor in self.sensors:
                 initial_params.extend([sensor.focal_point[0], sensor.focal_point[1], sensor.rotation])
-            print("Initial Params:", initial_params)
+            initial_params = normalize(initial_params)
+            
+            if verbose:
+                print("================== STARTING OPTIMIZATION ==================")
+                print("Initial Params:", initial_params)
 
-            constraints = ({'type': 'ineq', 'fun': constraint_ineq})
-
-            result = scipy_minimize(objective, initial_params, method='SLSQP', bounds=bounds, constraints=constraints)
+            #CONSTRAINTS
+            constraints = [NonlinearConstraint(constraint_ineq, 0, np.inf)]
+            
+            #RESULTS HISTORY
+            results_hist["fun"] = [-self.get_sensor_coverage()]
+            results_hist["x"] = [initial_params]
+            results_hist["validity"] = [0]
+            
+            #OPTIMIZE!
+            result = scipy_minimize(objective, initial_params, method=method, constraints=constraints, callback=track_history)
             optimized_params = result.x
 
-            print("Optimized Params:", optimized_params)
-
-            for i, sensor in enumerate(self.sensors):
-                x, y, rotation = optimized_params[i*3:(i+1)*3]
-                sensor.set_translation(x, y)
-                sensor.set_rotation(rotation)
-
-            return (result.fun, result.x)
+            if verbose:
+                print("Optimized Params (denorm):", denormalize(optimized_params))
+                print("Optimized Coverage:", -result.fun)
         
-        def plot_convergence(results):
+        def plot_coverage_optimization(results:dict, best_valid_iter=None, ax=None):
             """
             Plots the convergence of the sensor coverage over time.
             Args:
-                results (list): List of tuples containing (result.fun, result.x).
+                results (dict): List of tuples containing result.fun.
             """
-            iterations = list(range(len(results)))
-            coverages = [-result[0] for result in results]  # Negate because we minimized negative coverage
+            iterations = list(range(len(results["fun"])))
+            coverages = -1 * np.array(results["fun"])
+            colors = ['green' if v==0 else 'red' for v in results["validity"]]
 
-            plt.figure()
-            plt.plot(iterations, coverages, marker='o')
-            plt.xlabel('Iteration')
+            for i, coverage in enumerate(coverages):
+                plt.scatter(iterations[i], coverage, color=colors[i], marker='.')
+            if best_valid_iter is not None:
+                plt.scatter(best_valid_iter, coverages[best_valid_iter], color='blue', s=80, facecolors='none', edgecolors='blue', label="Best Valid")
+            plt.xlabel('Optimization Iteration')
             plt.ylabel('Sensor Coverage')
             plt.title('Convergence of Sensor Coverage Over Time')
+            plt.legend()
             plt.grid(True)
-            plt.show()
+
+            if ax is None:
+                plt.show()
+
+        def animate_optimization(results: dict, interval: int = 250):
+            """
+            Animates the optimization process by plotting the bot at each iteration.
+            Args:
+            results (dict): Dictionary containing the optimization history.
+            interval (int): Time interval between frames in milliseconds.
+            """
+
+            fig, ax = plt.subplots()
+            bot_copy = copy.deepcopy(self)
+
+            def update(frame):
+                ax.clear()
+                params = results["x"][frame]
+                for i, sensor in enumerate(bot_copy.sensors):
+                    x, y, rotation = denormalize(params)[i*3:(i+1)*3]
+                    sensor.set_translation(x, y)
+                    sensor.set_rotation(rotation)
+                bot_copy.plot_bot(ax=ax)
+                ax.set_title(f"Optimization Iteration {frame}\nCoverage: {-results['fun'][frame]*100:.2f}%\nValidity: {results['validity'][frame]:.5f}", loc='left')
+
+            ani = FuncAnimation(fig, update, frames=len(results["x"]), interval=interval, repeat=False)
+            return ani
             
+        optimize_coverage()
 
-        results_v_time = optimize_coverage()
+        # Find the best valid point from the optimization history
+        best_valid_iter = None
+        best_valid_coverage = -np.inf
+
+        for i, v in enumerate(results_hist["validity"]):
+            obj = - results_hist["fun"][i]
+            if v==0 and obj > best_valid_coverage:
+                best_valid_coverage = obj
+                best_valid_iter = i
+
+        if best_valid_iter is not None:
+            best_params = results_hist["x"][best_valid_iter]
+            update_sensors_from_normalized_params(best_params)
+            if verbose:
+                print("Best Valid Iteration:", best_valid_iter)
+                print("Best Valid Coverage:", best_valid_coverage)
+                print("Best Valid Params (denorm):", denormalize(best_params))
+        else:
+            if verbose:
+                print("No valid configuration found in the optimization history, using original.")
+
         if plot:
-            plot_convergence(results_v_time)
-
-        return results_v_time[-1]
+            if ax is None:
+                fig, ax = plt.subplots()
+            else:
+                fig = ax.figure
+            plot_coverage_optimization(results_hist, best_valid_iter=best_valid_iter, ax=ax)
+        
+        if animate:
+            ani = animate_optimization(results_hist)
+            return ani
