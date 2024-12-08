@@ -1,6 +1,10 @@
 from bot_2d_rep import *
 
 import numpy as np
+import pandas as pd
+
+import plotly.express as px
+
 import copy
 
 from pymoo.core.problem import ElementwiseProblem, Problem
@@ -221,3 +225,41 @@ class CustomSensorPkgRandomSampling(Sampling):
         # print("Sampled X shape:", X.shape)
         return X
         
+
+def plot_tradespace(combined_df:pd.DataFrame, num_results, show=False, panzoom=False):
+    
+    fig = px.scatter(combined_df, x='Cost', y='Perception Coverage', color='Optimized', color_discrete_sequence=['orange', 'teal'], opacity=0.5,
+                 title=f"Objective Space (best of {num_results} concepts)", 
+                 template="plotly_white", 
+                 labels={'Cost': 'Cost ($)', 'Perception Coverage': 'Perception Coverage (%)'},
+                 hover_name='Name',
+                 hover_data=['Cost', 'Perception Coverage'])
+
+    fig.add_scatter(x=[0], 
+                    y=[100], 
+                    mode='markers', 
+                    marker=dict(symbol='star', size=12, color='gold'), 
+                    name='Ideal')
+    
+    if not panzoom:
+        fig.update_layout(
+            xaxis=dict(fixedrange=True),
+            yaxis=dict(fixedrange=True)
+        )
+    
+    fig.update_layout(
+        hovermode='x unified',
+        height=600, width=600,
+        legend=dict(
+            # orientation="h",
+            yanchor="bottom",
+            y=0,
+            xanchor="right",
+            x=1
+        ),
+        yaxis=dict(range=[0, 1])
+    )
+    if show:
+        fig.show()
+    
+    return fig

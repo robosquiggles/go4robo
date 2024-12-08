@@ -5,6 +5,7 @@ import pointpats
 
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
+import plotly.graph_objects as go
 
 import copy
 
@@ -295,11 +296,20 @@ class SimpleBot2d:
             for requirement in self.sensor_coverage_requirement:
                 plot_polygon_with_holes(requirement, ax=ax, facecolor='none', edgecolor='black', linestyle='dotted')
         
-        if show_sensors and self.sensors:
+        if show_sensors and len(self.sensors)>0:
             for sensor in self.sensors:
                 sensor.plot_fov(whole_plot=False, ax=ax)
 
+        # Set the bounds to just beyond the bounds of any of the shapes in the plot
+        all_shapes = [self.shape] + self.sensor_pose_constraint + self.sensor_coverage_requirement + [sensor.fov for sensor in self.sensors]
+        min_x = min(shape.bounds[0] for shape in all_shapes)
+        min_y = min(shape.bounds[1] for shape in all_shapes)
+        max_x = max(shape.bounds[2] for shape in all_shapes)
+        max_y = max(shape.bounds[3] for shape in all_shapes)
+        ax.set_xlim(min_x - 1, max_x + 1)
+        ax.set_ylim(min_y - 1, max_y + 1)
         ax.set_aspect('equal', adjustable='box')
+
         if title is not None:
             ax.set_title(title)
         
@@ -349,6 +359,8 @@ class SimpleBot2d:
               outside of the bounds) and 0 is completely valid (all sensors inside
               the bounds and none intersecting).
         """
+        if not self.sensors or len(self.sensors) == 0:
+            return 0
         total_sensor_area = sum(sensor.bounds.area for sensor in self.sensors if sensor is not None)
         total_sensor_area_invalid = sum(sensor.bounds.difference(constraint).area for sensor in self.sensors for constraint in self.sensor_pose_constraint if sensor is not None)
         total_intersection_area = 0.0
@@ -550,29 +562,45 @@ class SimpleBot2d:
             """
             iterations = list(range(len(results["fun"])))
             coverages = -1 * np.array(results["fun"])
-            colors = ['teal' if v==0 else 'orange' for v in results["validity"]]
             labels = ['Valid' if v==0 else 'Invalid' for v in results["validity"]]
 
             unique_labels = list(set(labels))
+
+            fig = go.Figure()
+
             for label in unique_labels:
                 label_indices = [i for i, lbl in enumerate(labels) if lbl == label]
-                plt.scatter([iterations[i] for i in label_indices], 
-                            [coverages[i] for i in label_indices], 
-                            color=colors[label_indices[0]], 
-                            marker='.', 
-                            label=label)
+                fig.add_trace(go.Scatter(
+                    x=[iterations[i] for i in label_indices],
+                    y=[coverages[i] for i in label_indices],
+                    mode='markers',
+                    marker=dict(color='teal' if label == 'Valid' else 'orange'),
+                    name=label
+                ))
+
             if best_valid_iter is not None:
-                plt.scatter(best_valid_iter, coverages[best_valid_iter], color='blue', s=80, facecolors='none', edgecolors='blue', label="Best Valid")
-            plt.xlabel('Optimization Iteration')
-            plt.ylabel('Sensor Coverage')
-            plt.title('Convergence of Sensor Coverage Over Time')
-            plt.legend()
-            plt.grid(True)
+                fig.add_trace(go.Scatter(
+                    x=[best_valid_iter],
+                    y=[coverages[best_valid_iter]],
+                    mode='markers',
+                    marker=dict(color='blue', size=12, symbol='circle-open'),
+                    name='Best Valid'
+                ))
+
+            fig.update_layout(
+                title='Convergence of Sensor Coverage Over Time',
+                xaxis_title='Optimization Iteration',
+                yaxis_title='Sensor Coverage',
+                legend_title='Legend',
+                template='plotly_white'
+            )
 
             if ax is None:
-                plt.show()
+                fig.show()
+            
+            return fig
 
-        def animate_optimization(results: dict, interval: int = 100):
+        def animate_optimization(results:dict, interval:int=100):
             """
             Animates the optimization process by plotting the bot at each iteration.
             Args:
@@ -595,8 +623,11 @@ class SimpleBot2d:
 
             ani = FuncAnimation(fig, update, frames=len(results["x"]), interval=interval, repeat=False)
             return ani
-            
-        optimize_coverage()
+        
+        if not self.sensors or self.get_sensor_coverage() == 1.0:
+            print("No sensors to optimize or already optimal coverage.")
+        else:
+            optimize_coverage()
 
         # Find the best valid point from the optimization history
         best_valid_iter = None
@@ -629,3 +660,5 @@ class SimpleBot2d:
         if animate:
             ani = animate_optimization(results_hist)
             return ani
+        
+        return results_hist
