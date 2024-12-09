@@ -1,5 +1,5 @@
 import shapely
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPolygon, LineString, Point
 
 import pointpats
 
@@ -46,7 +46,14 @@ def plot_polygon_with_holes(polygon, ax=None, **kwargs):
     ax.add_patch(patch)
     
 class FOV2D:
-    def __init__(self, fov_polygon: Polygon, cost:float, bounds_polygon:Polygon=None, focal_point:tuple[float]=(0, 0), color: str = 'purple', rotation: float = 0):
+    def __init__(self, 
+                 fov_polygon: Polygon, 
+                 cost:float, 
+                 bounds_polygon:Polygon=None, 
+                 focal_point:tuple[float]=(0, 0), 
+                 color: str = 'purple', 
+                 rotation: float = 0, 
+                 name=None):
         """
         Initialize a new instance of the class.
         Args:
@@ -59,13 +66,15 @@ class FOV2D:
         self.bounds = bounds_polygon
         self.fov = fov_polygon
         self.focal_point = (0,0)
+        self.extent = max(Point(self.focal_point).distance(Point(coord)) for coord in self.fov.exterior.coords)
         self.color = color
         self.rotation = rotation
         self.translate(*focal_point)
         self.rotate(self.rotation)
         self.cost=cost
+        self.name=name
 
-    def plot_fov(self, whole_plot=False, show=False, ax=None) -> bool:
+    def plot_fov(self, whole_plot=False, show=False, obstacles=None, ax=None) -> bool:
         """
         Plots the field of view (FOV) of the object.
         Parameters:
@@ -78,8 +87,19 @@ class FOV2D:
         if ax is None:
             ax = plt.gca()
 
-        x, y = self.fov.exterior.xy
-        ax.fill(x, y, alpha=0.5, color=self.color, edgecolor='none')
+        if obstacles is None:
+            fov = self.fov
+        else:
+            fov = self.get_occluded_fov(obstacles, plot_ax=ax)
+
+        if isinstance(fov, MultiPolygon):
+            for f in fov.geoms:
+                x, y = f.exterior.xy
+                ax.fill(x, y, alpha=0.5, color=self.color, edgecolor='none')
+        else:
+            x, y = fov.exterior.xy
+            ax.fill(x, y, alpha=0.5, color=self.color, edgecolor='none')
+
         if self.bounds is not None:
             bx, by = self.bounds.exterior.xy
             ax.plot(bx, by, color=self.color)
@@ -127,10 +147,95 @@ class FOV2D:
             return fov.contains(shapely.geometry.Point(self.focal_point)) and fov.contains(self.bounds)
         else:
             return fov.contains(shapely.geometry.Point(self.focal_point))
+        
+    def get_occluded_fov(self, obstacles:Polygon|MultiPolygon, plot_ax=None):
+        """
+        Calculate the occluded field of view by performing ray casting from the focal point.
+        
+        Args:
+            obstacles (Polygon or MultiPolygon): The obstacles to ray trace against.
+        
+        Returns:
+            Polygon: The occluded field of view.
+        """
+        def get_occlusion_edge(point):
+            dx = point[0] - self.focal_point[0]
+            dy = point[1] - self.focal_point[1]
+            length = np.hypot(dx, dy)
+            dx /= length
+            dy /= length
+            angle = np.arctan2(dy, dx)
+            # Extend the point along this vector to reach the extent of self.fov
+            far_point = (
+                point[0] + dx * self.extent,
+                point[1] + dy * self.extent
+            )
+            return (point, far_point), angle
+
+        if isinstance(obstacles, Polygon):
+            obstacle_list = [obstacles]
+        elif isinstance(obstacles, MultiPolygon):
+            obstacle_list = list(obstacles.geoms)
+        elif obstacles is None:
+            return self.fov
+        else:
+            raise TypeError("Obstacles must be a Polygon, MultiPolygon, or None.")
+        
+        occluded_fov = copy.deepcopy(self.fov).difference(obstacles)
+
+        for obstacle in obstacle_list:
+            # Cast lines from the focal point that are tangent to each side of the obstacles
+            coords = list(obstacle.exterior.coords[:-1])
+            angles_points = []
+            for point in coords:
+                dx = point[0] - self.focal_point[0]
+                dy = point[1] - self.focal_point[1]
+                angle = np.arctan2(dy, dx)
+                angles_points.append((angle, point))
+            angles_points.sort()
+            min_angle_point = angles_points[0][1]
+            max_angle_point = angles_points[-1][1]
+
+            # Get the occlusion edges for the min and max angle points
+            min_edge, min_angle = get_occlusion_edge(min_angle_point)
+            max_edge, max_angle = get_occlusion_edge(max_angle_point)
+
+            angles = np.linspace(min_angle, max_angle, 50)
+            arc_points = [(self.distance[1] * np.cos(angle), self.distance[1] * np.sin(angle)) for angle in angles]
+
+            # if plot_ax is not None:
+            #     plot_ax.plot([min_edge[0][0], min_edge[1][0]], [min_edge[0][1], min_edge[1][1]], 'r-')
+            #     plot_ax.plot([max_edge[0][0], max_edge[1][0]], [max_edge[0][1], max_edge[1][1]], 'r-')
+
+            occlusion_polygon = Polygon([min_edge[0], min_edge[1], *arc_points, max_edge[1], max_edge[0]])
+            
+            if not occlusion_polygon.is_valid:
+                # print("Invalid occlusion polygon! Trying to fix it...")
+                occlusion_polygon = occlusion_polygon.buffer(0)
+                if isinstance(occlusion_polygon, MultiPolygon):
+                    occlusion_polygon = max(occlusion_polygon.geoms, key=lambda geom: geom.area)
+            if not occluded_fov.is_valid:
+                # print("Invalid occluded FOV!  Trying to fix it...")
+                occlusion_polygon = occlusion_polygon.buffer(0)
+                if isinstance(occlusion_polygon, MultiPolygon):
+                    occlusion_polygon = max(occlusion_polygon.geoms, key=lambda geom: geom.area)
+            occluded_fov = occluded_fov.difference(occlusion_polygon)
+
+        return occluded_fov
+
+            
+
 
 
 class FOV2D_Simple(FOV2D):
-    def __init__(self, hfov: float, distance: float, cost:float, color: str = 'purple', focal_point: tuple[float] = (0, 0), rotation: float = 0, bounds_polygon:Polygon=None):
+    def __init__(self, hfov: float, 
+                 distance:float|tuple[float,float], 
+                 cost:float, 
+                 color: str = 'purple', 
+                 focal_point: tuple[float] = (0, 0), 
+                 rotation: float = 0, 
+                 bounds_polygon:Polygon=None, 
+                 name=None):
         """
         Initializes the 2D representation of a robot's field of view (FOV).
         Args:
@@ -146,17 +251,20 @@ class FOV2D_Simple(FOV2D):
         self.bounds_polygon_xy = list(bounds_polygon.exterior.coords)
         self.half_angle = np.radians(hfov / 2)
         self.dist = distance
-        points = [
-            (0, 0),  # origin
-            (distance * np.cos(np.pi/2 - self.half_angle), distance * np.sin(np.pi/2 - self.half_angle)),  # left edge
-            (distance * np.cos(np.pi/2 + self.half_angle), distance * np.sin(np.pi/2 + self.half_angle))  # right edge
-        ]
-        num_points = 100  # number of points to create the arc
+        if isinstance(distance, tuple):
+            self.distance = distance
+        else:
+            self.distance = (0, distance)
+        num_points = 50  # number of points to create the arc
         angles = np.linspace(-self.half_angle, self.half_angle, num_points)
-        arc_points = [(distance * np.cos(angle), distance * np.sin(angle)) for angle in angles]
-        fov_points = [points[0]] + arc_points + [points[0]]
+        long_arc_points = [(self.distance[1] * np.cos(angle), self.distance[1] * np.sin(angle)) for angle in angles]
+        if self.distance[0] == 0:
+            short_arc_points = [(self.distance[0] * np.cos(angle), self.distance[0] * np.sin(angle)) for angle in angles]
+        else:
+            short_arc_points = [(0,0)]
+        fov_points = short_arc_points + long_arc_points 
         fov_polygon = shapely.affinity.rotate(Polygon(fov_points), 90, (0,0))
-        super().__init__(fov_polygon=fov_polygon, cost=cost, focal_point=focal_point, color=color, rotation=rotation, bounds_polygon=bounds_polygon)
+        super().__init__(fov_polygon=fov_polygon, cost=cost, focal_point=focal_point, color=color, rotation=rotation, bounds_polygon=bounds_polygon, name=name)
 
     def __eq__(self, other):
         if not isinstance(other, FOV2D_Simple):
@@ -172,7 +280,7 @@ class FOV2D_Simple(FOV2D):
     
 
 class SimpleBot2d:
-    def __init__(self, shape:shapely.geometry.Polygon, sensor_coverage_requirement, bot_color:str="blue", sensor_pose_constraint=None):
+    def __init__(self, shape:Polygon, sensor_coverage_requirement:Polygon|MultiPolygon|list, bot_color:str="blue", sensor_pose_constraint:Polygon|MultiPolygon|list=None, occlusions:Polygon|MultiPolygon|list=None):
         """
         Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
         Args:
@@ -190,20 +298,23 @@ class SimpleBot2d:
         self.shape = shape
         self.color = bot_color
         self.sensors = []
-        if type(sensor_pose_constraint) is not list:
-            self.sensor_pose_constraint = [sensor_pose_constraint]
-        else:
-            self.sensor_pose_constraint = sensor_pose_constraint
-        
-        if type(sensor_coverage_requirement) is not list:
-            self.sensor_coverage_requirement = [sensor_coverage_requirement]
-        else:
-            self.sensor_coverage_requirement = sensor_coverage_requirement
+
+        def load_multipolygon_param(param):
+            if type(param) is list:
+                return MultiPolygon(param)
+            elif type(param) is Polygon:
+                return MultiPolygon([param])
+            elif param is MultiPolygon or param is None:
+                return param
+            else:
+                raise TypeError(f"{param} must be a list, Polygon, MultiPolygon, or None.")
+            
+        self.sensor_coverage_requirement = load_multipolygon_param(sensor_coverage_requirement)
+        self.sensor_pose_constraint = load_multipolygon_param(sensor_pose_constraint)
+        self.occlusions = load_multipolygon_param(occlusions)
 
         # Remove self.shape from any of the sensor_coverage_requirement shapes
-        self.sensor_coverage_requirement = [
-            req.difference(self.shape) for req in self.sensor_coverage_requirement
-        ]
+        self.sensor_coverage_requirement = MultiPolygon([req.difference(self.shape) for req in self.sensor_coverage_requirement.geoms])
 
     def add_sensor_2d(self, sensor:FOV2D|None):
         """
@@ -230,8 +341,8 @@ class SimpleBot2d:
                     to a valid location within the constraints.
         """
         for i in range(max_tries):
-            x, y = pointpats.random.poisson(self.sensor_pose_constraint[0], size=1)
-            rotation = np.degrees(np.arctan2(y, x)) - 90
+            x, y = pointpats.random.poisson(self.sensor_pose_constraint, size=1)
+            rotation = -np.degrees(np.arctan2(x, y))
 
             sensor.set_translation(x, y)
             sensor.set_rotation(rotation) #this isn't quite right but good enough
@@ -260,9 +371,10 @@ class SimpleBot2d:
         for sensor in sensors:
             self.add_sensor_2d(sensor)
 
-    def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, title=None, ax=None):
+    def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, show_occlusions=True, title=None, ax=None):
         """
         Plots the robot's shape, sensor constraints, coverage requirements, and sensors on a 2D plot.
+        
         Parameters:
         -----------
         show_constraint : bool, optional
@@ -275,6 +387,7 @@ class SimpleBot2d:
             The title of the plot (default is None).
         ax : matplotlib.axes.Axes, optional
             The axes on which to plot. If None, a new figure and axes are created (default is None).
+        
         Returns:
         --------
         fig : matplotlib.figure.Figure
@@ -289,19 +402,23 @@ class SimpleBot2d:
         plot_polygon_with_holes(self.shape, ax=ax, facecolor=self.color, alpha=0.5, edgecolor=self.color)
 
         if show_constraint and self.sensor_pose_constraint:
-            for constraint in self.sensor_pose_constraint:
+            for constraint in self.sensor_pose_constraint.geoms:
                 plot_polygon_with_holes(constraint, ax=ax, facecolor='green', alpha=0.25)
         
         if show_coverage_requirement and self.sensor_coverage_requirement:
-            for requirement in self.sensor_coverage_requirement:
+            for requirement in self.sensor_coverage_requirement.geoms:
                 plot_polygon_with_holes(requirement, ax=ax, facecolor='none', edgecolor='black', linestyle='dotted')
+
+        if show_occlusions and self.occlusions:
+            for occlusion in self.occlusions.geoms:
+                plot_polygon_with_holes(occlusion, ax=ax, facecolor='red', alpha=0.25)
         
         if show_sensors and len(self.sensors)>0:
             for sensor in self.sensors:
-                sensor.plot_fov(whole_plot=False, ax=ax)
+                sensor.plot_fov(whole_plot=False, obstacles=self.occlusions, ax=ax)
 
         # Set the bounds to just beyond the bounds of any of the shapes in the plot
-        all_shapes = [self.shape] + self.sensor_pose_constraint + self.sensor_coverage_requirement + [sensor.fov for sensor in self.sensors]
+        all_shapes = [self.shape] + [self.sensor_pose_constraint] + [self.sensor_coverage_requirement] + [sensor.fov for sensor in self.sensors]
         min_x = min(shape.bounds[0] for shape in all_shapes)
         min_y = min(shape.bounds[1] for shape in all_shapes)
         max_x = max(shape.bounds[2] for shape in all_shapes)
@@ -315,8 +432,8 @@ class SimpleBot2d:
         
         if ax is None:
             plt.show()
-        
-        return fig
+        else:
+            return fig
     
     def is_valid_sensor_pose(self, sensor:FOV2D, verbose=False):
         """
@@ -333,7 +450,7 @@ class SimpleBot2d:
         """
 
         # Check if the sensor is within the sensor pose constraint
-        if not any(constraint.contains(sensor.bounds) for constraint in self.sensor_pose_constraint):
+        if not self.sensor_pose_constraint.contains(sensor.bounds):
             if verbose:
                 print(f"A Sensor at {sensor.focal_point} is invalid because it is outside of physical constraints.")
             return False
@@ -362,7 +479,7 @@ class SimpleBot2d:
         if not self.sensors or len(self.sensors) == 0:
             return 0
         total_sensor_area = sum(sensor.bounds.area for sensor in self.sensors if sensor is not None)
-        total_sensor_area_invalid = sum(sensor.bounds.difference(constraint).area for sensor in self.sensors for constraint in self.sensor_pose_constraint if sensor is not None)
+        total_sensor_area_invalid = sum(sensor.bounds.difference(self.sensor_pose_constraint).area for sensor in self.sensors if sensor is not None)
         total_intersection_area = 0.0
         for i, sensor1 in enumerate(self.sensors):
             for j, sensor2 in enumerate(self.sensors):
@@ -393,7 +510,7 @@ class SimpleBot2d:
         for sensor in self.sensors:
             if verbose:
                 print("Checking validity of", sensor, " in ", self.sensor_pose_constraint)
-            if not any(constraint.contains(sensor.bounds) for constraint in self.sensor_pose_constraint):
+            if not self.sensor_pose_constraint.contains(sensor.bounds):
                 valid = False
                 if verbose:
                     print("Bot Sensor Package is invalid because sensor is outside of physical constraints.")
@@ -413,7 +530,8 @@ class SimpleBot2d:
             print("Bot Sensor Package is Valid!") 
         return valid
     
-    def get_sensor_coverage(self):
+
+    def get_sensor_coverage(self, occluded=True):
         """
         Calculate the coverage percentage of the sensors based on the required coverage area.
         This method computes the total area covered by all sensors and compares it to the required 
@@ -428,10 +546,11 @@ class SimpleBot2d:
         total_coverage = shapely.geometry.Polygon()
         for sensor in self.sensors:
             if sensor is not None:
-                total_coverage = total_coverage.union(sensor.fov)
-        total_coverage = total_coverage.intersection(self.sensor_coverage_requirement[0])
+                fov = sensor.fov if not occluded else sensor.get_occluded_fov(self.occlusions)
+                total_coverage = total_coverage.union(fov)
+        total_coverage = total_coverage.intersection(self.sensor_coverage_requirement)
         coverage_area = total_coverage.area
-        requirement_area = self.sensor_coverage_requirement[0].area
+        requirement_area = self.sensor_coverage_requirement.area
 
         return (coverage_area / requirement_area)
     
@@ -445,7 +564,7 @@ class SimpleBot2d:
                         "validity":[]}
         
         # Get the bounds of the perception area for normalization
-        largest_dimension = max(*[sr.bounds[i] for sr in self.sensor_coverage_requirement for i in range(4)])
+        largest_dimension = max(*self.sensor_coverage_requirement.bounds)
         print("Largest Dimension:", largest_dimension)
         unnorm_bounds = Bounds(lb=[-largest_dimension, -largest_dimension, 0] * len(self.sensors), ub=[largest_dimension, largest_dimension, 360] * len(self.sensors))
         print("Un-normalized Bounds:", unnorm_bounds)
@@ -655,7 +774,7 @@ class SimpleBot2d:
                 fig, ax = plt.subplots()
             else:
                 fig = ax.figure
-            plot_coverage_optimization(results_hist, best_valid_iter=best_valid_iter, ax=ax)
+            plot_coverage_optimization(results_hist, best_valid_iter=best_valid_iter)
         
         if animate:
             ani = animate_optimization(results_hist)

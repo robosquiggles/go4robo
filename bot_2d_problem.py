@@ -42,13 +42,11 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         # VARIABLES
         variables = dict()
-        s_bounds = np.array([constraint.bounds for constraint in bot.sensor_pose_constraint])
-        x_bounds = (np.min(s_bounds[:, 0]), np.max(s_bounds[:, 2]))
-        y_bounds = (np.min(s_bounds[:, 1]), np.max(s_bounds[:, 3]))
+        s_bounds = np.array(bot.sensor_pose_constraint.bounds)
         for i in range(self.max_n_sensors):
             variables[f"s{i}_type"] = Integer(bounds=(0,len(self.sensor_options)-1))
-            variables[f"s{i}_x"] = Real(bounds=(x_bounds[0], x_bounds[1]))
-            variables[f"s{i}_y"] = Real(bounds=(y_bounds[0], y_bounds[1]))
+            variables[f"s{i}_x"] = Real(bounds=(s_bounds[0], s_bounds[2]))
+            variables[f"s{i}_y"] = Real(bounds=(s_bounds[1], s_bounds[3]))
             variables[f"s{i}_rotation"] = Real(bounds=(0.0, 360.0))
         self.n_var = len(variables)
 
@@ -198,7 +196,8 @@ class SensorPkgOptimization(ElementwiseProblem):
                 ]
     
 class CustomSensorPkgRandomSampling(Sampling):
-    def __init__(self):
+    def __init__(self, p=None, **kwargs):
+        self.p = p
         super().__init__()
 
     def _do(self, problem, n_samples, **kwargs):
@@ -208,13 +207,20 @@ class CustomSensorPkgRandomSampling(Sampling):
         xu = list(xu.values())
         assert np.all(xu >= xl)
 
+        if self.p is None:
+            p = [1 / len(problem.sensor_options)] * len(problem.sensor_options)
+        else:
+            p = self.p
+            assert len(p) == len(problem.sensor_options)
+            assert np.sum(p) == 1
+
         X = []
         for _ in range(n_samples):
             bot = copy.deepcopy(problem.bot)
             bot.clear_sensors()
             for i in range(problem.max_n_sensors):
                 sensor = problem.convert_1D_to_sensor({
-                    f"s{i}_type": np.random.randint(0, len(problem.sensor_options)),
+                    f"s{i}_type": np.random.choice(range(len(problem.sensor_options)), p=p),
                     f"s{i}_x": 0,
                     f"s{i}_y": 0,
                     f"s{i}_rotation": 0
@@ -226,19 +232,47 @@ class CustomSensorPkgRandomSampling(Sampling):
         return X
         
 
-def plot_tradespace(combined_df:pd.DataFrame, num_results, show=False, panzoom=False):
+def plot_tradespace(combined_df:pd.DataFrame, num_results, show=False, panzoom=False, **kwargs):
+    """
+    Plot the trade space of concepts based on Cost and Perception Coverage.
+    This function creates a scatter plot visualizing the trade-offs between Cost and Perception Coverage for different concepts.
+    Each point represents a concept, colored based on its optimization status. An ideal point is also marked on the plot.
+    The plot can be displayed interactively with optional pan and zoom capabilities.
+    Parameters:
+        combined_df (pd.DataFrame): DataFrame containing the data to plot, with columns 'Cost', 'Perception Coverage',
+                                     'Optimized', and 'Name'.
+        num_results (int): The number of top concepts to include in the title of the plot.
+        show (bool, optional): If True, display the plot. Defaults to False.
+        panzoom (bool, optional): If False, disables panning and zooming by fixing the axis ranges. Defaults to False.
+        **kwargs: Additional keyword arguments to pass to the plotly express scatter function.
+            height (int, optional): The height of the plot in pixels. Defaults to 600.
+            width (int, optional): The width of the plot in pixels. Defaults to 600.
+            opacity (float, optional): The opacity of the points on the plot (0 to 1). Defaults to 0.9.
+            title (str, optional): The title of the plot. Defaults to "Objective Space (best of {num_results} concepts)".
+    Returns:
+        plotly.graph_objs._figure.Figure: The generated Plotly figure object.
+    """
+    height = 600 if 'height' not in kwargs else kwargs['height']
+    width = 600 if 'width' not in kwargs else kwargs['width']
+    opacity = 0.9 if 'opacity' not in kwargs else kwargs['opacity']
+    title = f"Objective Space (best of {num_results} concepts)" if 'title' not in kwargs else kwargs['title']
     
-    fig = px.scatter(combined_df, x='Cost', y='Perception Coverage', color='Optimized', color_discrete_sequence=['orange', 'teal'], opacity=0.5,
-                 title=f"Objective Space (best of {num_results} concepts)", 
-                 template="plotly_white", 
-                 labels={'Cost': 'Cost ($)', 'Perception Coverage': 'Perception Coverage (%)'},
-                 hover_name='Name',
-                 hover_data=['Cost', 'Perception Coverage'])
+    fig = px.scatter(combined_df, x='Cost', y='Perception Coverage', 
+                     color='Optimized', 
+                     color_discrete_sequence=['#fc7114', '#1276a4'], 
+                     opacity=opacity,
+                     title=title, 
+                     template="plotly_white", 
+                     labels={'Cost': 'Cost ($)', 'Perception Coverage': 'Perception Coverage (%)'},
+                     hover_name='Name',
+                     hover_data=['Cost', 'Perception Coverage'])
+    
+    fig.update_traces(marker=dict(size=5*(width/600)))
 
     fig.add_scatter(x=[0], 
                     y=[100], 
                     mode='markers', 
-                    marker=dict(symbol='star', size=12, color='gold'), 
+                    marker=dict(symbol='star', size=12*(width/600), color='gold'), 
                     name='Ideal')
     
     if not panzoom:
@@ -249,7 +283,7 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show=False, panzoom=F
     
     fig.update_layout(
         hovermode='x unified',
-        height=600, width=600,
+        height=height, width=width,
         legend=dict(
             # orientation="h",
             yanchor="bottom",
@@ -257,7 +291,7 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show=False, panzoom=F
             xanchor="right",
             x=1
         ),
-        yaxis=dict(range=[0, 1])
+        yaxis=dict(range=[0, 110])
     )
     if show:
         fig.show()
