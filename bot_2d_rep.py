@@ -106,10 +106,10 @@ class FOV2D:
             ax.fill(bx, by, alpha=0.8, color=self.color, edgecolor='none')
         ax.scatter(*self.focal_point, color=self.color, marker='.')  # Add a dot at the focal point
         if whole_plot:
-            ax.set_title('Field of View')
+            ax.set_title(f'{self.name} Field of View')
             ax.set_xlabel('Distance (m)')
             ax.set_ylabel('Distance (m)')
-            ax.grid(True)
+            ax.grid(False)
             ax.set_aspect('equal', adjustable='box')
         if show:
             plt.show()
@@ -565,9 +565,7 @@ class SimpleBot2d:
         
         # Get the bounds of the perception area for normalization
         largest_dimension = max(*self.sensor_coverage_requirement.bounds)
-        print("Largest Dimension:", largest_dimension)
         unnorm_bounds = Bounds(lb=[-largest_dimension, -largest_dimension, 0] * len(self.sensors), ub=[largest_dimension, largest_dimension, 360] * len(self.sensors))
-        print("Un-normalized Bounds:", unnorm_bounds)
         
         def normalize(params):
             """

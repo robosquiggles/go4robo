@@ -16,6 +16,7 @@ from pymoo.operators.sampling.rnd import Sampling, FloatRandomSampling
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PolynomialMutation
 from pymoo.optimize import minimize
+from pymoo.indicators.hv import HV
 
 class SensorPkgOptimization(ElementwiseProblem):
 
@@ -220,7 +221,7 @@ class CustomSensorPkgRandomSampling(Sampling):
             bot.clear_sensors()
             for i in range(problem.max_n_sensors):
                 sensor = problem.convert_1D_to_sensor({
-                    f"s{i}_type": np.random.choice(range(len(problem.sensor_options)), p=p),
+                    f"s{i}_type": np.random.choice(range(0,len(problem.sensor_options)), p=p),
                     f"s{i}_x": 0,
                     f"s{i}_y": 0,
                     f"s{i}_rotation": 0
@@ -232,7 +233,42 @@ class CustomSensorPkgRandomSampling(Sampling):
         return X
         
 
-def plot_tradespace(combined_df:pd.DataFrame, num_results, show=False, panzoom=False, **kwargs):
+def get_pareto_front(df, x='Cost', y='Perception Coverage'):
+    # Extract the relevant columns for the Pareto front
+    points = df[[x, y]].values
+    
+    # Sort the points by the first objective (Perception Coverage)
+    sorted_points = points[np.argsort(points[:, 0])]
+    
+    # Initialize the Pareto front with the first point
+    pareto_front = [sorted_points[0]]
+    indices = [0]
+    
+    # Iterate through the sorted points and add to Pareto front if it dominates the previous point
+    for point in sorted_points[1:]:
+        if point[1] > pareto_front[-1][1]:
+            pareto_front.append(point)
+            indices.append(df.loc[df[[x, y]].eq(point).all(axis=1)].index[0])
+    
+    return np.array(pareto_front), indices
+
+
+def get_hypervolume(df, ref_point, x='Cost', y='Perception Coverage', x_minimize=True, y_minimize=False):
+    pareto, idx = get_pareto_front(df, x=x, y=y)
+    if not x_minimize:
+        pareto[:, 0] = -pareto[:, 0]
+    if not y_minimize:
+        pareto[:, 1] = -pareto[:, 1]
+    ref_point = np.array(ref_point)
+    
+    # Calculate the hypervolume
+    hv = HV(ref_point=ref_point)
+    hypervolume = hv(pareto)
+    
+    return hypervolume
+
+
+def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, show=False, panzoom=False, **kwargs):
     """
     Plot the trade space of concepts based on Cost and Perception Coverage.
     This function creates a scatter plot visualizing the trade-offs between Cost and Perception Coverage for different concepts.
@@ -274,6 +310,15 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show=False, panzoom=F
                     mode='markers', 
                     marker=dict(symbol='star', size=12*(width/600), color='gold'), 
                     name='Ideal')
+    
+    if show_pareto:
+        pareto, idx = get_pareto_front(combined_df, x="Cost", y="Perception Coverage")
+        fig.add_scatter(x=pareto[:, 0],
+                        y=pareto[:, 1],
+                        mode='lines+markers', 
+                        line=dict(color='grey', width=1*(width/600)), 
+                        marker=dict(size=10*(width/600), color='grey', symbol='circle-open'),
+                        name='Pareto Front')
     
     if not panzoom:
         fig.update_layout(

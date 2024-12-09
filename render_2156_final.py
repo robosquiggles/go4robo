@@ -22,7 +22,7 @@ plt.rcParams['font.family'] = 'Arial'
 
 dbc_css = "https://cdn.jsdelivr.net/gh/AnnMarieW/dash-bootstrap-templates/dbc.min.css"
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc_css])
-# server = app.server
+server = app.server
 
 def get_latest_timestamp(path):
     files = glob.glob(path)
@@ -32,14 +32,57 @@ def get_latest_timestamp(path):
     timestamp = latest_file.split('_')[-1].split('.pkl')[0]
     return timestamp
 
-timestamp = get_latest_timestamp('./_output/df_opt_*.pkl')
+def get_latest_timestamps_in_folders(base_path):
+    folders = [f.path for f in os.scandir(base_path) if f.is_dir()]
+    timestamps = {}
+    for folder in folders:
+        timestamp = get_latest_timestamp(os.path.join(folder, 'df_opt_*.pkl'))
+        if timestamp:
+            timestamps[os.path.basename(folder)] = timestamp
+    return timestamps
 
-unopt_df = pd.read_pickle(f'./_output/df_unopt_{timestamp}.pkl')
-opt_df = pd.read_pickle(f'./_output/df_opt_{timestamp}.pkl')
-with open(f'./_output/problem_{timestamp}.pkl', 'rb') as file:
-    problem = dill.load(file)
+timestamps_dict = get_latest_timestamps_in_folders('./_output/')
+timestamp = timestamps_dict["spot"]
 
-combined_df = pd.concat([unopt_df, opt_df])
+def load_bot_images(folder, timestamp):
+    images = {}
+    image_files = glob.glob(f'./_output/{folder}/botcompare_*_{timestamp}.png')
+    for image_file in image_files:
+        idx = int(image_file.split('_')[-2])
+        with open(image_file, 'rb') as file:
+            images[idx] = base64.b64encode(file.read()).decode('ascii')
+    return images
+
+bot_images = {}
+for folder, timestamp in timestamps_dict.items():
+    bot_images[folder] = load_bot_images(folder, timestamp)
+
+#build all of the results into containers so that I can display them in separate tabs
+results_containers = []
+for folder, timestamp in timestamps_dict.items():
+    unopt_df = pd.read_pickle(f'./_output/{folder}/df_unopt_{timestamp}.pkl')
+    opt_df = pd.read_pickle(f'./_output/{folder}/df_opt_{timestamp}.pkl')
+    with open(f'./_output/{folder}/problem_{timestamp}.pkl', 'rb') as file:
+        problem = dill.load(file)
+
+    combined_df = pd.concat([unopt_df, opt_df])
+
+    container = dbc.Container([
+                    dcc.Graph(id=f'tradespace_{folder}',figure=bot_2d_problem.plot_tradespace(combined_df, unopt_df.shape[0], width=800, height=600)),
+                    html.Img(id=f'bot_plot_{folder}', width=800),
+                    ])
+    
+    results_containers.append(container)
+    
+    @app.callback(
+        Output(component_id=f'bot_plot_{folder}', component_property='src'),
+        Input(f'tradespace_{folder}', 'hoverData')
+    )
+    def update_bots(hoverData):
+        if hoverData is None:
+            return None
+        point_index = hoverData['points'][0]['pointIndex']
+        return 'data:image/png;base64,{}'.format(bot_images[folder][point_index])
 
 app.layout = html.Div([
     dbc.Container([
@@ -63,8 +106,9 @@ app.layout = html.Div([
                 "This is the content of the second section", title="Approach"
             ),
             dbc.AccordionItem([
-                dcc.Graph(id='tradespace',figure=bot_2d_problem.plot_tradespace(combined_df, unopt_df.shape[0])),
-                html.Img(id='bot_plot')
+                dbc.Tabs([
+                    dbc.Tab(results_containers[i], label=folder.capitalize(), tab_id=folder) for i, folder in enumerate(timestamps_dict.keys())
+                ]),
             ], title="Results"
             ),
         ],
@@ -72,40 +116,6 @@ app.layout = html.Div([
     ),
     ])
 ])
-
-
-
-@app.callback(
-    Output(component_id='bot_plot', component_property='src'),
-    Input('tradespace', 'hoverData')
-)
-def update_bots(hoverData):
-    
-    matplotlib.pyplot.close()
-
-    if hoverData is None:
-        return {}
-    if len(hoverData['points']) < 2:
-        return {}
-    
-    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-
-    ub_idx = hoverData['points'][0]['pointIndex']
-    ub = problem.convert_1D_to_bot(combined_df.iloc[ub_idx]['X'])
-    ub.plot_bot(title="Pre-Optimization", ax=axes[0])
-
-    ob_idx = hoverData['points'][1]['pointIndex']
-    ob = problem.convert_1D_to_bot(combined_df.iloc[ob_idx]['X'])
-    ob.plot_bot(title="Optimized", ax=axes[1])
-    
-    buf = BytesIO()
-    fig.savefig(buf, format="png")
-    plt.close(fig)
-    
-    fig_data = base64.b64encode(buf.getbuffer()).decode("ascii")
-    fig_matplotlib = f'data:image/png;base64,{fig_data}'
-    
-    return fig_matplotlib
 
 
 if __name__ == '__main__':
