@@ -59,17 +59,11 @@ def load_bot_images(folder, timestamp):
 
 def create_abstract_section():
     return html.Div([
-        html.H2("Abstract", 
-                className="mb-4 text-2xl font-bold text-gray-800"),
         html.P(["Mobile robots use “exteroceptive” sensors to perceive and interact with the world. As such it is vital that engineers design their sensor packages carefully. This project served as a preliminary investigation into AI and classical methods for generation and optimization of sensor packages for mobile robots. Results suggest that even simple Multi-Objective Optimization AI algorithms are effectively adapted for generating and optimizing sensor systems for mobile robots, serving as a strong motivating basis for future research."], className="mb-4")
     ], className="max-w-4xl mx-auto my-8")
 
 def create_motivation_section():
     return html.Div([
-        # Section Header
-        html.H2("Motivation", 
-                className="mb-4 text-2xl font-bold text-gray-800"),
-        
         # Main content container with flex layout
         html.Div([
             # Text content
@@ -128,10 +122,6 @@ def create_motivation_section():
 
 def create_methodology_section():
     return html.Div([
-        # Section Header
-        html.H2("Methodology", 
-                className="mb-4 text-2xl font-bold text-gray-800"),
-        
         # Main content container with flex layout
         html.Div([
             # Text content
@@ -163,7 +153,7 @@ def create_methodology_section():
                 f" the process generated optimized sets of sensor package options (shown in orange in the tradespaces, below)."
                 ]),
         html.P([html.B("Constrained Pose Optimization", className="font-bold"),
-                "was then used to optimize individual sensor placements for each concept on the pareto front, pushing them upward toward the global optimum.",
+                " is then used to optimize individual sensor placements for each concept on the pareto front, pushing them upward toward the global optimum.",
         ]),
         html.Div([
             html.P("Each Constrained Pose Optimization optimization generates the following history of sensor coverage per optimization iteration. The orange points denote invalid sensor poses (i.e., the sensors intersect with eachother, or they lie partially outside the green area on the bot). Because Constrained Pose Optimization cannot guarantee that the final iteration is valid, the best option is chosen from the optimization history. Note that some packages are already optimally placed, and Constrained Pose Optimization produces no change.", className="mb-2 text-xl font-semibold text-gray-700"),
@@ -219,7 +209,7 @@ def create_results_section():
         results_containers.append(dbc.Container([
             dbc.Container([
                         html.H2(f"{folder.capitalize()} Problem"),
-                        html.P(f"The {folder.capitalize()} problem was defined with the following robot and sensors as inputs:"),
+                        html.P(f"The {folder.capitalize()} problem is defined with the following robot and sensors as inputs:"),
                         dbc.Col([
                             html.Img(id=f'inputs_{folder}', 
                                     src="data:image/png;base64,{}".format(base64.b64encode(open(f'./_output/{folder}/{timestamp}_inputs.png', 'rb').read()).decode('ascii')), 
@@ -228,12 +218,13 @@ def create_results_section():
                         ], xs=12, lg=6, md=6, style={'text-align': 'center'}),
                 ]),
             dbc.Container([
-                        html.H2(f"{folder.capitalize()} Results"),
-                        html.P(f"Hypervolume Unoptimized: {hv_unoptimized:.2f}"),
-                        html.P(f"Hypervolume Optimized:   {hv_combined:.2f}"),
-                        html.P(f"Hypervolume Improvement: {hv_improvement:.2f} = +{hv_improvement/hv_unoptimized *100:.2f}%"),
+                        html.H3(f"{folder.capitalize()} Results"),
+                        html.P([html.B(f"Hypervolume Unoptimized: ", className="font-bold"), f"{hv_unoptimized:.2f}"]),
+                        html.P([html.B(f"Hypervolume Optimized:   ", className="font-bold"), f"{hv_combined:.2f}"]),
+                        html.P([html.B(f"Hypervolume Improvement: ", className="font-bold"), f"{hv_improvement:.2f} = +{hv_improvement/hv_unoptimized *100:.2f}%"]),
+                        html.P("Hover over the tradespace (tap on mobile) to see the robot comparison plots for each concept.", className="mb-4"),
                         dbc.Col([
-                            dcc.Graph(id=f'tradespace_{folder}',figure=bot_2d_problem.plot_tradespace(combined_df, unopt_df.shape[0], width=img_width, height=img_width*2/3, title=f"Tradespace of Optimal Sensor Packages")),
+                            dcc.Graph(id=f'tradespace_{folder}',figure=bot_2d_problem.plot_tradespace(combined_df, unopt_df.shape[0], width=800, height=600, title=f"Tradespace of Optimal Sensor Packages")),
                         ], xs=12, lg=6, md=6, style={'text-align': 'center'}),
                         dbc.Col([
                             html.Img(id=f'bot_plot_{folder}', 
@@ -252,7 +243,6 @@ def create_results_section():
         )(update_bots)
         
     return dbc.Container([
-        html.P("The tradespace of optimal sensor packages is shown at the top, and the robot comparison plots are shown on the bottom. Hover over the tradespace (tap on mobile) to see the robot comparison plots for each concept.", className="mb-4"),
         dbc.Tabs([
             dbc.Tab(results_containers[i], label=folder.capitalize(), tab_id=folder) for i, folder in enumerate(timestamps_dict.keys())
         ])
@@ -270,27 +260,28 @@ app.layout = html.Div([
             ),
             html.H1("Generation and Selection of Sensor Packages for Mobile Robots"),
         ], style={"display": "flex", "alignItems": "center"}),
-        html.P(
-                "Rachael Putnam - MIT 2.156 Final Project",
-                className="lead",
-            ),
         html.Hr(className="my-2"),
+        html.P([
+            html.A("Rachael Putnam", href="https://www.linkedin.com/in/robosquiggles/"), 
+            html.P("MIT 2.156 Final Project")],
+            className="lead",
+            ),
         html.P("The goal of this project was to generate, select, and optimize sensor packages for mobile robots."),
     ], className="h-100 p-4 bg-light text-dark border rounded-3",),
     dbc.Container([
         dbc.Accordion(
         [
             dbc.AccordionItem(
-                [create_abstract_section()], title="Abstract"
+                [create_abstract_section()], title=html.H2("Abstract")
             ),
             dbc.AccordionItem(
-                [create_motivation_section()], title="Motivation"
+                [create_motivation_section()], title=html.H2("Motivation")
             ),
             dbc.AccordionItem(
-                [create_methodology_section()], title="Methodology"
+                [create_methodology_section()], title=html.Span([html.H2("Methodology"), dbc.Badge("Video!", "99+", color="primary", pill=True, className="position-absolute top-0 start-100 translate-middle")])
             ),
             dbc.AccordionItem(
-                [create_results_section()], title="Results"
+                [create_results_section()], title=html.Span([html.H2("Results"), dbc.Badge("Interactive!", "99+", color="primary", pill=True, className="position-absolute top-0 start-100 translate-middle")])
             ),
         ],
         start_collapsed=True,
