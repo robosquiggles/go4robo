@@ -177,8 +177,8 @@ def create_methodology_section():
 def create_results_section():
 
     def make_callback(folder):
-            def update_bots(hoverData):
-                # print(hoverData)
+            def update_bots(hoverData, clickData):
+                data = hoverData if hoverData is not None else clickData
                 if hoverData is not None:
                     for point in hoverData['points']:
                         if 'customdata' in point:
@@ -224,7 +224,10 @@ def create_results_section():
                         html.P([html.B(f"Hypervolume Improvement: ", className="font-bold"), f"{hv_improvement:.2f} = +{hv_improvement/hv_unoptimized *100:.2f}%"]),
                         html.P("Hover over the tradespace (tap on mobile) to see the robot comparison plots for each concept.", className="mb-4"),
                         dbc.Col([
-                            dcc.Graph(id=f'tradespace_{folder}',figure=bot_2d_problem.plot_tradespace(combined_df, unopt_df.shape[0], width=800, height=600, title=f"Tradespace of Optimal Sensor Packages")),
+                            dcc.Graph(id=f'tradespace_{folder}',
+                                      figure=bot_2d_problem.plot_tradespace(combined_df, unopt_df.shape[0], width=800, height=600, title=f"Tradespace of Optimal Sensor Packages"),
+                                      clickData=None,
+                                      hoverData=None)
                         ], xs=12, lg=6, md=6, style={'text-align': 'center'}),
                         dbc.Col([
                             html.Img(id=f'bot_plot_{folder}', 
@@ -239,7 +242,9 @@ def create_results_section():
         update_bots = make_callback(folder)
         app.callback(
             Output(f'bot_plot_{folder}', 'src'),
-            Input(f'tradespace_{folder}', 'hoverData')
+            [Input(f'tradespace_{folder}', 'hoverData'),
+             Input(f'tradespace_{folder}', 'clickData'),
+            ]
         )(update_bots)
         
     return dbc.Container([

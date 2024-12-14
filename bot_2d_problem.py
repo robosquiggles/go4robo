@@ -349,6 +349,8 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
         ),
         yaxis=dict(range=[0, 110])
     )
+
+    fig.update_layout(clickmode='event+select')
     if show:
         fig.show()
     
