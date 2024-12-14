@@ -301,15 +301,24 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
                      template="plotly_white", 
                      labels={'Cost': 'Cost ($)', 'Perception Coverage': 'Perception Coverage (%)'},
                      hover_name='Name',
-                     hover_data=['Cost', 'Perception Coverage'])
+                     hover_data=['Cost', 'Perception Coverage'],
+                     custom_data=['Index'])
     
-    fig.update_traces(marker=dict(size=5*(width/600)))
+    fig.update_traces(marker=dict(size=5*(width/600)),
+                      hovertemplate="<br>".join([
+                            "Pkg: %{customdata[0]}",
+                            "Cost: $%{x:.2f}",
+                            "Perception Coverage: %{y:.2f}%",
+                            ])
+                      )
 
     fig.add_scatter(x=[0], 
                     y=[100], 
                     mode='markers', 
                     marker=dict(symbol='star', size=12*(width/600), color='gold'), 
-                    name='Ideal')
+                    name='Ideal',
+                    hoverinfo='none',  # Disable hover data
+                    )
     
     if show_pareto:
         pareto, idx = get_pareto_front(combined_df, x="Cost", y="Perception Coverage")
@@ -318,7 +327,9 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
                         mode='lines+markers', 
                         line=dict(color='grey', width=1*(width/600)), 
                         marker=dict(size=10*(width/600), color='grey', symbol='circle-open'),
-                        name='Pareto Front')
+                        name='Pareto Front',
+                        hoverinfo='none',  # Disable hover data
+                        )
     
     if not panzoom:
         fig.update_layout(
@@ -338,6 +349,8 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
         ),
         yaxis=dict(range=[0, 110])
     )
+
+    fig.update_layout(clickmode='event+select')
     if show:
         fig.show()
     

@@ -66,7 +66,7 @@ class FOV2D:
         self.bounds = bounds_polygon
         self.fov = fov_polygon
         self.focal_point = (0,0)
-        self.extent = max(Point(self.focal_point).distance(Point(coord)) for coord in self.fov.exterior.coords)
+        self.extent = max(Point(self.focal_point).distance(Point(coord)) for coord in self.fov.exterior.coords)*2
         self.color = color
         self.rotation = rotation
         self.translate(*focal_point)
@@ -557,7 +557,7 @@ class SimpleBot2d:
     def get_pkg_cost(self):
         return sum([sensor.cost for sensor in self.sensors if sensor is not None])
     
-    def optimize_sensor_placement(self, method='trust-constr', plot=False, ax=None, animate=False, verbose=False):
+    def optimize_sensor_placement(self, method='trust-constr', plot=False, ax=None, plot_title=None, animate=False, anim_interval:int=100, verbose=False):
 
         results_hist = {"fun":[],
                         "x":[],
@@ -705,7 +705,7 @@ class SimpleBot2d:
                 ))
 
             fig.update_layout(
-                title='Convergence of Sensor Coverage Over Time',
+                title='Convergence of Sensor Coverage Over Time' if plot_title is None else plot_title,
                 xaxis_title='Optimization Iteration',
                 yaxis_title='Sensor Coverage',
                 legend_title='Legend',
@@ -717,7 +717,7 @@ class SimpleBot2d:
             
             return fig
 
-        def animate_optimization(results:dict, interval:int=100):
+        def animate_optimization(results:dict, interval:int=anim_interval):
             """
             Animates the optimization process by plotting the bot at each iteration.
             Args:
