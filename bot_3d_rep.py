@@ -57,15 +57,6 @@ class TF:
             [0,  0, 1, 0],
             [0,  0, 0, 1]
         ])
-
-    # Scaling matrix
-    def scaling_matrix(sx, sy, sz):
-        return np.array([
-            [sx, 0, 0, 0],
-            [0, sy, 0, 0],
-            [0, 0, sz, 0],
-            [0, 0, 0, 1]
-        ])
     
     def inverse_matrix(tf_matrix):
         return np.linalg.inv(tf_matrix)
@@ -81,7 +72,8 @@ class FOV3D:
                  focal_point:tuple[float, float, float]=(0, 0, 0), 
                  tf_matrix: np.array = np.eye(4), 
                  name=None,
-                 color: str = 'purple' 
+                 color: str = 'purple',
+                 coord_size: float = 0.2
                  ):
         """
         Initialize a new instance of the class.
@@ -101,6 +93,7 @@ class FOV3D:
         self.cost = cost
         self.name = name
         self.body = body
+        self.coord_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_size, origin=focal_point)
         if isinstance(focal_point, (list, tuple)):
             self.focal_point = np.array([[1, 0, 0, focal_point[0]],
                                          [0, 1, 0, focal_point[1]],
@@ -115,14 +108,6 @@ class FOV3D:
         elif isinstance(color, tuple):
             self.color = np.array(color, dtype=np.float64)/255
         self.body.paint_uniform_color(self.color)
-
-    def get_coord_mesh(self, size=5):
-        """
-        Returns a mesh representing the sensor coordinate frame for visualization.
-        """
-        mesh_coord_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=size, origin=(0,0,0))
-        mesh_coord_frame.transform(self.tf_matrix)
-        return mesh_coord_frame
     
     def get_fov_mesh(self, obstacles:o3d.geometry.TriangleMesh=None):
         """
@@ -132,7 +117,7 @@ class FOV3D:
         # TODO occlusions
         return None
 
-    def get_viz_meshes(self, viz_body=True, viz_coord=True, coord_size=0.2, viz_fov=True, obstacles=None, show_now=True) -> list[o3d.geometry.TriangleMesh]:
+    def get_viz_meshes(self, viz_body=True, viz_coord=True, viz_fov=True, obstacles=None, show_now=True) -> list[o3d.geometry.TriangleMesh]:
         """
         Plots the field of view (FOV) of the object.
         Parameters:
@@ -152,7 +137,7 @@ class FOV3D:
                 print(f"Sensor {self.name} has no body to visualize.")
         
         if viz_coord:
-            meshes.append(self.get_coord_mesh(size=coord_size))
+            meshes.append(self.coord_mesh)
 
         if viz_fov:
             meshes.append(self.get_fov_mesh(obstacles))
@@ -178,10 +163,12 @@ class FOV3D:
         print(f"Transforming sensor {self.name} to:\n{tf_matrix}")
         # Send the sensor back to the origin
         self.body.transform(TF.inverse_matrix(self.tf_matrix))
+        self.coord_mesh.transform(TF.inverse_matrix(self.tf_matrix))
         self.tf_matrix = np.eye(4)
 
         # Transform the sensor to the new pose
         self.body.transform(tf_matrix)
+        self.coord_mesh.transform(tf_matrix)
         self.tf_matrix = tf_matrix
         self.focal_point = self.focal_point @ tf_matrix
         print(f" New TF:\n{self.tf_matrix}")
