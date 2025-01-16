@@ -1,6 +1,11 @@
-import PIL.ImageColor
-import open3d as o3d
+import time
+
 import PIL
+import PIL.ImageColor
+
+import open3d as o3d
+import bpy
+import bmesh
 
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
@@ -61,6 +66,134 @@ class TF:
     def inverse_matrix(tf_matrix):
         return np.linalg.inv(tf_matrix)
     
+
+class Mesh:
+    """
+    A class to represent a 3D mesh object. Allows for easy operation and conversion between Open3D and Blender mesh objects."""
+    
+    def __init__(self, mesh:o3d.geometry.TriangleMesh|bpy.types.Object, name:str=None):
+        """
+        Initialize a new instance of the class.
+        Args:
+            mesh: The mesh to be converted.
+            name (str): The name of the mesh.
+        """
+        self.name = name
+        if isinstance(mesh, o3d.geometry.TriangleMesh):
+            self.omesh = mesh
+            self.bmesh = self.o3d_to_blender(mesh, name)
+        elif isinstance(mesh, bpy.types.Object):
+            self.bmesh = mesh
+            self.omesh = self.blender_to_o3d(mesh, name)
+        else:
+            raise ValueError(f"Invalid mesh type {type(mesh)}. Must be either an Open3D TriangleMesh or a Blender Object.")
+
+
+    def transform(self, tf_matrix):
+        """
+        Transforms the mesh by the given matrix.
+        Args:
+            tf_matrix (np.array): The transformation matrix.
+        """
+        self.bmesh.transform(tf_matrix)
+        self.omesh = self.blender_mesh_to_o3d(self.bmesh)
+        self.omesh.compute_vertex_normals()
+        return self
+    
+    def color(self, color:np.array):
+        """
+        Colors the mesh with the given color.
+        Args:
+            color (np.array): The color to apply to the mesh.
+        """
+        # BMESH
+        self.bmesh.data.materials.clear()
+        mat = bpy.data.materials.new(name=f"{self.name}_mat")
+        mat.diffuse_color = color
+        self.bmesh.data.materials.append(mat)
+
+        #OMESH
+        self.omesh.paint_uniform_color(color)
+        return self
+
+
+    def o3d_to_blender(self, o3d_mesh, name):
+        """
+        Converts an Open3D mesh to a Blender mesh.
+        Args:
+            o3d_mesh (o3d.geometry.TriangleMesh): The Open3D mesh to convert.
+            name (str): The name of the mesh.
+        Returns:
+            bpy.types.Object: The Blender mesh object.
+        """
+
+        # Create a new mesh
+        blender_mesh = bpy.data.meshes.new(name=f"{name}_mesh")
+        blender_object = bpy.data.objects.new(name=f"{name}_obj", object_data=blender_mesh)
+        bpy.context.collection.objects.link(blender_object)
+
+        # Get vertices and faces from Open3D mesh
+        vertices = np.asarray(o3d_mesh.vertices)
+        faces = np.asarray(o3d_mesh.triangles)
+
+        # Create a new bmesh
+        bm = bmesh.new()
+
+        # Add vertices
+        for v in vertices:
+            bm.verts.new(v)
+        bm.verts.ensure_lookup_table()
+
+        # Add faces
+        for f in faces:
+            bm.faces.new([bm.verts[i] for i in f])
+        bm.faces.ensure_lookup_table()
+
+        # Write the bmesh to the Blender mesh
+        bm.to_mesh(blender_mesh)
+        bm.free()
+
+        return blender_object
+    
+
+    def o3d_show(self):
+        o3d.visualization.draw_geometries([self.omesh])
+
+    def blender_to_o3d(self, b_mesh, name):
+        """
+        Converts a Blender bmesh to an Open3D TriangleMesh.
+        Args:
+            b_mesh (bmesh.types.BMesh): The Blender bmesh to convert.
+            name (str): The name of the mesh.
+        Returns:
+            o3d.geometry.TriangleMesh: The Open3D TriangleMesh object.
+        """
+        vertices = []
+        faces = []
+
+        for v in b_mesh.verts:
+            vertices.append([v.co.x, v.co.y, v.co.z])
+
+        for f in b_mesh.faces:
+            faces.append([v.index for v in f.verts])
+
+        o3d_mesh = o3d.geometry.TriangleMesh()
+        o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices)
+        o3d_mesh.triangles = o3d.utility.Vector3iVector(faces)
+
+        return o3d_mesh
+    
+    def blender_show(self):
+        bpy.context.view_layer.objects.active = self.bmesh
+        self.bmesh.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.view3d.view_selected()
+        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.select_all(action='DESELECT')
+        self.bmesh.select_set(False)
+    
+    
     
 class FOV3D:
     def __init__(self, 
@@ -68,7 +201,7 @@ class FOV3D:
                  v_fov:float,
                  distance:float,
                  cost:float,
-                 body:o3d.geometry.TriangleMesh=None, 
+                 body:Mesh=None, 
                  focal_point:tuple[float, float, float]=(0, 0, 0), 
                  tf_matrix: np.array = np.eye(4), 
                  name=None,
@@ -92,8 +225,8 @@ class FOV3D:
         self.distance = distance
         self.cost = cost
         self.name = name
-        self.body = body
-        self.coord_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_size, origin=focal_point)
+        self.body = Mesh(body) if not isinstance(body, Mesh) else body
+        self.coord_mesh = Mesh(o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_size, origin=focal_point))
         if isinstance(focal_point, (list, tuple)):
             self.focal_point = np.array([[1, 0, 0, focal_point[0]],
                                          [0, 1, 0, focal_point[1]],
@@ -107,9 +240,9 @@ class FOV3D:
             self.color = np.array(PIL.ImageColor.getrgb(color), dtype=np.float64)/255
         elif isinstance(color, tuple):
             self.color = np.array(color, dtype=np.float64)/255
-        self.body.paint_uniform_color(self.color)
+        self.body.color(self.color)
     
-    def get_fov_mesh(self, obstacles:o3d.geometry.TriangleMesh=None):
+    def get_fov_mesh(self, obstacles:list[Mesh]=None):
         """
         Returns a mesh representing the field of view of the sensor for visualization. 
         If obstacles are passed in, resultant FOV mesh will be occluded (calculated using ray casting).
@@ -117,7 +250,7 @@ class FOV3D:
         # TODO occlusions
         return None
 
-    def get_viz_meshes(self, viz_body=True, viz_coord=True, viz_fov=True, obstacles=None, show_now=True) -> list[o3d.geometry.TriangleMesh]:
+    def get_viz_meshes(self, viz_body=True, viz_coord=True, viz_fov=True, obstacles=None, show_now=True) -> list[Mesh]:
         """
         Plots the field of view (FOV) of the object.
         Parameters:
@@ -142,11 +275,9 @@ class FOV3D:
         if viz_fov:
             meshes.append(self.get_fov_mesh(obstacles))
 
-        for mesh in meshes:
-            mesh.compute_vertex_normals()
-
         if show_now:
-            o3d.visualization.draw_geometries(meshes)
+            for mesh in meshes:
+                mesh.o3d_show()
 
         return meshes
 
@@ -180,57 +311,51 @@ class FOV3D:
         raise NotImplementedError("This method is not yet implemented.")
     
 
-# class Bot3d:
-#     def __init__(self, shape:Polygon, sensor_coverage_requirement:Polygon|MultiPolygon|list, bot_color:str="blue", sensor_pose_constraint:Polygon|MultiPolygon|list=None, occlusions:Polygon|MultiPolygon|list=None):
-#         """
-#         Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
-#         Args:
-#             shape (shapely.geometry.Polygon): The geometric shape representing the bot.
-#             sensor_coverage_requirement (list or shapely.geometry.Polygon): The required sensor coverage areas. If a single polygon is provided, it will be converted to a list.
-#             bot_color (str, optional): The color of the bot. Defaults to "blue".
-#             sensor_pose_constraint (list or optional): Constraints on the sensor poses. If a single constraint is provided, it will be converted to a list. Defaults to None.
-#         Attributes:
-#             shape (shapely.geometry.Polygon): The geometric shape representing the bot.
-#             color (str): The color of the bot.
-#             sensors (list): A list to store sensors associated with the bot.
-#             sensor_pose_constraint (list): Constraints on the sensor poses.
-#             sensor_coverage_requirement (list): The required sensor coverage areas with the bot's shape removed from each.
-#         """
-#         self.shape = shape
-#         self.color = bot_color
-#         self.sensors = []
-
-#         def load_multipolygon_param(param):
-#             if type(param) is list:
-#                 return MultiPolygon(param)
-#             elif type(param) is Polygon:
-#                 return MultiPolygon([param])
-#             elif param is MultiPolygon or param is None:
-#                 return param
-#             else:
-#                 raise TypeError(f"{param} must be a list, Polygon, MultiPolygon, or None.")
+class Bot3d:
+    def __init__(self, 
+                 body:o3d.geometry.TriangleMesh,
+                 sensor_coverage_requirement:list[o3d.geometry.TriangleMesh],
+                 color:str="blue",
+                 sensor_pose_constraint:list[o3d.geometry.TriangleMesh]=None, 
+                 occlusions:list[o3d.geometry.TriangleMesh]=None,
+                 sensors:list[FOV3D]=[]):
+        """
+        Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
+        Args:
+            body (open3d.geometry): The mesh body of the bot.
+            sensor_coverage_requirement (list[open3d.geometry]): The required coverage area of the sensors.
+            color (str): The color of the bot.
+            sensor_pose_constraint (list[open3d.geometry]): The constraints on the sensor pose.
+            occlusions (list[open3d.geometry]): The occlusions that the sensors must avoid.
+        """
+        self.body = body
+        self.color = color
+        self.sensors = []
+        self.add_sensor_3d(sensors)
             
-#         self.sensor_coverage_requirement = load_multipolygon_param(sensor_coverage_requirement)
-#         self.sensor_pose_constraint = load_multipolygon_param(sensor_pose_constraint)
-#         self.occlusions = load_multipolygon_param(occlusions)
+        self.sensor_coverage_requirement = sensor_coverage_requirement
+        self.sensor_pose_constraint = sensor_pose_constraint
+        self.occlusions = occlusions
 
-#         # Remove self.shape from any of the sensor_coverage_requirement shapes
-#         self.sensor_coverage_requirement = MultiPolygon([req.difference(self.shape) for req in self.sensor_coverage_requirement.geoms])
+        # TODO Remove self.body from any of the sensor_coverage_requirement meshes
 
-#     def add_sensor_2d(self, sensor:FOV2D|None):
-#         """
-#         Adds a 2D sensor to the list of sensors. Only adds a sensor if it is not None.
-#         Parameters:
-#             sensor (FOV2D|None): The 2D sensor to be added (or None).
-#         Returns:
-#             bool: True if the sensor was added successfully, False otherwise.
-#         """
-#         if sensor is not None:
-#             self.sensors.append(sensor)
-#             return True
-#         return False
+    def add_sensor_3d(self, sensor:FOV3D|list[FOV3D]|None):
+        """
+        Adds a 3D sensor to the list of sensors. Only adds a sensor if it is not None.
+        Parameters:
+            sensor (FOV3D|None): The 3D sensor to be added (or None).
+        Returns:
+            bool: True if the sensor was added successfully, False otherwise.
+        """
+        if sensor is not None:
+            if sensor is list:
+                self.sensors.extend(sensor)
+            else:
+                self.sensors.append(sensor)
+            return True
+        return False
 
-#     def add_sensor_valid_pose(self, sensor:FOV2D, max_tries:int=25, verbose=False):
+#     def add_sensor_valid_pose(self, sensor:FOV3D, max_tries:int=25, verbose=False):
 #         """
 #         Adds a sensor to a valid location within the defined constraints.
 #         This method generates random points within the bounding box of the 
@@ -238,7 +363,7 @@ class FOV3D:
 #         It checks if the new sensor pose is valid and, if so, adds the sensor 
 #         to the list of sensors.
 #         Args:
-#             sensor (FOV2D): The sensor to be added, which will be translated 
+#             sensor (FOV3D): The sensor to be added, which will be translated 
 #                     to a valid location within the constraints.
 #         """
 #         for i in range(max_tries):
@@ -272,69 +397,42 @@ class FOV3D:
 #         for sensor in sensors:
 #             self.add_sensor_2d(sensor)
 
-#     def plot_bot(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, show_occlusions=True, title=None, ax=None):
-#         """
-#         Plots the robot's shape, sensor constraints, coverage requirements, and sensors on a 2D plot.
+    def show_bot_blender(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, show_sensor_fovs=True, show_occlusions=True, title=None, ax=None):
+        """
+        Open Blender showing (optionally, as specified) the robot's shape, sensor constraints, coverage requirements, and sensors.
         
-#         Parameters:
-#         -----------
-#         show_constraint : bool, optional
-#             If True, plots the sensor pose constraints (default is True).
-#         show_coverage_requirement : bool, optional
-#             If True, plots the sensor coverage requirements (default is True).
-#         show_sensors : bool, optional
-#             If True, plots the sensors' fields of view (default is True).
-#         title : str, optional
-#             The title of the plot (default is None).
-#         ax : matplotlib.axes.Axes, optional
-#             The axes on which to plot. If None, a new figure and axes are created (default is None).
+        Parameters:
+        -----------
+        show_constraint : bool, optional
+            If True, plots the sensor pose constraints (default is True).
+        show_coverage_requirement : bool, optional
+            If True, plots the sensor coverage requirements (default is True).
+        show_sensors : bool, optional
+            If True, plots the sensors' fields of view (default is True).
+        title : str, optional
+            The title of the plot (default is None).
+        ax : matplotlib.axes.Axes, optional
+            The axes on which to plot. If None, a new figure and axes are created (default is None).
         
-#         Returns:
-#         --------
-#         fig : matplotlib.figure.Figure
-#             The matplotlib figure object containing the plot.
-#         """
+        Returns:
+        --------
+        fig : matplotlib.figure.Figure
+            The matplotlib figure object containing the plot.
+        """
 
-#         if ax is None:
-#             fig, ax = plt.subplots()
-#         else:
-#             fig = ax.figure
+        # Set the bounds to just beyond the bounds of any of the shapes in the plot
+        all_shapes = [self.shape] + [self.sensor_pose_constraint] + [self.sensor_coverage_requirement] + [sensor.fov for sensor in self.sensors]
+        min_x = min(shape.bounds[0] for shape in all_shapes)
+        min_y = min(shape.bounds[1] for shape in all_shapes)
+        max_x = max(shape.bounds[2] for shape in all_shapes)
+        max_y = max(shape.bounds[3] for shape in all_shapes)
+        ax.set_xlim(min_x - 1, max_x + 1)
+        ax.set_ylim(min_y - 1, max_y + 1)
+        ax.set_aspect('equal', adjustable='box')
 
-#         plot_polygon_with_holes(self.shape, ax=ax, facecolor=self.color, alpha=0.5, edgecolor=self.color)
-
-#         if show_constraint and self.sensor_pose_constraint:
-#             for constraint in self.sensor_pose_constraint.geoms:
-#                 plot_polygon_with_holes(constraint, ax=ax, facecolor='green', alpha=0.25)
+        if title is not None:
+            ax.set_title(title)
         
-#         if show_coverage_requirement and self.sensor_coverage_requirement:
-#             for requirement in self.sensor_coverage_requirement.geoms:
-#                 plot_polygon_with_holes(requirement, ax=ax, facecolor='none', edgecolor='black', linestyle='dotted')
-
-#         if show_occlusions and self.occlusions:
-#             for occlusion in self.occlusions.geoms:
-#                 plot_polygon_with_holes(occlusion, ax=ax, facecolor='red', alpha=0.25)
-        
-#         if show_sensors and len(self.sensors)>0:
-#             for sensor in self.sensors:
-#                 sensor.plot_fov(whole_plot=False, obstacles=self.occlusions, ax=ax)
-
-#         # Set the bounds to just beyond the bounds of any of the shapes in the plot
-#         all_shapes = [self.shape] + [self.sensor_pose_constraint] + [self.sensor_coverage_requirement] + [sensor.fov for sensor in self.sensors]
-#         min_x = min(shape.bounds[0] for shape in all_shapes)
-#         min_y = min(shape.bounds[1] for shape in all_shapes)
-#         max_x = max(shape.bounds[2] for shape in all_shapes)
-#         max_y = max(shape.bounds[3] for shape in all_shapes)
-#         ax.set_xlim(min_x - 1, max_x + 1)
-#         ax.set_ylim(min_y - 1, max_y + 1)
-#         ax.set_aspect('equal', adjustable='box')
-
-#         if title is not None:
-#             ax.set_title(title)
-        
-#         if ax is None:
-#             plt.show()
-#         else:
-#             return fig
     
 #     def is_valid_sensor_pose(self, sensor:FOV2D, verbose=False):
 #         """
@@ -455,8 +553,8 @@ class FOV3D:
 
 #         return (coverage_area / requirement_area)
     
-#     def get_pkg_cost(self):
-#         return sum([sensor.cost for sensor in self.sensors if sensor is not None])
+    def get_pkg_cost(self):
+        return sum([sensor.cost for sensor in self.sensors if sensor is not None])
     
 #     def optimize_sensor_placement(self, method='trust-constr', plot=False, ax=None, plot_title=None, animate=False, anim_interval:int=100, verbose=False):
 
