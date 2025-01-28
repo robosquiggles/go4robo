@@ -20,4 +20,4 @@ Then point blender to the Conda Environment using these steps:
 
 ### VSCode
 
-I followed [this YouTube tutorial by CG Python](https://www.youtube.com/watch?v=_0srGXAzBZE) to get VSCode set up alongside Blender.
+I followed [this YouTube tutorial by CG Python](https://www.youtube.com/watch?v=_0srGXAzBZE) to get VSCode set up with Blender.

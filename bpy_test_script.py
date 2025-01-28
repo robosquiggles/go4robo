@@ -35,9 +35,8 @@ bpy.ops.object.delete()
 
 # Create a new mesh
 
-sensor_meshes = sensor.get_viz_meshes(viz_fov=False)
+sensor_meshes = sensor.get_viz_meshes(viz_fov=False, show_now=False)
 for mesh in sensor_meshes:
-    bpy.ops.import_scene.obj(filepath=mesh)
-    bpy.context.selected_objects[0].name = sensor.name
+    mesh.blender_show()
 
 ##############################

@@ -4,7 +4,18 @@ import PIL
 import PIL.ImageColor
 
 import open3d as o3d
-import bpy
+try:
+    import bpy
+    import bpy.types
+    BLENDER_MODE = True
+except ImportError:
+    print("Running outside Blender; Blender-specific features will not work.")
+    BLENDER_MODE = False
+    # Stub classes so references like bpy.types.Object won't break outside Blender
+    class bpy:
+        class types:
+            class Object:
+                pass
 import bmesh
 
 from matplotlib.path import Path
@@ -95,12 +106,11 @@ class Mesh:
         Args:
             tf_matrix (np.array): The transformation matrix.
         """
-        self.bmesh.transform(tf_matrix)
-        self.omesh = self.blender_mesh_to_o3d(self.bmesh)
-        self.omesh.compute_vertex_normals()
+        self.omesh.transform(tf_matrix)
+        self.bmesh = self.o3d_to_blender(self.omesh, name=self.name)
         return self
     
-    def color(self, color:np.array):
+    def color(self, color:np.array, alpha:float=1.0):
         """
         Colors the mesh with the given color.
         Args:
@@ -109,13 +119,12 @@ class Mesh:
         # BMESH
         self.bmesh.data.materials.clear()
         mat = bpy.data.materials.new(name=f"{self.name}_mat")
-        mat.diffuse_color = color
+        mat.diffuse_color = np.append(color, [alpha])
         self.bmesh.data.materials.append(mat)
 
         #OMESH
         self.omesh.paint_uniform_color(color)
         return self
-
 
     def o3d_to_blender(self, o3d_mesh, name):
         """
@@ -155,7 +164,6 @@ class Mesh:
 
         return blender_object
     
-
     def o3d_show(self):
         o3d.visualization.draw_geometries([self.omesh])
 
