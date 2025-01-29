@@ -10,6 +10,8 @@ Work for my MITsdm Masters' Thesis.
 
 `conda env create --name blenv --file conda_env.yml`
 
+_Note to self: to export the conda environment, activate it and then run: `conda env export --file conda_env.yml --no-builds`_
+
 ### Blender
 
 Install [Blender (Version 4.3.2) via the website](https://www.blender.org/download/).
