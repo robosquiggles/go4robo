@@ -1,0 +1,40 @@
+[0.011s] Invoking command in '/home/robosquiggles/go4robo/build/jackal_description': CONDA_PROMPT_MODIFIER=(go4r_ub) DEBUGINFOD_URLS=https://debuginfod.ubuntu.com VSCODE_ENV_PREPEND=PATH=/home/robosquiggles/.vscode-server/cli/servers/Stable-cd4ee3b1c348a13bafd8f9ad8060705f6d4b9cba/server/bin/remote-cli\x3a/opt/ros/jazzy/bin\x3a/home/robosquiggles/miniforge3/envs/go4r_ub/bin\x3a/home/robosquiggles/miniforge3/condabin\x3a/home/robosquiggles/ros2_jazzy/install/rviz2/bin\x3a/home/robosquiggles/ros2_jazzy/install/rqt_bag/bin\x3a/home/robosquiggles/ros2_jazzy/install/urdfdom/bin\x3a/home/robosquiggles/ros2_jazzy/install/rqt_graph/bin\x3a/home/robosquiggles/ros2_jazzy/install/rqt_gui/bin\x3a/home/robosquiggles/ros2_jazzy/install/ros2cli/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_uncrustify/bin\x3a/home/robosquiggles/ros2_jazzy/install/rosidl_cli/bin\x3a/home/robosquiggles/ros2_jazzy/install/launch_testing/bin\x3a/home/robosquiggles/ros2_jazzy/install/iceoryx_introspection/bin\x3a/home/robosquiggles/ros2_jazzy/install/cyclonedds/bin\x3a/home/robosquiggles/ros2_jazzy/install/iceoryx_posh/bin\x3a/home/robosquiggles/ros2_jazzy/install/fastrtps/bin\x3a/home/robosquiggles/ros2_jazzy/install/foonathan_memory_vendor/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_xmllint/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pyflakes/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pycodestyle/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pep257/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pclint/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_mypy/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_lint_cmake/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_flake8/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_copyright/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_index_python/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_cpplint/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_cppcheck/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_clang_tidy/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_clang_format/bin\x3a/usr/local/sbin\x3a/usr/local/bin\x3a/usr/sbin\x3a/usr/bin\x3a/sbin\x3a/bin\x3a/usr/games\x3a/usr/local/games\x3a/snap/bin\x3a/snap/bin\x3a/home/robosquiggles/miniforge/bin\x3a:PS1=(go4r_ub) /usr/bin/cmake /home/robosquiggles/go4robo/_datasets/raw/xacro/jackal/jackal_description -DCATKIN_INSTALL_INTO_PREFIX_ROOT=0 -DCMAKE_INSTALL_PREFIX=/home/robosquiggles/go4robo/install/jackal_description
+[0.065s] [0mCMake Deprecation Warning at CMakeLists.txt:1 (cmake_minimum_required):
+[0.065s]   Compatibility with CMake < 3.5 will be removed from a future version of
+[0.065s]   CMake.
+[0.065s] 
+[0.065s]   Update the VERSION argument <min> value or use a ...<max> suffix to tell
+[0.066s]   CMake that the project does not need compatibility with older versions.
+[0.066s] 
+[0.066s] [0m
+[0.290s] -- The C compiler identification is GNU 13.3.0
+[0.514s] -- The CXX compiler identification is GNU 13.3.0
+[0.538s] -- Detecting C compiler ABI info
+[0.631s] -- Detecting C compiler ABI info - done
+[0.642s] -- Check for working C compiler: /usr/bin/cc - skipped
+[0.643s] -- Detecting C compile features
+[0.643s] -- Detecting C compile features - done
+[0.654s] -- Detecting CXX compiler ABI info
+[0.747s] -- Detecting CXX compiler ABI info - done
+[0.760s] -- Check for working CXX compiler: /usr/bin/c++ - skipped
+[0.760s] -- Detecting CXX compile features
+[0.761s] -- Detecting CXX compile features - done
+[0.771s] [31mCMake Error at CMakeLists.txt:4 (find_package):
+[0.771s]   By not providing "Findcatkin.cmake" in CMAKE_MODULE_PATH this project has
+[0.771s]   asked CMake to find a package configuration file provided by "catkin", but
+[0.771s]   CMake did not find one.
+[0.772s] 
+[0.772s]   Could not find a package configuration file provided by "catkin" with any
+[0.772s]   of the following names:
+[0.772s] 
+[0.772s]     catkinConfig.cmake
+[0.772s]     catkin-config.cmake
+[0.772s] 
+[0.772s]   Add the installation prefix of "catkin" to CMAKE_PREFIX_PATH or set
+[0.772s]   "catkin_DIR" to a directory containing one of the above files.  If "catkin"
+[0.773s]   provides a separate development package or SDK, be sure it has been
+[0.773s]   installed.
+[0.773s] 
+[0.773s] [0m
+[0.773s] -- Configuring incomplete, errors occurred!
+[0.774s] Invoked command in '/home/robosquiggles/go4robo/build/jackal_description' returned '1': CONDA_PROMPT_MODIFIER=(go4r_ub) DEBUGINFOD_URLS=https://debuginfod.ubuntu.com VSCODE_ENV_PREPEND=PATH=/home/robosquiggles/.vscode-server/cli/servers/Stable-cd4ee3b1c348a13bafd8f9ad8060705f6d4b9cba/server/bin/remote-cli\x3a/opt/ros/jazzy/bin\x3a/home/robosquiggles/miniforge3/envs/go4r_ub/bin\x3a/home/robosquiggles/miniforge3/condabin\x3a/home/robosquiggles/ros2_jazzy/install/rviz2/bin\x3a/home/robosquiggles/ros2_jazzy/install/rqt_bag/bin\x3a/home/robosquiggles/ros2_jazzy/install/urdfdom/bin\x3a/home/robosquiggles/ros2_jazzy/install/rqt_graph/bin\x3a/home/robosquiggles/ros2_jazzy/install/rqt_gui/bin\x3a/home/robosquiggles/ros2_jazzy/install/ros2cli/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_uncrustify/bin\x3a/home/robosquiggles/ros2_jazzy/install/rosidl_cli/bin\x3a/home/robosquiggles/ros2_jazzy/install/launch_testing/bin\x3a/home/robosquiggles/ros2_jazzy/install/iceoryx_introspection/bin\x3a/home/robosquiggles/ros2_jazzy/install/cyclonedds/bin\x3a/home/robosquiggles/ros2_jazzy/install/iceoryx_posh/bin\x3a/home/robosquiggles/ros2_jazzy/install/fastrtps/bin\x3a/home/robosquiggles/ros2_jazzy/install/foonathan_memory_vendor/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_xmllint/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pyflakes/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pycodestyle/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pep257/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_pclint/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_mypy/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_lint_cmake/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_flake8/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_copyright/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_index_python/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_cpplint/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_cppcheck/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_clang_tidy/bin\x3a/home/robosquiggles/ros2_jazzy/install/ament_clang_format/bin\x3a/usr/local/sbin\x3a/usr/local/bin\x3a/usr/sbin\x3a/usr/bin\x3a/sbin\x3a/bin\x3a/usr/games\x3a/usr/local/games\x3a/snap/bin\x3a/snap/bin\x3a/home/robosquiggles/miniforge/bin\x3a:PS1=(go4r_ub) /usr/bin/cmake /home/robosquiggles/go4robo/_datasets/raw/xacro/jackal/jackal_description -DCATKIN_INSTALL_INTO_PREFIX_ROOT=0 -DCMAKE_INSTALL_PREFIX=/home/robosquiggles/go4robo/install/jackal_description
