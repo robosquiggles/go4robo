@@ -7,155 +7,131 @@ import subprocess
 import threading
 from tqdm import tqdm
 
-def main():
+TODO = f"❗❗ TODO ❗❗"
 
-    # Set environment variables and paths
-    os_env = os.environ.copy()
-    DATASETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    RAW_DIR = os.path.join(DATASETS_DIR, "raw")  # Where all URDFs are stored
-    SENSOR_MESH_DIR = os.path.join(DATASETS_DIR, "sensors")  # Where sensor meshes will be copied
-    ROBOTS_MESH_DIR = os.path.join(DATASETS_DIR, "robots")  # Where robot meshes will be copied
-    ROBOTS_NPY = os.path.join(ROBOTS_MESH_DIR, "robots_data.npy")  # Sensor data output file
-    SENSORS_NPY = os.path.join(SENSOR_MESH_DIR, "sensors_data.npy")  # Sensor data output file
+# Set environment variables and paths
+os_env = os.environ.copy()
+DATASETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+RAW_DIR = os.path.join(DATASETS_DIR, "raw")  # Where all URDFs are stored
+SENSOR_MESH_DIR = os.path.join(DATASETS_DIR, "sensors")  # Where sensor meshes will be copied
+ROBOTS_MESH_DIR = os.path.join(DATASETS_DIR, "robots")  # Where robot meshes will be copied
+ROBOTS_NPY = os.path.join(ROBOTS_MESH_DIR, "robots_data.npy")  # Sensor data output file
+SENSORS_NPY = os.path.join(SENSOR_MESH_DIR, "sensors_data.npy")  # Sensor data output file
 
-    print(f"➡️ DATASETS_DIR: {DATASETS_DIR}")
-    print(f"  ➡️ RAW_DIR: {RAW_DIR}")
-    print(f"  ➡️ SENSOR_MESH_DIR: {SENSOR_MESH_DIR}")
-    print(f"  ➡️ ROBOTS_MESH_DIR: {ROBOTS_MESH_DIR}")
-    print(f"  ➡️ ROBOTS_NPY: {ROBOTS_NPY}")
-    print(f"  ➡️ SENSORS_NPY: {SENSORS_NPY}")
+print(f"➡️ 📂 DATASETS_DIR: {DATASETS_DIR}"
+      f"\n➡️ 📂 RAW_DIR: {RAW_DIR}
+      f"\n➡️ 📂 SENSOR_MESH_DIR: {SENSOR_MESH_DIR}"
+      f"\n➡️ 📂 ROBOTS_MESH_DIR: {ROBOTS_MESH_DIR}
+      f"\n➡️ 📂 ROBOTS_NPY: {ROBOTS_NPY}"
+      f"\n➡️ 📂 SENSORS_NPY: {SENSORS_NPY}")
 
-    #Find ROS2
+#Find ROS2
+try:
+    ROS_DIR = os.path.join(os.sep, 'opt', 'ros', os_env['ROS_DISTRO'])
+    ROS_SRC_DIR = os.path.join(ROS_DIR, 'src')
+    subprocess.run(["ls", ROS_DIR], check=True)
+    print(f"➡️ ROS_DIR: {ROS_DIR}")
+except subprocess.CalledProcessError as e:
+    print(f"⚠ ROS2 not found: {e}")
+    user_input = input("Press enter to continue or 'q' to quit: ")
+    if user_input.lower() == 'q':
+        print("Exiting...")
+        sys.exit(1)
+
+def run_ros2_command(command):
+    """Runs a ROS 2 CLI command with proper sourcing."""
+    source_path = os.path.join(ROS_DIR, "setup.bash")
+    source_command = f"source {source_path} && " + command
+    result = subprocess.run(["bash", "-c", source_command], capture_output=True, text=True)
+    return result
+
+def get_ros2_packages():
+    """Returns a list of installed ROS 2 package names."""
+    result = run_ros2_command("ros2 pkg list")
+    return result.stdout.strip().split("\n")
+
+def get_package_prefix(package_name):
+    """Returns the install path of a ROS 2 package."""
+    result = run_ros2_command(f"ros2 pkg prefix {package_name}")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+def classify_description_file(file_path):
+    """Classifies URDF/XACRO files as robot, sensor, or other based on content."""
     try:
-        ROS_DIR = os.path.join(os.sep, 'opt', 'ros', os_env['ROS_DISTRO'])
-        ROS_SRC_DIR = os.path.join(ROS_DIR, 'src')
-        subprocess.run(["ls", ROS_DIR], check=True)
-        print(f"➡️ ROS_DIR: {ROS_DIR}")
-    except subprocess.CalledProcessError as e:
-        print(f"⚠ ROS2 not found: {e}")
-        user_input = input("Press enter to continue or 'q' to quit: ")
-        if user_input.lower() == 'q':
-            print("Exiting...")
-            sys.exit(1)
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read().lower()
+            if any(tag in content for tag in ["<robot", "base_link", "joint"]):
+                return "robot"
+            elif any(tag in content for tag in ["<sensor", "lidar", "camera", "imu"]):
+                return "sensor"
+    except Exception as e:
+        print(f"Warning: Could not read {file_path}: {e}")
+    return "other"
 
-    def run_ros2_command(command):
-        """Runs a ROS 2 CLI command with proper sourcing."""
-        source_path = os.path.join(ROS_DIR, "setup.bash")
-        source_command = f"source {source_path} && " + command
-        result = subprocess.run(["bash", "-c", source_command], capture_output=True, text=True)
-        return result
+def build_dependency_graph(package_prefix):
+    """Builds a dependency graph of URDF/XACRO files."""
+    dependencies = {}
+    if not os.path.isdir(package_prefix):
+        return dependencies
+    
+    for root, _, files in os.walk(package_prefix):
+        for file in files:
+            if file.endswith(".xacro") or file.endswith(".urdf"):
+                file_path = os.path.join(root, file)
+                dependencies[file_path] = set()
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        content = f.read().lower()
+                        for line in content.split("\n"):
+                            if ("<xacro:include" in line or "<include" in line) and "file=" in line:
+                                try:
+                                    included_file = line.split("file=")[1].split("\"")[1]
+                                    dependencies[file_path].add(os.path.join(root, included_file))
+                                except IndexError:
+                                    print(f"Warning: Malformed include statement in {file_path}: {line.strip()}")
+                except Exception as e:
+                    print(f"Warning: Could not process {file_path}: {e}")
+    return dependencies
 
-    def get_ros2_packages():
-        """Returns a list of installed ROS 2 package names."""
-        result = run_ros2_command("ros2 pkg list")
-        return result.stdout.strip().split("\n")
+def find_top_level_files(dependencies):
+    """Identifies top-level URDF/XACRO files by finding files that are not included by others."""
+    included_files = {file for includes in dependencies.values() for file in includes}
+    return [file for file in dependencies if file not in included_files]
 
-    def get_package_prefix(package_name):
-        """Returns the install path of a ROS 2 package."""
-        result = run_ros2_command(f"ros2 pkg prefix {package_name}")
-        return result.stdout.strip() if result.returncode == 0 else None
+def find_description_files(package_name, package_prefix):
+    """Searches for .xacro and .urdf files within a package, classifies them, and filters top-level files."""
+    dependencies = build_dependency_graph(package_prefix)
+    return find_top_level_files(dependencies)
 
-    def find_description_files(package_name, package_prefix):
-        """Searches for .xacro and .urdf files within a package."""
-        description_files = []
-        if not package_prefix or not os.path.isdir(package_prefix):
-            return description_files
-        
-        for root, _, files in os.walk(package_prefix):
-            for file in files:
-                if file.endswith(".xacro") or file.endswith(".urdf"):
-                    description_files.append(os.path.join(root, file))
-        
-        return description_files
-
-    # # Ensure output directories exist
-    # os.makedirs(SENSOR_MESH_DIR, exist_ok=True)
-    # os.makedirs(os.path.dirname(ROBOTS_NPY), exist_ok=True)
-
-    # # Start PyBullet in headless mode
-    # p.connect(p.DIRECT)
-    # p.setAdditionalSearchPath(pybullet_data.getDataPath())  # Ensure default assets are available
-
-    # Function to get absolute transformation matrix
-    def get_absolute_transform(robot_id, link_index):
-        """Returns the absolute 4x4 transformation matrix of a given link."""
-        pos, orn = p.getLinkState(robot_id, link_index, computeForwardKinematics=True)[:2]
-        rot_matrix = np.array(p.getMatrixFromQuaternion(orn)).reshape(3, 3)
-        
-        transform = np.eye(4)
-        transform[:3, :3] = rot_matrix
-        transform[:3, 3] = np.array(pos)
-        
-        return transform
-
-    # Function to copy mesh files
-    def copy_mesh(mesh_path):
-        """Copies the mesh file to SENSOR_MESH_DIR and returns the new path."""
-        if not mesh_path or mesh_path.startswith("package://"):
-            return None  # Ignore ROS package paths
-
-        abs_mesh_path = os.path.abspath(mesh_path)
-        if not os.path.exists(abs_mesh_path):
-            print(f"⚠ Warning: Mesh not found at {abs_mesh_path}")
-            return None
-
-        # Copy to sensor mesh directory
-        dest_path = os.path.join(SENSOR_MESH_DIR, os.path.basename(mesh_path))
-        shutil.copy2(abs_mesh_path, dest_path)
-        return dest_path
-
-    def has_robot_name(urdf_path):
-        with open(urdf_path, "r") as f:
-            for line in f:
-                if "<robot" in line and "name=" in line:
-                    return True
-        return False
-
-    def convert_xacro_to_urdf(xacro_path):
-        """Converts a .urdf.xacro file to a .urdf file using ROS2 xacro."""
-        urdf_path = xacro_path.replace(".xacro", "")
-        try:
-            print(f"⚠ Xacro encountered at {xacro_path} Attempting to Convert to .urdf")
-            subprocess.run(
-                ["ros2", "run", "xacro", "xacro", xacro_path, "-o", urdf_path],
-                # ["xacro", xacro_path, "-o", urdf_path],
-                check=True
-            )
-            return urdf_path
-        except subprocess.CalledProcessError as e:
-            print(f"⚠ Xacro conversion failed for {xacro_path}: {e}")
-            return None
-        
-    print(f"🔍 Searching for installed robot and sensor descriptions")
-    robots = []
-    sensors = []
-
+def main():
     ros2_packages = get_ros2_packages()
-    descriptions = {}
+    top_level_files = []
     
     for package in tqdm(ros2_packages, desc="Scanning packages"):
         package_prefix = get_package_prefix(package)
         description_files = find_description_files(package, package_prefix)
-        
-        if description_files:
-            descriptions[package] = description_files
+        top_level_files.extend(description_files)
     
-    if descriptions:
-        print("\nFound the following robot and sensor descriptions:")
-        for package, files in descriptions.items():
-            print(f"\nPackage: {package}")
-            for file in files:
-                print(f"  - {file}")
+    if top_level_files:
+        print("\nFound the following top-level URDF/XACRO files:")
+        for file in top_level_files:
+            print(f"  - {file}")
     else:
-        print("No robot or sensor descriptions found.")
+        print("No relevant top-level URDF/XACRO files found.")
 
+
+
+
+    ############################## Extract robot and sensor data ################################
     print(f"🚀 Starting data extraction!!")
 
-    print(f"✅ Finished processing {len(robots)} robots!")
+    print(TODO)
+
+    print(f"✅ Finished processing {len(top_level_files)} top-level URDFs!")
     print(f"  📂 Robot data saved at {ROBOTS_NPY}")
     print(f"  📂 Robot meshes saved at {ROBOTS_MESH_DIR}")
 
-    print(f"✅ Finished processing {len(sensors)} sensors!")
+    print(f"✅ Finished processing {TODO} sensors!")
     print(f"  📂 Sensor data saved at {SENSORS_NPY}")
     print(f"  📂 Sensor meshes saved at {SENSOR_MESH_DIR}")
 
