@@ -1,0 +1,30 @@
+[core]
+reloadable = true
+order = 0
+
+[package]
+version = "1.0.1"
+category = "Utilities"
+title = "go4robo"
+description = "Generation and Optimization of Sensor Packages for Robots"
+authors = ["Rachael Putnam"]
+repository = "https://github.com/robosquiggles/go4robo"
+keywords = ["robotics", "sensing", "perception", "design"]
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+preview_image = "data/preview.png"
+icon = "data/icon.png"
+
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"isaacsim.gui.components" = {}
+"isaacsim.core.api" = {}
+"omni.kit.menu.utils" = {}
+"omni.isaac.core" = {}
+"omni.physx" = {}
+"omni.usd" = {}
+"omni.timeline" = {}
+
+[[python.module]]
+name = "go4robo_python"
