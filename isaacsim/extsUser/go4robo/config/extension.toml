@@ -25,6 +25,10 @@ icon = "data/icon.png"
 "omni.physx" = {}
 "omni.usd" = {}
 "omni.timeline" = {}
+"omni.usd.libs" = {}
+
+[extension]
+entry_point = "go4robo_python.extension:PerceptionEntropyExtension"
 
 [[python.module]]
 name = "go4robo_python"
