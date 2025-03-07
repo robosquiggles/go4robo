@@ -8,8 +8,10 @@ from omni.isaac.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from omni.ui import color as cl
 from pxr import UsdGeom, Gf, Sdf, Usd
+import omni.isaac.core.utils.prims as prim_utils
+
+import omni.isaac.sensor as sensor
 
 import numpy as np
 import math
@@ -95,10 +97,11 @@ class PerceptionEntropyExtension(omni.ext.IExt):
         }
 
         self.log_messages = []
-        self.max_log_messages = 50  # Default value
+        self.max_log_messages = 100  # Default value
         self._build_ui()
+        
         self._window.visible = True
-    
+        
 
     def _build_ui(self):
         """Build the UI for the extension"""
@@ -114,7 +117,7 @@ class PerceptionEntropyExtension(omni.ext.IExt):
                             with ui.HStack(spacing=5):
                                 ui.Label("Select the Robot from the Stage, and click:")
                                 self.refresh_sensors_btn = ui.Button("Refresh Sensor List", clicked_fn=self._refresh_sensor_list, height=36)
-                            self.selected_robot_label = ui.Label("(No robot selected)", width=0, style = {"color": cl("#FF0000")})
+                            self.selected_robot_label = ui.Label("(loading)", width=0, style = {"color": ui.color("#FF0000")})
                             self.sensor_list = ui.ScrollingFrame(
                                 height=250,
                                 style={"border_width": 1, "border_color": 0xFF0000FF, "border_radius": 3}
@@ -185,12 +188,22 @@ class PerceptionEntropyExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5):
                             with ui.HStack(spacing=5, height=0):
                                 ui.Label("Max Messages:", width=100, height=18)
-                                self.max_messages_field = ui.IntField(width=60, height=18, )
+                                self.max_messages_field = ui.IntField(width=60, height=18)
                                 self.max_messages_field.model.set_value(self.max_log_messages)
                                 self.max_messages_field.model.add_value_changed_fn(self._update_max_log_messages)
                                 self.clear_log_btn = ui.Button("Clear Log", width=80, clicked_fn=self._clear_log, height=18)
 
-                            self.log_text = ui.ScrollingFrame(height=250)
+                            self.log_text = ui.ScrollingFrame(
+                                height=250, 
+                                style={
+                                    "border_width": 1, 
+                                    "border_color": 0xFF0000FF, 
+                                    "border_radius": 3,
+                                    "alignment": ui.Alignment.TOP,
+                                    "margin": 4
+                                },
+                                scroll_to_bottom_on_change=True
+                            )
                             with self.log_text:
                                 self.log_label = ui.Label("")
         
@@ -213,24 +226,24 @@ class PerceptionEntropyExtension(omni.ext.IExt):
         self._window.visible = not self._window.visible
 
     def _on_stage_event(self, event):
-        if event.type == int(omni.usd.StageEventType.SELECTION_CHANGED):
-            selection = self._usd_context.get_selection().get_selected_prim_paths()
+        # if event.type == int(omni.usd.StageEventType.SELECTION_CHANGED):
+        selection = self._usd_context.get_selection().get_selected_prim_paths()
 
-            if not selection:
-                self._log_message("Error: No prim selected")
-                self.selected_robot_label.text = "(No robot selected)"
-                self.selected_robot_label.style = {"color": cl("#FF0000")}
-                return
-            if len(selection) > 1:
-                self._log_message("Error: Multiple prims selected")
-                self.selected_robot_label.text = "(Please only select one prim)"
-                self.selected_robot_label.style = {"color": cl("#FFFF00")}
-                return
-            self.robot = selection[0]
-            self.selected_robot_label.text = f"Selected: {self.robot}"
-            self.selected_robot_label.style = {"color": cl("#00FFFF")}
+        if not selection:
+            self._log_message("Error: No prim selected")
+            self.selected_robot_label.text = "(No robot selected)"
+            self.selected_robot_label.style = {"color": ui.color("#FF0000")}
+            return
+        if len(selection) > 1:
+            self._log_message("Error: Multiple prims selected")
+            self.selected_robot_label.text = "(Please only select one prim)"
+            self.selected_robot_label.style = {"color": ui.color("#FFFF00")}
+            return
+        self.robot = selection[0]
+        self.selected_robot_label.text = f"Selected: {self.robot}"
+        self.selected_robot_label.style = {"color": ui.color("#00FFFF")}
         
-        self._log_message(f"Found Robot: {len(self.robot)}")
+        # self._log_message(f"Found Robot: {len(self.robot)}")
 
     # def _on_timeline_event(self, event):
     #     # if event.type == int(omni.timeline.TimelineEventType.PLAY):
@@ -327,13 +340,36 @@ class PerceptionEntropyExtension(omni.ext.IExt):
         """Refresh the list of detected sensors without analysis"""
         self._log_message("Refreshing sensor list...")
 
+        # Clear the current sensor list
+        self.detected_cameras.clear()
+        self.detected_lidars.clear()
+
+        # Search for sensors in the selected robot
         stage = get_current_stage()
+
+        def search_for_sensors(prim: Usd.Prim):
+            """Search a level for sensors"""
+            for child in prim.GetChildren():
+                self._log_message(f"DEBUG: Checking {child.GetPath()}")
+
+                camera = self._find_camera(child)
+                if camera is not None:
+                    self.detected_cameras.append(camera)
+                
+                lidar = self._find_lidar(child)
+                if lidar is not None:
+                    self.detected_lidars.append(lidar)
+                
+                search_for_sensors(child)
         
         # Find camera and LiDAR sensors
-        self.detected_cameras = self._find_cameras(stage, self.robot)
-        self.detected_lidars = self._find_lidars(stage, self.robot)
-        
-        self._log_message(f"Found {len(self.detected_cameras)} cameras and {len(self.detected_lidars)} LiDARs")
+        robot_prim = stage.GetPrimAtPath(self.robot)
+        if not robot_prim:
+            self._log_message(f"Error: Could not find prim at path {self.robot}")
+            return
+        else:
+            search_for_sensors(robot_prim)
+            self._log_message(f"Found {len(self.detected_cameras)} cameras and {len(self.detected_lidars)} LiDARs")
         
         # Update the sensor list UI
         self._update_sensor_list_ui()
@@ -351,16 +387,16 @@ class PerceptionEntropyExtension(omni.ext.IExt):
                 else:
                     # Display cameras
                     if self.detected_cameras:
-                        with ui.CollapsableFrame(f"Cameras: {len(self.detected_cameras)}", height=0, style={"border_color": cl("#FF00FF")}, collapsed=False):
+                        with ui.CollapsableFrame(f"Cameras: {len(self.detected_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
                             with ui.VStack(spacing=5):
                                 for idx, camera in enumerate(self.detected_cameras):
-                                    with ui.CollapsableFrame(f"{idx+1}. {camera['name']}", height=0, style={"border_color": cl("#FFFFFF")}, collapsed=True):
+                                    with ui.CollapsableFrame(f"{idx+1}. {camera['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                         with ui.VStack(spacing=2):
-                                            pos, rot = camera["transform"]
-                                            ui.Label(f"Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
-                                            ui.Label(f"HFOV: {math.degrees(camera['hfov']):.1f}°")
-                                            ui.Label(f"Resolution: {camera['resolution'][0]}x{camera['resolution'][1]}")
-                                            ui.Label(f"Focal Length: {camera['focal_length']:.2f} mm")
+                                            for property_name, property_value in camera.items():
+                                                if '*' in property_name:
+                                                    ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
+                                                else:
+                                                    ui.Label(f"{property_name}: {property_value}")
                                             
                                             # Show additional properties if available
                                             if 'properties' in camera:
@@ -374,16 +410,13 @@ class PerceptionEntropyExtension(omni.ext.IExt):
                         with ui.CollapsableFrame(f"LiDARs: {len(self.detected_lidars)}", height=0):
                             with ui.VStack(spacing=5):
                                 for idx, lidar in enumerate(self.detected_lidars):
-                                    with ui.CollapsableFrame(f"{idx+1}. {lidar['name']}", height=0, style={"border_color": cl("#FFFFFF")}, collapsed=True):
+                                    with ui.CollapsableFrame(f"{idx+1}. {lidar['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                         with ui.VStack(spacing=2):
-                                            pos, rot = lidar["transform"]
-                                            ui.Label(f"Position: ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})")
-                                            ui.Label(f"Channels: {lidar['channels']}")
-                                            ui.Label(f"Vertical FOV: {math.degrees(lidar['fov_vertical']):.1f}°")
-                                            ui.Label(f"Horizontal FOV: {math.degrees(lidar['fov_horizontal']):.1f}°")
-                                            ui.Label(f"Max Range: {lidar['max_range']:.1f} m")
-                                            if 'model' in lidar and lidar['model'] != "Unknown":
-                                                ui.Label(f"Model: {lidar['model']}")
+                                            for property_name, property_value in lidar.items():
+                                                if '*' in property_name:
+                                                    ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
+                                                else:
+                                                    ui.Label(f"{property_name}: {property_value}")
                                                 
                                             # Show additional properties if available
                                             if 'properties' in lidar and lidar['properties']:
@@ -452,129 +485,119 @@ class PerceptionEntropyExtension(omni.ext.IExt):
         
         return default_value
     
-    def _find_cameras(self, stage, robot_path) -> List[Dict]:
+    def _find_camera(self, prim) -> Dict:
         """Find cameras that are descendants of the selected robot"""
-        cameras = []
-        
-        # Get the root prim for filtering
-        root_prim = stage.GetPrimAtPath(robot_path)
-        if not root_prim:
-            self._log_message(f"Error: Could not find prim at path {robot_path}")
-            return cameras
-        
-        # Search for camera prims under the selected robot
-        for prim in Usd.PrimRange(root_prim):
-            if prim.IsA(UsdGeom.Camera):
-                # Skip editor cameras if a specific robot is selected
-                name = prim.GetName()
-                if robot_path != "/" and any(editor_cam in name for editor_cam in ["OmniverseKit", "editorCamera"]):
-                    continue
-                
-                # The rest of the camera detection code remains unchanged
-                # [existing camera extraction code...]
-                cam = UsdGeom.Camera(prim)
-                
-                # Get camera properties
-                focal_length = cam.GetFocalLengthAttr().Get()
-                h_aperture = cam.GetHorizontalApertureAttr().Get()
-                
-                # Calculate horizontal field of view
-                hfov = 2 * math.atan(h_aperture / (2 * focal_length))
-                
-                # Try to get resolution from prim attributes or use default
-                resolution = (1920, 1080)  # Default resolution
-                
-                # Try to get additional attributes if available
-                try:
-                    if prim.HasAttribute("resolution"):
-                        res_attr = prim.GetAttribute("resolution")
-                        if res_attr.IsValid():
-                            res_value = res_attr.Get()
-                            if isinstance(res_value, tuple) and len(res_value) == 2:
-                                resolution = res_value
-                except Exception as e:
-                    self._log_message(f"Error getting resolution for camera {prim.GetName()}: {str(e)}")
-                
-                camera_data = {
-                    "name": prim.GetName(),
-                    "path": str(prim.GetPath()),
-                    "transform": self._get_world_transform(prim),
-                    "focal_length": focal_length,
-                    "hfov": hfov,
-                    "resolution": resolution,
-                    "h_aperture": h_aperture,
-                    "properties": {
-                        "focal_length (mm)": focal_length,
-                        "horizontal_aperture (mm)": h_aperture,
-                        "horizontal_fov (degrees)": math.degrees(hfov),
-                        "resolution": f"{resolution[0]}x{resolution[1]}"
-                    }
-                }
-                
-                cameras.append(camera_data)
-                self._log_message(f"Found camera: {camera_data['name']} with HFOV: {math.degrees(camera_data['hfov']):.2f}°")
-                
-        return cameras
 
-    def _find_lidars(self, stage, robot_path) -> List[Dict]:
-        """Find LiDARs that are descendants of the selected robot"""
-        lidars = []
-        
-        # Get the root prim for filtering
-        root_prim = stage.GetPrimAtPath(robot_path)
-        if not root_prim:
-            self._log_message(f"Error: Could not find prim at path {robot_path}")
-            return lidars
-        
-        # Look for LiDAR-type prims under the selected robot
-        lidar_prim_names = ["lidar", "Lidar", "LiDAR", "LIDAR"]
-        lidar_prim_types = ["LidarPrim", "SensorPrim", "RangeSensor"]
-        
-        for prim in Usd.PrimRange(root_prim):
-            
+        # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
+
+        if prim.IsA(UsdGeom.Camera):
+            # Skip editor cameras if a specific robot is selected
             name = prim.GetName()
-            prim_type = prim.GetTypeName()
             
-            is_lidar = (
-                any(lidar_name in name.lower() for lidar_name in lidar_prim_names) or
-                str(prim_type) in lidar_prim_types
-            )
+            # The rest of the camera detection code remains unchanged
+            # [existing camera extraction code...]
+            cam = UsdGeom.Camera(prim)
             
-            if is_lidar:
-
-                properties = {}
-
-                try:
-                    fov_vertical = self._get_prim_attribute(prim, "verticalFov", math.radians(30.0)) # degrees
-                    fov_horizontal = self._get_prim_attribute(prim, "horizontalFov", math.radians(360.0)) # degrees
-                    res_vertical = self._get_prim_attribute(prim, "verticalResolution", 0.4) # degrees between rays
-                    res_horizontal = self._get_prim_attribute(prim, "horizontalResolution", 4.0)  # degrees between rays
-                    max_range = self._get_prim_attribute(prim, "maxRange", 100.0) # meters
-                    min_range = self._get_prim_attribute(prim, "minRange", 0.0) # meters
-                    channels = self._get_prim_attribute(prim, "channels", 64)
-                    
-                except Exception as e:
-                    self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
+            # Try to get resolution from prim attributes or use default
+            resolution = (1920, 1080)  # Default resolution
+            
+            # Try to get additional attributes if available
+            try:
+                if prim.HasAttribute("resolution"):
+                    res_attr = prim.GetAttribute("resolution")
+                    if res_attr.IsValid():
+                        res_value = res_attr.Get()
+                        if isinstance(res_value, tuple) and len(res_value) == 2:
+                            resolution = res_value
+            except Exception as e:
+                self._log_message(f"Error getting resolution for camera {prim.GetName()}: {str(e)}")
+            
+            camera_data = {}
+            camera_data.update({"*Name": name})
+            camera_data.update({"*Path": str(prim.GetPath())})
+            camera_data.update({"*Transform": self._get_world_transform(prim)})
+            camera_data.update({"*Position": camera_data["*Transform"][0]})
+            camera_data.update({"*Rotation": camera_data["*Transform"][1]})
+            camera_data.update({"Stereo Role": cam.GetStereoRoleAttr().Get()})
+            camera_data.update({"Focal Length": cam.GetFocalLengthAttr().Get()})
+            camera_data.update({"Horizontal Aperture": cam.GetHorizontalApertureAttr().Get()})
+            camera_data.update({"Aspect Ratio": self._get_prim_attribute(prim, "aspectRatio", 16.0 / 9.0)})
+            camera_data.update({"Horizontal FOV": 2 * math.atan(camera_data["Horizontal Aperture"] / (2 * camera_data["Focal Length"]))})
+            camera_data.update({"Vertical FOV": 2 * math.atan(math.tan(camera_data["Horizontal FOV"] / 2) / camera_data["Aspect Ratio"])})
+            camera_data.update({"Resolution": resolution})
+            camera_data.update({"Additional Properties": {
                 
-                # Extract model info etc...
-                # [existing model detection code]
+            }})
+            
+            self._log_message(f"Found camera: {camera_data['*Name']} with HFOV: {math.degrees(camera_data['Horizontal FOV']):.2f}°")
                 
-                lidar_data = {
-                    "name": name,
-                    "path": str(prim.GetPath()),
-                    "transform": self._get_world_transform(prim),
-                    "channels": channels,
-                    "fov_vertical": fov_vertical,
-                    "fov_horizontal": fov_horizontal,
-                    "max_range": max_range,
-                    "model": name,
-                    "properties": properties
-                }
-                
-                lidars.append(lidar_data)
-                self._log_message(f"Found LiDAR: {lidar_data['name']} ({name}, {channels} channels)")
+            return camera_data
         
-        return lidars
+        else:
+            return None
+
+    def _find_lidar(self, prim:Usd.Prim) -> List[Dict]:
+        """Find LiDARs that are descendants of the selected robot"""
+
+        def is_lidar_prim(prim:Usd.Prim) -> str:
+            """Check if a prim is a LiDAR"""
+
+            # self._log_message(f"DEBUG: Checking for LIDAR at {prim.GetPath()}")
+
+            # Check by type
+            type_name = str(prim.GetTypeName()).lower()
+            if "lidar" in type_name or "range" in type_name:
+                self._log_message(f"Found LiDAR: '{prim.GetName()}' using type name")
+                return "lidar by type"
+            
+            # Check by name - this is a fallback approach
+            name = prim.GetName().lower()
+            lidar_prim_names = ["lidar", "velodyne", "ouster", "hesai", "sick"]
+            if any(lidar_name in name for lidar_name in lidar_prim_names):
+                # If this is named lidar, likely there is a lidar under this prim
+                self._log_message(f"Found LiDAR: '{prim.GetName()}' using prim name")
+                return "lidar by name"
+            
+            return False
+            
+        lidar_data = {}
+        name = prim.GetName()
+
+        is_lidar = is_lidar_prim(prim)
+        
+        if is_lidar == "lidar by type":
+
+            # Try extracting LiDAR properties
+            try:
+                lidar_data.update({"*Name" : name})
+                lidar_data.update({"*Path" : str(prim.GetPath())})
+                lidar_data.update({"*Transform" : self._get_world_transform(prim)})
+                lidar_data.update({"*Position" : lidar_data["*Transform"][0]})
+                lidar_data.update({"*Rotation" : lidar_data["*Transform"][1]})
+                lidar_data.update({"Vertical FOV" : self._get_prim_attribute(prim, "verticalFov")}) # degrees
+                lidar_data.update({"Horizontal FOV" : self._get_prim_attribute(prim, "horizontalFov")}) # degrees
+                lidar_data.update({"Vertical Res" : self._get_prim_attribute(prim, "verticalResolution",)}) # degrees between rays
+                lidar_data.update({"Horizontal Res" : self._get_prim_attribute(prim, "horizontalResolution")})  # degrees between rays
+                lidar_data.update({"Max Range" : self._get_prim_attribute(prim, "maxRange")}) # meters
+                lidar_data.update({"Min Range" : self._get_prim_attribute(prim, "minRange")}) # meters
+                lidar_data.update({"Channels" : self._get_prim_attribute(prim, "channels")})
+            except Exception as e:
+                self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
+        
+        elif is_lidar == "lidar by name" and len(list(prim.GetChildren())) == 1:
+            lidar_data["*Name"] = [name]
+            # Search for LiDAR under this prim. Yes, more recursion!
+            for child in prim.GetChildren():
+                lidar = self._find_lidar(child)
+                if lidar:
+                    lidar["*Name"] = lidar_data["*Name"] + [lidar["*Name"]]
+                    return lidar
+
+        else:
+            lidar_data = None
+            
+        return lidar_data
+
     
     def _get_world_transform(self, prim) -> Tuple[Gf.Vec3d, Gf.Rotation]:
         """Get the world transform (position and rotation) of a prim"""
