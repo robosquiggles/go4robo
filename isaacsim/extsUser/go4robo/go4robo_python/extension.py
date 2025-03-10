@@ -21,7 +21,7 @@ import time
 
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
-class PerceptionEntropyExtension(omni.ext.IExt):
+class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
     
     def on_startup(self, ext_id):
@@ -47,6 +47,8 @@ class PerceptionEntropyExtension(omni.ext.IExt):
         add_menu_items(self._menu_items, EXTENSION_TITLE)
 
         self.ui_elements = []
+
+        self.selected_export_path=None
 
         # Events
         self._usd_context = omni.usd.get_context()
@@ -112,16 +114,26 @@ class PerceptionEntropyExtension(omni.ext.IExt):
                 with ui.VStack(spacing=5):
 
                     # Detected sensors section
-                    with ui.CollapsableFrame("Sensors", height=0):
-                        with ui.VStack(spacing=5):
+                    with ui.CollapsableFrame("Robot & Sensors", height=0):
+                        with ui.VStack(spacing=5, height=0):
                             with ui.HStack(spacing=5):
                                 ui.Label("Select the Robot from the Stage, and click:")
                                 self.refresh_sensors_btn = ui.Button("Refresh Sensor List", clicked_fn=self._refresh_sensor_list, height=36)
                             self.selected_robot_label = ui.Label("(loading)", width=0, style = {"color": ui.color("#FF0000")})
                             self.sensor_list = ui.ScrollingFrame(
                                 height=250,
-                                style={"border_width": 1, "border_color": 0xFF0000FF, "border_radius": 3}
                             )
+                            with ui.CollapsableFrame("Data Export", height=0, collapsed=True):
+                                with ui.VStack(spacing=5, height=0):
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Save Location:", width=120)
+                                        self.export_path_field = ui.StringField()
+                                        self.browse_path_btn = ui.Button("Browse...", width=80, clicked_fn=self._browse_export_path)
+                                    with ui.HStack(spacing=5, height=0):
+                                        ui.Label("Export to Tabular:", width=120)
+                                        # Add file path selection UI
+                                        self.export_robot_btn = ui.Button("Export Robot", clicked_fn=self._export_robot_data, height=36, enabled=False)
+                                        self.export_sensors_btn = ui.Button("Export Sensors", clicked_fn=self._export_sensor_data, height=36, enabled=False)
 
                     ui.Spacer(height=10)
                     
@@ -255,28 +267,6 @@ class PerceptionEntropyExtension(omni.ext.IExt):
     #     # self.ui_builder.on_timeline_event(event)
     #     pass
 
-    def _refresh_robot(self, levels=2):
-        """Find all potential robots in the scene and update the dropdown"""
-        self._log_message("Selecting robot...")
-
-        # Get the current stage
-        stage = get_current_stage()
-        if not stage:
-            self._log_message("Error: No stage is loaded")
-            return
-
-        selection = self._usd_context.get_selection().get_selected_prim_paths()
-
-        if not selection:
-            self._log_message("Error: No prim selected")
-            return
-        if len(selection) > 1:
-            self._log_message("Error: Multiple prims selected")
-            return
-        self.robot = selection[0]
-        
-        self._log_message(f"Found {len(self.robot)} potential robots")
-
     def _update_object_weight(self, obj_type: str, weight: float):
         """Update the weight of a specific object type"""
         self.target_objects[obj_type]["weight"] = weight
@@ -313,6 +303,179 @@ class PerceptionEntropyExtension(omni.ext.IExt):
         
         # Auto-scroll to bottom - this is handled by ScrollingFrame automatically
         # when content changes, but we could add explicit scrolling if needed
+
+
+    def _browse_export_path(self):
+        """Open a file dialog to select export location"""
+        import omni.kit.widget.filebrowser as fb
+        
+        # Create reference to persist the window
+        self.file_browser_window = ui.Window("Select Export Location", width=800, height=0)
+        
+        def on_file_picked():
+            self.export_path_field.model.set_value(self.selected_export_path.path)
+            type_str = "Directory" if self.selected_export_path._is_folder else "File"
+            if type_str == "Directory":
+                self.export_path_field.set_style({"color": ui.color("#ff0000")})
+                create_file_button.enabled = True
+            elif type_str == "File":
+                self.export_path_field.style = {"color": ui.color("#00FF00")}
+            else:
+                self.export_path_field.style = {"color": ui.color("#00eeff")}
+                
+            # Enable export buttons when path is selected
+            self.export_robot_btn.enabled = True
+            self.export_sensors_btn.enabled = True
+                
+            self._log_message(f"Export path set to: {self.selected_export_path.path}")
+
+        def on_browser_selection_changed(n, paths):
+            if paths and len(paths) > 0:
+                self.selected_export_path = paths[0]
+                # Check if it's a directory
+                type_str = "Directory" if paths[0]._is_folder else "File"
+                if type_str == "Directory":
+                    file_path_field.model.set_value(f"{self.selected_export_path.path}")
+                    file_path_field.set_style({"color": ui.color("#00FF00")})
+                    create_file_button.enabled = True
+                elif type_str == "File":
+                    file_path = paths[0].path
+                    file_name = file_path.split('/')[-1] if '/' in file_path else file_path
+                    file_name_base = file_name.rsplit('.', 1)[0] if '.' in file_name else file_name
+                    extension = file_name.rsplit('.', 1)[1] if '.' in file_name else ""
+                    
+                    # Set the path field to the directory
+                    directory = file_path[:-len(file_name)] if file_name in file_path else file_path
+                    file_path_field.model.set_value(directory)
+                    
+                    # Update file name field with the selected file's name
+                    file_name_field.model.set_value(file_name_base)
+                    
+                    # Update extension selection if applicable
+                    if extension == "csv":
+                        export_type_model.model.set_value(0)
+                    elif extension == "xlsx":
+                        export_type_model.model.set_value(1)  
+                    elif extension == "npy":
+                        export_type_model.model.set_value(2)
+                    file_path_field.set_style({"color": ui.color("#00FF00")})
+
+                    # Initially disable the create file button
+                    create_file_button.enabled = False
+                on_file_picked()
+            else:
+                file_path_field.model.set_value("(No selection)")
+
+        def _create_export_file():
+            """Create an export file at the selected path"""
+            path = self.selected_export_path.path if self.selected_export_path else None
+            if len(path) == 0:
+                self._log_message("Error: No export path selected")
+                return
+            
+            type_str = "Directory" if self.selected_export_path._is_folder else "File"
+            
+            # If it's a directory, update the file name field with current path
+            if type_str != "Directory":
+                self._log_message("Error: Selected path is not a directory")
+                return
+
+            file_path = self.selected_export_path.path + "/" + file_name_field.model.get_value_as_string() + ['.csv','.xlsx','.npy'][export_type_model.model.get_value_as_int()]
+            # Try to create the file or verify it can be written to
+            try:
+                # Just try opening the file to see if we can write to it
+                with open(file_path, 'w') as f:
+                    # Just create the file, we'll write data to it later
+                    pass
+                
+                self._log_message(f"Successfully created file: {file_path}")
+                
+                # Update UI to show the selected path
+                self.file_browser_window.visible = False
+            except Exception as e:
+                self._log_message(f"Error creating file: {str(e)}")
+                return
+            
+            self.selected_export_path = fb.Path(file_path)
+            self.export_path_label.text = f"Save to: {self.selected_export_path.path}"
+            self.export_path_label.style = {"color": ui.color("#00FF00")}
+            
+            # Enable export buttons when path is selected
+            self.export_robot_btn.enabled = True
+            self.export_sensors_btn.enabled = True
+            
+            self._log_message(f"Export file created at: {file_path}")
+            on_file_picked()
+        
+        with self.file_browser_window.frame:
+            with ui.VStack(spacing=5):
+                # Create the file browser widget
+                browser = fb.FileBrowserWidget(
+                    "Select File Location",
+                    allow_multi_selection=False,
+                    show_grid_view=True,
+                    filter_fn=lambda item: item is not None and (item._is_folder or 
+                                        item.path.endswith(".csv") or 
+                                        item.path.endswith(".xlsx") or
+                                        item.path.endswith(".npy"))
+                    
+                )
+                
+                # Use a file system model for local files
+                model = fb.FileSystemModel("Local", "/home")
+                browser.add_model_as_subtree(model)
+                browser._selection_changed_fn = on_browser_selection_changed
+
+                # Add text field to show selectionf
+                with ui.HStack(spacing=5, height=30):
+                    ui.Label("File Path:", width=0, height=30)
+                    file_path_field = ui.StringField(height=30, enabled=False, style={"color": ui.color("#FF0000")})
+                    file_path_field.model.set_value("(No selection)")
+                    ui.Label("/", width=0, height=30)
+                    file_name_field = ui.StringField(height=30, width=100, enabled=True, style={"background_color": ui.color("#000000")})
+                    file_name_field.model.set_value("sensor_data")
+                    with ui.HStack(spacing=5, height=30):
+                        # Add the file extension selector with radio buttons
+                        with ui.HStack(spacing=0, height=30):
+                            export_type_model = ui.RadioCollection()
+                            ui.RadioButton(radio_collection=export_type_model, text=".csv", width=45, height=0, value=0)
+                            ui.RadioButton(radio_collection=export_type_model, text=".xlsx", width=45, height=0, value=1)
+                            ui.RadioButton(radio_collection=export_type_model, text=".npy", width=45, height=0, value=2)
+                            
+                            def on_extension_type_changed(ext_type):
+                                file_name_path = file_name_field.model.get_value_as_string()
+                                if file_name_path:
+                                    extension = [".csv", ".xlsx", ".npy"][ext_type.as_int]
+                                    # Strip any existing extension and add the new one
+                                    base_name = file_name_path.rsplit('.', 1)[0] if '.' in file_name_path.split('/')[-1] else file_name_path
+                                    new_path = f"{base_name}{extension}"
+                                    file_name_field.model.set_value(new_path)
+                            
+                            export_type_model.model.add_value_changed_fn(on_extension_type_changed)
+                            # Enable file name field
+                            file_name_field.enabled = True
+                    create_file_button = ui.Button("Create File", clicked_fn=_create_export_file, height=30, width=0, enabled=False, tooltip="Create the file at the location. Select a valid directory to enable this button.")
+        
+        # Make the window visible
+        self.file_browser_window.visible = True
+
+    def _export_robot_data(self):
+        """Export robot data to the selected file path"""
+        if not self.selected_export_path:
+            self._log_message("Error: No export path selected")
+            return
+        
+        self._log_message(f"Exporting robot data to: {self.selected_export_path}")
+        # Implement your robot data export logic here
+
+    def _export_sensor_data(self):
+        """Export sensor data to the selected file path"""
+        if not self.selected_export_path:
+            self._log_message("Error: No export path selected")
+            return
+        
+        self._log_message(f"Exporting sensor data to: {self.selected_export_path}")
+        # Implement your sensor data export logic here
     
     def _reset_settings(self):
         """Reset all settings to default values"""
