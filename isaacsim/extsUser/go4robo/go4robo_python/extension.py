@@ -132,8 +132,10 @@ class GO4RExtension(omni.ext.IExt):
                                     with ui.HStack(spacing=5, height=0):
                                         ui.Label("Export to Tabular:", width=120)
                                         # Add file path selection UI
-                                        self.export_robot_btn = ui.Button("Export Robot", clicked_fn=self._export_robot_data, height=36, enabled=False)
-                                        self.export_sensors_btn = ui.Button("Export Sensors", clicked_fn=self._export_sensor_data, height=36, enabled=False)
+                                        self.export_robot_btn = ui.Button("Export Robot", clicked_fn=self._export_robot_data, height=36)
+                                        self.disable_ui_element(self.export_robot_btn)
+                                        self.export_sensors_btn = ui.Button("Export Sensors", clicked_fn=self._export_sensor_data, height=36)
+                                        self.disable_ui_element(self.export_sensors_btn)
 
                     ui.Spacer(height=10)
                     
@@ -222,6 +224,23 @@ class GO4RExtension(omni.ext.IExt):
         except Exception as e:
             print(f"Error building UI: {str(e)}")
             raise e
+        
+    def enable_ui_element(self, ui_element, text_color=None):
+        """Enable a button and restore its normal style"""
+        ui_element.enabled = True
+        if text_color is not None:
+            ui_element.set_style({"color": text_color})
+        else:
+            ui_element.set_style({})  # Reset to default style
+
+    def disable_ui_element(self, ui_element, text_color=None):
+        """Disable a button and apply disabled style"""
+        ui_element.enabled = False
+        ui_element.set_style({
+            "background_color": ui.color("#555555"),
+            "color": ui.color("#AAAAAA") if text_color is None else text_color,
+            "opacity": 0.7
+        })
 
 
     def _cleanup_ui(self): # TODO build the cleanup function
@@ -317,15 +336,15 @@ class GO4RExtension(omni.ext.IExt):
             type_str = "Directory" if self.selected_export_path._is_folder else "File"
             if type_str == "Directory":
                 self.export_path_field.set_style({"color": ui.color("#ff0000")})
-                create_file_button.enabled = True
+                self.enable_ui_element(create_file_button, text_color=ui.color("#00FF00"))
             elif type_str == "File":
                 self.export_path_field.style = {"color": ui.color("#00FF00")}
             else:
                 self.export_path_field.style = {"color": ui.color("#00eeff")}
                 
             # Enable export buttons when path is selected
-            self.export_robot_btn.enabled = True
-            self.export_sensors_btn.enabled = True
+            self.enable_ui_element(self.export_robot_btn, text_color=ui.color("#00FF00"))
+            self.enable_ui_element(self.export_sensors_btn, text_color=ui.color("#00FF00"))
                 
             self._log_message(f"Export path set to: {self.selected_export_path.path}")
 
@@ -337,7 +356,7 @@ class GO4RExtension(omni.ext.IExt):
                 if type_str == "Directory":
                     file_path_field.model.set_value(f"{self.selected_export_path.path}")
                     file_path_field.set_style({"color": ui.color("#00FF00")})
-                    create_file_button.enabled = True
+                    self.enable_ui_element(create_file_button, text_color=ui.color("#00FF00"))
                 elif type_str == "File":
                     file_path = paths[0].path
                     file_name = file_path.split('/')[-1] if '/' in file_path else file_path
@@ -361,7 +380,7 @@ class GO4RExtension(omni.ext.IExt):
                     file_path_field.set_style({"color": ui.color("#00FF00")})
 
                     # Initially disable the create file button
-                    create_file_button.enabled = False
+                    self.disable_ui_element(create_file_button)
                 on_file_picked()
             else:
                 file_path_field.model.set_value("(No selection)")
@@ -401,8 +420,8 @@ class GO4RExtension(omni.ext.IExt):
             self.export_path_label.style = {"color": ui.color("#00FF00")}
             
             # Enable export buttons when path is selected
-            self.export_robot_btn.enabled = True
-            self.export_sensors_btn.enabled = True
+            self.enable_ui_element(self.export_robot_btn, text_color=ui.color("#00FF00"))
+            self.enable_ui_element(self.export_sensors_btn, text_color=ui.color("#00FF00"))
             
             self._log_message(f"Export file created at: {file_path}")
             on_file_picked()
@@ -415,8 +434,8 @@ class GO4RExtension(omni.ext.IExt):
                     allow_multi_selection=False,
                     show_grid_view=True,
                     filter_fn=lambda item: item is not None and (item._is_folder or 
-                                        item.path.endswith(".csv") or 
-                                        item.path.endswith(".xlsx") or
+                                        # item.path.endswith(".csv") or 
+                                        # item.path.endswith(".xlsx") or
                                         item.path.endswith(".npy"))
                     
                 )
@@ -429,18 +448,22 @@ class GO4RExtension(omni.ext.IExt):
                 # Add text field to show selectionf
                 with ui.HStack(spacing=5, height=30):
                     ui.Label("File Path:", width=0, height=30)
-                    file_path_field = ui.StringField(height=30, enabled=False, style={"color": ui.color("#FF0000")})
+                    file_path_field = ui.StringField(height=30)
                     file_path_field.model.set_value("(No selection)")
+                    self.disable_ui_element(file_path_field, text_color=ui.color("#FF0000"))
                     ui.Label("/", width=0, height=30)
-                    file_name_field = ui.StringField(height=30, width=100, enabled=True, style={"background_color": ui.color("#000000")})
+                    file_name_field = ui.StringField(height=30, width=100)
+                    self.enable_ui_element(file_name_field, text_color=ui.color("#00FF00"))
                     file_name_field.model.set_value("sensor_data")
                     with ui.HStack(spacing=5, height=30):
                         # Add the file extension selector with radio buttons
                         with ui.HStack(spacing=0, height=30):
                             export_type_model = ui.RadioCollection()
-                            ui.RadioButton(radio_collection=export_type_model, text=".csv", width=45, height=0, value=0)
-                            ui.RadioButton(radio_collection=export_type_model, text=".xlsx", width=45, height=0, value=1)
-                            ui.RadioButton(radio_collection=export_type_model, text=".npy", width=45, height=0, value=2)
+                            self.disable_ui_element(ui.RadioButton(radio_collection=export_type_model, text=".csv", width=45, height=0, value=0))
+                            self.disable_ui_element(ui.RadioButton(radio_collection=export_type_model, text=".xlsx", width=45, height=0, value=1))
+                            self.enable_ui_element(ui.RadioButton(radio_collection=export_type_model, text=".npy", width=45, height=0, value=2), text_color=ui.color("#00FF00"))
+
+                            export_type_model.model.set_value(2)
                             
                             def on_extension_type_changed(ext_type):
                                 file_name_path = file_name_field.model.get_value_as_string()
@@ -452,9 +475,8 @@ class GO4RExtension(omni.ext.IExt):
                                     file_name_field.model.set_value(new_path)
                             
                             export_type_model.model.add_value_changed_fn(on_extension_type_changed)
-                            # Enable file name field
-                            file_name_field.enabled = True
-                    create_file_button = ui.Button("Create File", clicked_fn=_create_export_file, height=30, width=0, enabled=False, tooltip="Create the file at the location. Select a valid directory to enable this button.")
+                    create_file_button = ui.Button("Create File", clicked_fn=_create_export_file, height=30, width=0, ooltip="Create the file at the location. Select a valid directory to enable this button.")
+                    self.disable_ui_element(create_file_button)
         
         # Make the window visible
         self.file_browser_window.visible = True
@@ -465,7 +487,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message("Error: No export path selected")
             return
         
-        self._log_message(f"Exporting robot data to: {self.selected_export_path}")
+        self._log_message(f"Exporting robot data to: {self.selected_export_path.path}")
         # Implement your robot data export logic here
 
     def _export_sensor_data(self):
@@ -474,7 +496,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message("Error: No export path selected")
             return
         
-        self._log_message(f"Exporting sensor data to: {self.selected_export_path}")
+        self._log_message(f"Exporting sensor data to: {self.selected_export_path.path}")
         # Implement your sensor data export logic here
     
     def _reset_settings(self):
