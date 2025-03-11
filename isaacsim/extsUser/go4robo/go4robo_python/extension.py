@@ -63,12 +63,11 @@ class GO4RExtension(omni.ext.IExt):
         self.selected_robots = []
         self.robot_sensors = {}
 
-        # These just help handle the stage selection and structure
+        # And the previous selection
         self.previous_selection = []
-        self.processed_lidar_paths = set()
 
         # Store detected sensors
-        self.detected_cameras = []
+        self.detected_mono_cameras = []
         self.detected_lidars = []
         
         # Constants for calculation based on the paper
@@ -78,8 +77,8 @@ class GO4RExtension(omni.ext.IExt):
             "z_range": [0.0, 5.0]      # meters
         }
         
-        # Constants for camera AP calculation
-        self.camera_ap_constants = {
+        # Constants for mono camera AP calculation
+        self.mono_camera_ap_constants = {
             "a": 0.055,  # coefficient from the paper
             "b": 0.155   # coefficient from the paper
         }
@@ -195,7 +194,7 @@ class GO4RExtension(omni.ext.IExt):
                     # Results section
                     with ui.CollapsableFrame("Results", height=0):
                         with ui.VStack(spacing=5):
-                            self.camera_label = ui.Label("Cameras: Not analyzed")
+                            self.mono_camera_label = ui.Label("Mono Cameras: Not analyzed")
                             self.lidar_label = ui.Label("LiDARs: Not analyzed")
                             self.total_label = ui.Label("Total Perception Entropy: N/A")
                             
@@ -526,20 +525,19 @@ class GO4RExtension(omni.ext.IExt):
         self._log_message("Refreshing sensor list...")
 
         # Clear the current sensors
-        self.detected_cameras = []
+        self.detected_mono_cameras = []
         self.detected_lidars = []
         self.robot_sensors = {}
-        self.processed_lidar_paths = set()
         
         stage = get_current_stage()
-        total_cameras = 0
+        total_mono_cameras = 0
         total_lidars = 0
         
         for robot_path in self.selected_robots:
             # Initialize storage for this robot
             self.robot_sensors[robot_path] = {
                 "name": robot_path.split('/')[-1],
-                "cameras": [],
+                "mono_cameras": [],
                 "lidars": []
             }
             
@@ -553,19 +551,19 @@ class GO4RExtension(omni.ext.IExt):
             self._search_for_sensors(robot_prim, robot_path)
             
             # Count sensors for this robot
-            robot_cameras = self.robot_sensors[robot_path]["cameras"]
+            robot_cameras = self.robot_sensors[robot_path]["mono_cameras"]
             robot_lidars = self.robot_sensors[robot_path]["lidars"]
             
-            total_cameras += len(robot_cameras)
+            total_mono_cameras += len(robot_cameras)
             total_lidars += len(robot_lidars)
             
             # Add to global sensor lists
-            self.detected_cameras.extend(robot_cameras)
+            self.detected_mono_cameras.extend(robot_cameras)
             self.detected_lidars.extend(robot_lidars)
             
-            self._log_message(f"Robot {self.robot_sensors[robot_path]['name']}: {len(robot_cameras)} cameras and {len(robot_lidars)} LiDARs")
+            self._log_message(f"Robot {self.robot_sensors[robot_path]['name']}: {len(robot_cameras)} mono cameras and {len(robot_lidars)} LiDARs")
         
-        self._log_message(f"Total: {total_cameras} cameras and {total_lidars} LiDARs")
+        self._log_message(f"Total: {total_mono_cameras} mono cameras and {total_lidars} LiDARs")
         
         # Update the sensor list UI
         self._update_sensor_list_ui()
@@ -574,9 +572,9 @@ class GO4RExtension(omni.ext.IExt):
     def _search_for_sensors(self, prim, robot_path):
         """Search a level for sensors and add them to the specified robot"""
         for child in prim.GetChildren():
-            camera = self._find_camera(child)
+            camera = self._find_mono_camera(child)
             if camera is not None:
-                self.robot_sensors[robot_path]["cameras"].append(camera)
+                self.robot_sensors[robot_path]["mono_cameras"].append(camera)
             
             lidar = self._find_lidar(child)
             if lidar is not None:
@@ -599,7 +597,7 @@ class GO4RExtension(omni.ext.IExt):
                     # For each robot, create a collapsible frame
                     for robot_path, robot_data in self.robot_sensors.items():
                         robot_name = robot_data["name"]
-                        robot_cameras = robot_data["cameras"]
+                        robot_cameras = robot_data["mono_cameras"]
                         robot_lidars = robot_data["lidars"]
                         
                         # Skip robots with no sensors
@@ -614,9 +612,9 @@ class GO4RExtension(omni.ext.IExt):
                             collapsed=False
                         ):
                             with ui.VStack(spacing=5):
-                                # Display cameras for this robot
+                                # Display mono cameras for this robot
                                 if robot_cameras:
-                                    with ui.CollapsableFrame(f"Cameras: {len(robot_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
+                                    with ui.CollapsableFrame(f"Mono Cameras: {len(robot_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
                                         with ui.VStack(spacing=5):
                                             for idx, camera in enumerate(robot_cameras):
                                                 with ui.CollapsableFrame(f"{idx+1}. {camera['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
@@ -670,12 +668,12 @@ class GO4RExtension(omni.ext.IExt):
         self._refresh_sensor_list()
         
         # Use the detected sensors for analysis
-        cameras = self.detected_cameras
+        cameras = self.detected_mono_cameras
         lidars = self.detected_lidars
         
-        # Calculate perception entropy for cameras
-        camera_entropy = self._calculate_camera_entropy(cameras)
-        self.camera_label.text = f"Cameras: {camera_entropy:.4f}"
+        # Calculate perception entropy for mono cameras
+        mono_camera_entropy = self._calculate_mono_camera_entropy(cameras)
+        self.mono_camera_label.text = f"Mono Cameras: {mono_camera_entropy:.4f}"
         
         # Calculate perception entropy for LiDARs
         lidar_entropy = self._calculate_lidar_entropy(lidars)
@@ -684,10 +682,10 @@ class GO4RExtension(omni.ext.IExt):
         # Calculate total perception entropy (late fusion of sensors)
         if cameras and lidars:
             # Using late fusion strategy from the paper
-            total_entropy = self._apply_late_fusion([camera_entropy, lidar_entropy])
+            total_entropy = self._apply_late_fusion([mono_camera_entropy, lidar_entropy])
             self.total_label.text = f"Total Perception Entropy: {total_entropy:.4f}"
         elif cameras:
-            self.total_label.text = f"Total Perception Entropy: {camera_entropy:.4f}"
+            self.total_label.text = f"Total Perception Entropy: {mono_camera_entropy:.4f}"
         elif lidars:
             self.total_label.text = f"Total Perception Entropy: {lidar_entropy:.4f}"
         else:
@@ -714,17 +712,14 @@ class GO4RExtension(omni.ext.IExt):
         
         return default_value
     
-    def _find_camera(self, prim) -> Dict:
-        """Find cameras that are descendants of the selected robot"""
+    def _find_mono_camera(self, prim) -> Dict:
+        """Find mono cameras that are descendants of the selected robot"""
 
-        # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
+        # self._log_message(f"DEBUG: Checking for MONO CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
 
         if prim.IsA(UsdGeom.Camera):
             # Skip editor cameras if a specific robot is selected
             name = prim.GetName()
-            
-            # The rest of the camera detection code remains unchanged
-            # [existing camera extraction code...]
             cam = UsdGeom.Camera(prim)
             
             # Try to get resolution from prim attributes or use default
@@ -739,7 +734,7 @@ class GO4RExtension(omni.ext.IExt):
                         if isinstance(res_value, tuple) and len(res_value) == 2:
                             resolution = res_value
             except Exception as e:
-                self._log_message(f"Error getting resolution for camera {prim.GetName()}: {str(e)}")
+                self._log_message(f"Error getting resolution for mono camera {prim.GetName()}: {str(e)}")
             
             camera_data = {}
             camera_data.update({"*Name": name})
@@ -758,22 +753,21 @@ class GO4RExtension(omni.ext.IExt):
                 
             }})
             
-            self._log_message(f"Found camera: {camera_data['*Name']} with HFOV: {math.degrees(camera_data['Horizontal FOV']):.2f}°")
+            self._log_message(f"Found mono camera: {camera_data['*Name']} with HFOV: {math.degrees(camera_data['Horizontal FOV']):.2f}°")
                 
             return camera_data
         
         else:
             return None
 
-    def _find_lidar(self, prim:Usd.Prim) -> Dict:
+    def _find_lidar(self, prim:Usd.Prim) -> List[Dict]:
         """Find LiDARs that are descendants of the selected robot"""
-
-        # Skip if the prim has already been processed as a child
-        if str(prim.GetPath()) in self.processed_lidar_paths:
-            return None
 
         def is_lidar_prim(prim:Usd.Prim) -> str:
             """Check if a prim is a LiDAR"""
+
+            # self._log_message(f"DEBUG: Checking for LIDAR at {prim.GetPath()}")
+
             # Check by type
             type_name = str(prim.GetTypeName()).lower()
             if "lidar" in type_name or "range" in type_name:
@@ -782,36 +776,22 @@ class GO4RExtension(omni.ext.IExt):
             
             # Check by name - this is a fallback approach
             name = prim.GetName().lower()
-            lidar_prim_names = ["lidar", "velodyne", "ouster", "hesai", "sick", "lms"]
+            lidar_prim_names = ["lidar", "velodyne", "ouster", "hesai", "sick"]
             if any(lidar_name in name for lidar_name in lidar_prim_names):
                 # If this is named lidar, likely there is a lidar under this prim
                 self._log_message(f"Found LiDAR: '{prim.GetName()}' using prim name")
                 return "lidar by name"
             
             return False
-        
-        def find_actual_lidar_child(parent_prim):
-            """Search for the actual LiDAR component among children"""
-            for child in parent_prim.GetChildren():
-                child_type = str(child.GetTypeName()).lower()
-                child_name = child.GetName().lower()
-                
-                # Look for a child that is actually a LiDAR type
-                if "lidar" in child_type or "range" in child_type or "lidar" in child_name:
-                    return child
-                    
-            # If no specific LiDAR child found, just return the first child
-            children = list(parent_prim.GetChildren())
-            if children:
-                return children[0]
-            return None
-                
+            
         lidar_data = {}
         name = prim.GetName()
+
         is_lidar = is_lidar_prim(prim)
         
         if is_lidar == "lidar by type":
-            # Direct LiDAR prim - extract properties
+
+            # Try extracting LiDAR properties
             try:
                 lidar_data.update({"*Name" : name})
                 lidar_data.update({"*Path" : str(prim.GetPath())})
@@ -828,42 +808,18 @@ class GO4RExtension(omni.ext.IExt):
             except Exception as e:
                 self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
         
-        elif is_lidar == "lidar by name":
-            # This is a container/frame for a LiDAR - find the actual LiDAR component
-            actual_lidar_prim = find_actual_lidar_child(prim)
-            
-            if actual_lidar_prim:
-                
-                self.processed_lidar_paths.add(str(actual_lidar_prim.GetPath())) # Add to the already explored prims
+        elif is_lidar == "lidar by name" and len(list(prim.GetChildren())) == 1:
+            lidar_data["*Name"] = [name]
+            # Search for LiDAR under this prim. Yes, more recursion!
+            for child in prim.GetChildren():
+                lidar = self._find_lidar(child)
+                if lidar:
+                    lidar["*Name"] = lidar_data["*Name"] + [lidar["*Name"]]
+                    return lidar
 
-                # Use name from the parent frame but properties from the child
-                try:
-                    lidar_data.update({"*Name" : name})  # Use parent name (more descriptive)
-                    lidar_data.update({"*Path" : str(prim.GetPath())})
-                    lidar_data.update({"*Transform" : self._get_world_transform(prim)})
-                    lidar_data.update({"*Position" : lidar_data["*Transform"][0]})
-                    lidar_data.update({"*Rotation" : lidar_data["*Transform"][1]})
-                    
-                    # Get properties from the actual LiDAR child
-                    lidar_data.update({"*Child Name" : actual_lidar_prim.GetName()})
-                    lidar_data.update({"*Child Path" : str(actual_lidar_prim.GetPath())})
-                    lidar_data.update({"Vertical FOV" : self._get_prim_attribute(actual_lidar_prim, "verticalFov")})
-                    lidar_data.update({"Horizontal FOV" : self._get_prim_attribute(actual_lidar_prim, "horizontalFov")})
-                    lidar_data.update({"Vertical Res" : self._get_prim_attribute(actual_lidar_prim, "verticalResolution")})
-                    lidar_data.update({"Horizontal Res" : self._get_prim_attribute(actual_lidar_prim, "horizontalResolution")})
-                    lidar_data.update({"Max Range" : self._get_prim_attribute(actual_lidar_prim, "maxRange")})
-                    lidar_data.update({"Min Range" : self._get_prim_attribute(actual_lidar_prim, "minRange")})
-                    lidar_data.update({"Channels" : self._get_prim_attribute(actual_lidar_prim, "channels")})
-                    
-                    self._log_message(f"Found LiDAR hierarchy: {name} → {actual_lidar_prim.GetName()}")
-                except Exception as e:
-                    self._log_message(f"Error extracting LiDAR properties from child: {str(e)}")
-            else:
-                # No suitable child found
-                lidar_data = None
         else:
             lidar_data = None
-        
+            
         return lidar_data
 
     
@@ -878,15 +834,15 @@ class GO4RExtension(omni.ext.IExt):
         
         return position, rotation
     
-    def _calculate_camera_entropy(self, cameras: List[Dict]) -> float:
-        """Calculate perception entropy for all cameras"""
+    def _calculate_mono_camera_entropy(self, cameras: List[Dict]) -> float:
+        """Calculate perception entropy for all mono cameras"""
         if not cameras:
             return 0.0
         
         # Generate sample points in the perception space
         sample_points = self._generate_sample_points()
         
-        # For each camera, calculate entropy at each sample point
+        # For each mono camera, calculate entropy at each sample point
         camera_entropies = []
         
         for camera in cameras:
@@ -895,10 +851,10 @@ class GO4RExtension(omni.ext.IExt):
             
             for point, obj_type, weight in sample_points:
                 # Calculate pixel count (sensor measurement) for this point
-                pixel_count = self._calculate_camera_pixel_count(camera, point, obj_type)
+                pixel_count = self._calculate_mono_camera_pixel_count(camera, point, obj_type)
                 
                 # Convert pixel count to AP
-                ap = self._calculate_camera_ap(pixel_count)
+                ap = self._calculate_mono_camera_ap(pixel_count)
                 
                 # Convert AP to standard deviation
                 sigma = self._ap_to_sigma(ap)
@@ -910,9 +866,9 @@ class GO4RExtension(omni.ext.IExt):
             
             if total_weight > 0:
                 camera_entropies.append(entropy_sum / total_weight)
-                self._log_message(f"Camera {camera['name']} entropy: {camera_entropies[-1]:.4f}")
+                self._log_message(f"Mono Camera {camera['name']} entropy: {camera_entropies[-1]:.4f}")
         
-        # Use early fusion strategy for multiple cameras (sum of measurements)
+        # Use early fusion strategy for multiple mono cameras (sum of measurements)
         # In practice, we'd need a more sophisticated fusion model
         if len(camera_entropies) > 1:
             combined_entropy = self._apply_early_fusion(camera_entropies)
@@ -989,8 +945,8 @@ class GO4RExtension(omni.ext.IExt):
         
         return sample_points
     
-    def _calculate_camera_pixel_count(self, camera: Dict, point: Gf.Vec3d, obj_type: str) -> int:
-        """Calculate the number of pixels an object at given point would occupy in the camera"""
+    def _calculate_mono_camera_pixel_count(self, camera: Dict, point: Gf.Vec3d, obj_type: str) -> int:
+        """Calculate the number of pixels an object at given point would occupy in the mono camera"""
         # Extract camera properties
         cam_pos, cam_rot_matrix = camera["transform"]
         hfov = camera["hfov"]
@@ -1113,14 +1069,14 @@ class GO4RExtension(omni.ext.IExt):
         
         return point_count
     
-    def _calculate_camera_ap(self, pixel_count: int) -> float:
+    def _calculate_mono_camera_ap(self, pixel_count: int) -> float:
         """Calculate Average Precision (AP) based on pixel count using the paper's formula"""
         if pixel_count <= 0:
             return 0.001  # Minimal AP for numerical stability
         
         # Using the formula from the paper: AP ≈ a * ln(m) + b
-        a = self.camera_ap_constants["a"]
-        b = self.camera_ap_constants["b"]
+        a = self.mono_camera_ap_constants["a"]
+        b = self.mono_camera_ap_constants["b"]
         
         ap = a * math.log(pixel_count) + b
         
