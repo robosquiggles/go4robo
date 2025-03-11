@@ -58,7 +58,15 @@ Finally, in **Isaac Sim**:
 3. Enable the `VS CODE INTEGRATION` Extension (`isaacsim.code_editor.vscode" = { version = "1.0.5" }`). Setting it to "AUTOLOAD" is also a good idea.
 4. Enable the `VSCODE KIT DEBUGGER` Extension (`"isaacsim.code_editor.vscode" = { version = "1.0.5" }`). Setting it to "AUTOLOAD" is also a good idea.
 
-Now, you Isaac Sim should be all totally connected with VSCode!! Congrats!
+Note that this repo comes with the `.vscode` files configured so that you can immediately start working with Isaac Sim. To be able to set break points and otherwise easily introspect:
+
+1. Open the debugging tab on the left side bar in VSCode
+2. Use the dropdown to select the debugger labelled `Python: Attach (windows-x86/linux-x86_64)`
+3. Open `isaac_sim/extUser/go4robo/go4robo/go4robo_python/extension.py`
+4. Push the little green play button to start the debugger
+5. In Isaac Sim's `VSCode Link` extension windo, hit `Refresh`
+
+The text should show `VSCode Debugger Attached` in turquoise. You are now all set to start debugging the extension!
 
 ### Finally! The GO4R Isaac Sim Extension!
 
@@ -70,7 +78,7 @@ If you did all of the above correctly (especially the Isaac Sim install) correct
 
 ![GO4ROBO Isaac Sim Extension](./_artifacts/isaacsim_ext.png)
 
-*Hint: For a shortcut to edit the extension in VSCode, click the tiny VSCode icon in the upper right corner of the
+*Hint: For a shortcut to edit the extension in VSCode, click the tiny VSCode icon in the upper right corner of the extension page.
 
 ## Archive Project Setup
 
