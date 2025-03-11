@@ -63,8 +63,9 @@ class GO4RExtension(omni.ext.IExt):
         self.selected_robots = []
         self.robot_sensors = {}
 
-        # And the previous selection
+        # These just help handle the stage selection and structure
         self.previous_selection = []
+        self.processed_lidar_paths = set()
 
         # Store detected sensors
         self.detected_cameras = []
@@ -528,6 +529,7 @@ class GO4RExtension(omni.ext.IExt):
         self.detected_cameras = []
         self.detected_lidars = []
         self.robot_sensors = {}
+        self.processed_lidar_paths = set()
         
         stage = get_current_stage()
         total_cameras = 0
@@ -763,14 +765,15 @@ class GO4RExtension(omni.ext.IExt):
         else:
             return None
 
-    def _find_lidar(self, prim:Usd.Prim) -> List[Dict]:
+    def _find_lidar(self, prim:Usd.Prim) -> Dict:
         """Find LiDARs that are descendants of the selected robot"""
+
+        # Skip if the prim has already been processed as a child
+        if str(prim.GetPath()) in self.processed_lidar_paths:
+            return None
 
         def is_lidar_prim(prim:Usd.Prim) -> str:
             """Check if a prim is a LiDAR"""
-
-            # self._log_message(f"DEBUG: Checking for LIDAR at {prim.GetPath()}")
-
             # Check by type
             type_name = str(prim.GetTypeName()).lower()
             if "lidar" in type_name or "range" in type_name:
@@ -779,22 +782,36 @@ class GO4RExtension(omni.ext.IExt):
             
             # Check by name - this is a fallback approach
             name = prim.GetName().lower()
-            lidar_prim_names = ["lidar", "velodyne", "ouster", "hesai", "sick"]
+            lidar_prim_names = ["lidar", "velodyne", "ouster", "hesai", "sick", "lms"]
             if any(lidar_name in name for lidar_name in lidar_prim_names):
                 # If this is named lidar, likely there is a lidar under this prim
                 self._log_message(f"Found LiDAR: '{prim.GetName()}' using prim name")
                 return "lidar by name"
             
             return False
-            
+        
+        def find_actual_lidar_child(parent_prim):
+            """Search for the actual LiDAR component among children"""
+            for child in parent_prim.GetChildren():
+                child_type = str(child.GetTypeName()).lower()
+                child_name = child.GetName().lower()
+                
+                # Look for a child that is actually a LiDAR type
+                if "lidar" in child_type or "range" in child_type or "lidar" in child_name:
+                    return child
+                    
+            # If no specific LiDAR child found, just return the first child
+            children = list(parent_prim.GetChildren())
+            if children:
+                return children[0]
+            return None
+                
         lidar_data = {}
         name = prim.GetName()
-
         is_lidar = is_lidar_prim(prim)
         
         if is_lidar == "lidar by type":
-
-            # Try extracting LiDAR properties
+            # Direct LiDAR prim - extract properties
             try:
                 lidar_data.update({"*Name" : name})
                 lidar_data.update({"*Path" : str(prim.GetPath())})
@@ -811,18 +828,42 @@ class GO4RExtension(omni.ext.IExt):
             except Exception as e:
                 self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
         
-        elif is_lidar == "lidar by name" and len(list(prim.GetChildren())) == 1:
-            lidar_data["*Name"] = [name]
-            # Search for LiDAR under this prim. Yes, more recursion!
-            for child in prim.GetChildren():
-                lidar = self._find_lidar(child)
-                if lidar:
-                    lidar["*Name"] = lidar_data["*Name"] + [lidar["*Name"]]
-                    return lidar
+        elif is_lidar == "lidar by name":
+            # This is a container/frame for a LiDAR - find the actual LiDAR component
+            actual_lidar_prim = find_actual_lidar_child(prim)
+            
+            if actual_lidar_prim:
+                
+                self.processed_lidar_paths.add(str(actual_lidar_prim.GetPath())) # Add to the already explored prims
 
+                # Use name from the parent frame but properties from the child
+                try:
+                    lidar_data.update({"*Name" : name})  # Use parent name (more descriptive)
+                    lidar_data.update({"*Path" : str(prim.GetPath())})
+                    lidar_data.update({"*Transform" : self._get_world_transform(prim)})
+                    lidar_data.update({"*Position" : lidar_data["*Transform"][0]})
+                    lidar_data.update({"*Rotation" : lidar_data["*Transform"][1]})
+                    
+                    # Get properties from the actual LiDAR child
+                    lidar_data.update({"*Child Name" : actual_lidar_prim.GetName()})
+                    lidar_data.update({"*Child Path" : str(actual_lidar_prim.GetPath())})
+                    lidar_data.update({"Vertical FOV" : self._get_prim_attribute(actual_lidar_prim, "verticalFov")})
+                    lidar_data.update({"Horizontal FOV" : self._get_prim_attribute(actual_lidar_prim, "horizontalFov")})
+                    lidar_data.update({"Vertical Res" : self._get_prim_attribute(actual_lidar_prim, "verticalResolution")})
+                    lidar_data.update({"Horizontal Res" : self._get_prim_attribute(actual_lidar_prim, "horizontalResolution")})
+                    lidar_data.update({"Max Range" : self._get_prim_attribute(actual_lidar_prim, "maxRange")})
+                    lidar_data.update({"Min Range" : self._get_prim_attribute(actual_lidar_prim, "minRange")})
+                    lidar_data.update({"Channels" : self._get_prim_attribute(actual_lidar_prim, "channels")})
+                    
+                    self._log_message(f"Found LiDAR hierarchy: {name} → {actual_lidar_prim.GetName()}")
+                except Exception as e:
+                    self._log_message(f"Error extracting LiDAR properties from child: {str(e)}")
+            else:
+                # No suitable child found
+                lidar_data = None
         else:
             lidar_data = None
-            
+        
         return lidar_data
 
     
