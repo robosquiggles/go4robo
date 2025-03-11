@@ -5,3 +5,5 @@ isaacsim/*
 !.gitignore
 !isaacsim/extsUser/
 !isaacsim/extsUser/*
+!.vscode/
+!.vscode/*

@@ -4,13 +4,19 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        
         {
-            "name": "Python Debugger: Current File",
-            "type": "debugpy",
+            "name": "Python: Current File",
+            "type": "python",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "sudo": true
+            "env": {
+                "RESOURCE_NAME": "IsaacSim"
+            },
+            "python": "${workspaceFolder}/kit/python/bin/python3",
+            "envFile": "${workspaceFolder}/.vscode/.standalone_examples.env",
+            "preLaunchTask": "setup_python_env"
         },
         {
             "name": "Python: Attach (windows-x86_64/linux-x86_64)",
@@ -39,6 +45,6 @@
                     "ignoreFailures": true
                 }
             ]
-        },
+        }
     ]
 }
