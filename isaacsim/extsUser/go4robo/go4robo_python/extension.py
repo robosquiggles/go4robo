@@ -59,9 +59,12 @@ class GO4RExtension(omni.ext.IExt):
         # stream = self._timeline.get_timeline_event_stream()
         # self._timeline_event_sub = stream.create_subscription_to_pop(self._on_timeline_event)
 
-        # Store the robot
-        self.robot = ""  # Initialize empty robot path
-        self.selected_robot_path = "/"  # Initialize with default path
+        # Store the robots
+        self.selected_robots = []
+        self.robot_sensors = {}
+
+        # And the previous selection
+        self.previous_selection = []
 
         # Store detected sensors
         self.detected_cameras = []
@@ -257,34 +260,29 @@ class GO4RExtension(omni.ext.IExt):
         self._window.visible = not self._window.visible
 
     def _on_stage_event(self, event):
-        # if event.type == int(omni.usd.StageEventType.SELECTION_CHANGED):
         selection = self._usd_context.get_selection().get_selected_prim_paths()
+
+        # Only process if selection has actually changed
+        if set(selection) == set(self.previous_selection):
+            return  # Skip if selection hasn't changed
+
+        # Store current selection for future comparison
+        self.previous_selection = selection.copy()
 
         if not selection:
             self._log_message("Error: No prim selected")
             self.selected_robot_label.text = "(No robot selected)"
             self.selected_robot_label.style = {"color": ui.color("#FF0000")}
+            self.selected_robots = []
             return
-        if len(selection) > 1:
-            self._log_message("Error: Multiple prims selected")
-            self.selected_robot_label.text = "(Please only select one prim)"
-            self.selected_robot_label.style = {"color": ui.color("#FFFF00")}
-            return
-        self.robot = selection[0]
-        self.selected_robot_label.text = f"Selected: {self.robot}"
+
+        self.selected_robots = selection
+        robot_names = [path.split('/')[-1] for path in selection]
+        self.selected_robot_label.text = f"Selected: {len(selection)} robot{'s' if len(selection) > 1 else ''}"
         self.selected_robot_label.style = {"color": ui.color("#00FFFF")}
         
-        # self._log_message(f"Found Robot: {len(self.robot)}")
-
-    # def _on_timeline_event(self, event):
-    #     # if event.type == int(omni.timeline.TimelineEventType.PLAY):
-    #     #     if not self._physx_subscription:
-    #     #         self._physx_subscription = self._physxIFace.subscribe_physics_step_events(self._on_physics_step)
-    #     # elif event.type == int(omni.timeline.TimelineEventType.STOP):
-    #     #     self._physx_subscription = None
-
-    #     # self.ui_builder.on_timeline_event(event)
-    #     pass
+        # Log the selected robots
+        self._log_message(f"Selected robots: {', '.join(robot_names)}")
 
     def _update_object_weight(self, obj_type: str, weight: float):
         """Update the weight of a specific object type"""
@@ -525,90 +523,133 @@ class GO4RExtension(omni.ext.IExt):
         """Refresh the list of detected sensors without analysis"""
         self._log_message("Refreshing sensor list...")
 
-        # Clear the current sensor list
-        self.detected_cameras.clear()
-        self.detected_lidars.clear()
-
-        # Search for sensors in the selected robot
-        stage = get_current_stage()
-
-        def search_for_sensors(prim: Usd.Prim):
-            """Search a level for sensors"""
-            for child in prim.GetChildren():
-                self._log_message(f"DEBUG: Checking {child.GetPath()}")
-
-                camera = self._find_camera(child)
-                if camera is not None:
-                    self.detected_cameras.append(camera)
-                
-                lidar = self._find_lidar(child)
-                if lidar is not None:
-                    self.detected_lidars.append(lidar)
-                
-                search_for_sensors(child)
+        # Clear the current sensors
+        self.detected_cameras = []
+        self.detected_lidars = []
+        self.robot_sensors = {}
         
-        # Find camera and LiDAR sensors
-        robot_prim = stage.GetPrimAtPath(self.robot)
-        if not robot_prim:
-            self._log_message(f"Error: Could not find prim at path {self.robot}")
-            return
-        else:
-            search_for_sensors(robot_prim)
-            self._log_message(f"Found {len(self.detected_cameras)} cameras and {len(self.detected_lidars)} LiDARs")
+        stage = get_current_stage()
+        total_cameras = 0
+        total_lidars = 0
+        
+        for robot_path in self.selected_robots:
+            # Initialize storage for this robot
+            self.robot_sensors[robot_path] = {
+                "name": robot_path.split('/')[-1],
+                "cameras": [],
+                "lidars": []
+            }
+            
+            # Find robot prim
+            robot_prim = stage.GetPrimAtPath(robot_path)
+            if not robot_prim:
+                self._log_message(f"Error: Could not find prim at path {robot_path}")
+                continue
+                
+            # Search for sensors in this robot
+            self._search_for_sensors(robot_prim, robot_path)
+            
+            # Count sensors for this robot
+            robot_cameras = self.robot_sensors[robot_path]["cameras"]
+            robot_lidars = self.robot_sensors[robot_path]["lidars"]
+            
+            total_cameras += len(robot_cameras)
+            total_lidars += len(robot_lidars)
+            
+            # Add to global sensor lists
+            self.detected_cameras.extend(robot_cameras)
+            self.detected_lidars.extend(robot_lidars)
+            
+            self._log_message(f"Robot {self.robot_sensors[robot_path]['name']}: {len(robot_cameras)} cameras and {len(robot_lidars)} LiDARs")
+        
+        self._log_message(f"Total: {total_cameras} cameras and {total_lidars} LiDARs")
         
         # Update the sensor list UI
         self._update_sensor_list_ui()
+
+
+    def _search_for_sensors(self, prim, robot_path):
+        """Search a level for sensors and add them to the specified robot"""
+        for child in prim.GetChildren():
+            camera = self._find_camera(child)
+            if camera is not None:
+                self.robot_sensors[robot_path]["cameras"].append(camera)
+            
+            lidar = self._find_lidar(child)
+            if lidar is not None:
+                self.robot_sensors[robot_path]["lidars"].append(lidar)
+            
+            # Recursively search child prims
+            self._search_for_sensors(child, robot_path)
+
     
     def _update_sensor_list_ui(self):
-        """Update the sensor list UI with the detected sensors"""
+        """Update the sensor list UI with the detected sensors for all robots"""
         # Clear the current sensor list
         self.sensor_list.clear()
         
-        # Create a new UI for the sensor list
         with self.sensor_list:
             with ui.VStack(spacing=5):
-                if not self.detected_cameras and not self.detected_lidars:
-                    ui.Label("No sensors detected")
+                if not self.robot_sensors:
+                    ui.Label("No robots selected")
                 else:
-                    # Display cameras
-                    if self.detected_cameras:
-                        with ui.CollapsableFrame(f"Cameras: {len(self.detected_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
+                    # For each robot, create a collapsible frame
+                    for robot_path, robot_data in self.robot_sensors.items():
+                        robot_name = robot_data["name"]
+                        robot_cameras = robot_data["cameras"]
+                        robot_lidars = robot_data["lidars"]
+                        
+                        # Skip robots with no sensors
+                        if not robot_cameras and not robot_lidars:
+                            continue
+                            
+                        # Create collapsible frame for this robot with blue border
+                        with ui.CollapsableFrame(
+                            f"Robot: {robot_name}", 
+                            height=0, 
+                            style={"border_width": 2, "border_color": ui.color("#0088FF")}, 
+                            collapsed=False
+                        ):
                             with ui.VStack(spacing=5):
-                                for idx, camera in enumerate(self.detected_cameras):
-                                    with ui.CollapsableFrame(f"{idx+1}. {camera['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
-                                        with ui.VStack(spacing=2):
-                                            for property_name, property_value in camera.items():
-                                                if '*' in property_name:
-                                                    ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
-                                                else:
-                                                    ui.Label(f"{property_name}: {property_value}")
-                                            
-                                            # Show additional properties if available
-                                            if 'properties' in camera:
-                                                with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
+                                # Display cameras for this robot
+                                if robot_cameras:
+                                    with ui.CollapsableFrame(f"Cameras: {len(robot_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
+                                        with ui.VStack(spacing=5):
+                                            for idx, camera in enumerate(robot_cameras):
+                                                with ui.CollapsableFrame(f"{idx+1}. {camera['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                     with ui.VStack(spacing=2):
-                                                        for prop_name, prop_value in camera['properties'].items():
-                                                            ui.Label(f"{prop_name}: {prop_value}")
-                    
-                    # Display LiDARs
-                    if self.detected_lidars:
-                        with ui.CollapsableFrame(f"LiDARs: {len(self.detected_lidars)}", height=0):
-                            with ui.VStack(spacing=5):
-                                for idx, lidar in enumerate(self.detected_lidars):
-                                    with ui.CollapsableFrame(f"{idx+1}. {lidar['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
-                                        with ui.VStack(spacing=2):
-                                            for property_name, property_value in lidar.items():
-                                                if '*' in property_name:
-                                                    ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
-                                                else:
-                                                    ui.Label(f"{property_name}: {property_value}")
-                                                
-                                            # Show additional properties if available
-                                            if 'properties' in lidar and lidar['properties']:
-                                                with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
+                                                        for property_name, property_value in camera.items():
+                                                            if '*' in property_name:
+                                                                ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
+                                                            else:
+                                                                ui.Label(f"{property_name}: {property_value}")
+                                                        
+                                                        # Show additional properties if available
+                                                        if 'properties' in camera:
+                                                            with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
+                                                                with ui.VStack(spacing=2):
+                                                                    for prop_name, prop_value in camera['properties'].items():
+                                                                        ui.Label(f"{prop_name}: {prop_value}")
+                                
+                                # Display LiDARs for this robot
+                                if robot_lidars:
+                                    with ui.CollapsableFrame(f"LiDARs: {len(robot_lidars)}", height=0, style={"border_color": ui.color("#00FFFF")}, collapsed=False):
+                                        with ui.VStack(spacing=5):
+                                            for idx, lidar in enumerate(robot_lidars):
+                                                with ui.CollapsableFrame(f"{idx+1}. {lidar['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                     with ui.VStack(spacing=2):
-                                                        for prop_name, prop_value in lidar['properties'].items():
-                                                            ui.Label(f"{prop_name}: {prop_value}")
+                                                        for property_name, property_value in lidar.items():
+                                                            if '*' in property_name:
+                                                                ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
+                                                            else:
+                                                                ui.Label(f"{property_name}: {property_value}")
+                                                            
+                                                        # Show additional properties if available
+                                                        if 'properties' in lidar and lidar['properties']:
+                                                            with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
+                                                                with ui.VStack(spacing=2):
+                                                                    for prop_name, prop_value in lidar['properties'].items():
+                                                                        ui.Label(f"{prop_name}: {prop_value}")
     
     def _analyze_sensors(self):
         """Main function to analyze all sensors on the robot"""
