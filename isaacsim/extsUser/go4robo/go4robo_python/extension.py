@@ -120,9 +120,9 @@ class GO4RExtension(omni.ext.IExt):
                     with ui.CollapsableFrame("Robot & Sensors", height=0):
                         with ui.VStack(spacing=5, height=0):
                             with ui.HStack(spacing=5):
-                                ui.Label("Select the Robot from the Stage, and click:")
-                                self.refresh_sensors_btn = ui.Button("Refresh Sensor List", clicked_fn=self._refresh_sensor_list, height=36)
-                            self.selected_robot_label = ui.Label("(loading)", width=0, style = {"color": ui.color("#FF0000")})
+                                self.selected_robot_label = ui.Label("(Select one or more robot from the stage)", style = {"color": ui.color("#FF0000")})
+                                self.refresh_sensors_btn = ui.Button("Refresh Sensor List", clicked_fn=self._refresh_sensor_list, height=36, width=0)
+                                self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
                             self.sensor_list = ui.ScrollingFrame(
                                 height=250,
                             )
@@ -270,16 +270,17 @@ class GO4RExtension(omni.ext.IExt):
         self.previous_selection = selection.copy()
 
         if not selection:
-            self._log_message("Error: No prim selected")
-            self.selected_robot_label.text = "(No robot selected)"
+            self.selected_robot_label.text = "(Select one or more robot from the stage)"
             self.selected_robot_label.style = {"color": ui.color("#FF0000")}
+            self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
             self.selected_robots = []
             return
 
         self.selected_robots = selection
         robot_names = [path.split('/')[-1] for path in selection]
-        self.selected_robot_label.text = f"Selected: {len(selection)} robot{'s' if len(selection) > 1 else ''}"
-        self.selected_robot_label.style = {"color": ui.color("#00FFFF")}
+        self.selected_robot_label.text = f"Selected robots: {', '.join(robot_names)}"
+        self.enable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#00FF00"))
+        self.selected_robot_label.style = {"color": ui.color("#00FF00")}
         
         # Log the selected robots
         self._log_message(f"Selected robots: {', '.join(robot_names)}")
