@@ -21,6 +21,10 @@ import time
 
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
+import os, sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
+import bot_3d_rep
+
 class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
     

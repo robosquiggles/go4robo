@@ -3,7 +3,21 @@ import time
 import PIL
 import PIL.ImageColor
 
-import open3d as o3d
+try:
+    import open3d as o3d
+    OPEN3D_MODE = True
+except ImportError:
+    print("Open3D not found; Open3D-specific features will not work.")
+    OPEN3D_MODE = False
+    # Stub classes so references like o3d.geometry.TriangleMesh won't break outside Open3D
+    class o3d:
+        class geometry:
+            class TriangleMesh:
+                pass
+        class utility:
+            class Vector3dVector:
+                pass
+
 try:
     import bpy
     import bpy.types
@@ -16,7 +30,18 @@ except ImportError:
         class types:
             class Object:
                 pass
-import bmesh
+
+try:
+    import bmesh
+    BMESH_MODE = True
+except ImportError:
+    print("BMesh not found; BMesh-specific features will not work.")
+    BMESH_MODE = False
+    # Stub classes so references like bmesh.types.BMesh won't break outside BMesh
+    class bmesh:
+        class types:
+            class BMesh:
+                pass
 
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
