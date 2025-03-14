@@ -22,8 +22,11 @@ import time
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
 import os, sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
-import bot_3d_rep
+
+bot_3d_rep_module_path = sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
+
+print(f"Looking for bot_3d_rep in {bot_3d_rep_module_path}")
+from bot_3d_rep import *
 
 class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
@@ -34,7 +37,7 @@ class GO4RExtension(omni.ext.IExt):
         self.ext_id = ext_id
         self._usd_context = omni.usd.get_context()
 
-        self._window = ScrollingWindow(title=EXTENSION_TITLE, width=400, height=700)
+        self._window = ScrollingWindow(title=EXTENSION_TITLE, width=600, height=700)
         # self._window.set_visibility_changed_fn(self._on_window)
 
         action_registry = omni.kit.actions.core.get_action_registry()
@@ -65,17 +68,13 @@ class GO4RExtension(omni.ext.IExt):
 
         # Store the robots
         self.selected_robots = []
-        self.robot_sensors = {}
 
         # These just help handle the stage selection and structure
         self.previous_selection = []
         self.processed_lidar_paths = set()
-
-        # Store detected sensors
-        self.detected_cameras = []
-        self.detected_lidars = []
         
         # Constants for calculation based on the paper
+        # TODO: Make this based on mesh/objects in the scene
         self.perception_space = {
             "x_range": [-80.0, 80.0],  # meters
             "y_range": [-40.0, 40.0],  # meters
@@ -95,9 +94,11 @@ class GO4RExtension(omni.ext.IExt):
         }
         
         # Voxel size for object representation (in meters)
+        # TODO: Make this adjustable in the UI
         self.voxel_size = 0.1
         
         # Target object types with their typical dimensions (length, width, height in meters)
+        # TODO: Make this based on objects in the scene?
         self.target_objects = {
             "car": {"dimensions": [4.5, 1.8, 1.5], "weight": 1.0},
             "pedestrian": {"dimensions": [0.6, 0.6, 1.7], "weight": 1.0},
@@ -290,11 +291,6 @@ class GO4RExtension(omni.ext.IExt):
         # Log the selected robots
         self._log_message(f"Selected robots: {', '.join(robot_names)}")
 
-    def _update_object_weight(self, obj_type: str, weight: float):
-        """Update the weight of a specific object type"""
-        self.target_objects[obj_type]["weight"] = weight
-        self._log_message(f"Updated weight for {obj_type} to {weight}")
-
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
         self.max_log_messages = max(1, int(value))
@@ -326,7 +322,6 @@ class GO4RExtension(omni.ext.IExt):
         
         # Auto-scroll to bottom - this is handled by ScrollingFrame automatically
         # when content changes, but we could add explicit scrolling if needed
-
 
     def _browse_export_path(self):
         """Open a file dialog to select export location"""
@@ -529,6 +524,8 @@ class GO4RExtension(omni.ext.IExt):
         """Refresh the list of detected sensors without analysis"""
         self._log_message("Refreshing sensor list...")
 
+
+
         # Clear the current sensors
         self.detected_cameras = []
         self.detected_lidars = []
@@ -658,6 +655,11 @@ class GO4RExtension(omni.ext.IExt):
                                                                     for prop_name, prop_value in lidar['properties'].items():
                                                                         ui.Label(f"{prop_name}: {prop_value}")
     
+    def _update_object_weight(self, obj_type: str, weight: float):
+        """Update the weight of a specific object type"""
+        self.target_objects[obj_type]["weight"] = weight
+        self._log_message(f"Updated weight for {obj_type} to {weight}")
+
     def _analyze_sensors(self):
         """Main function to analyze all sensors on the robot"""
         self._log_message("Starting sensor analysis...")
@@ -718,7 +720,7 @@ class GO4RExtension(omni.ext.IExt):
         
         return default_value
     
-    def _find_camera(self, prim) -> Dict:
+    def _find_camera(self, prim) -> Sensor3D_Instance:
         """Find cameras that are descendants of the selected robot"""
 
         # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
@@ -727,13 +729,9 @@ class GO4RExtension(omni.ext.IExt):
             # Skip editor cameras if a specific robot is selected
             name = prim.GetName()
             
-            # The rest of the camera detection code remains unchanged
-            # [existing camera extraction code...]
-            cam = UsdGeom.Camera(prim)
-            
-            # Try to get resolution from prim attributes or use default
-            resolution = (1920, 1080)  # Default resolution
-            
+            # Load the camera information into a MonoCamera3D
+            cam_prim = UsdGeom.Camera(prim)
+
             # Try to get additional attributes if available
             try:
                 if prim.HasAttribute("resolution"):
@@ -744,27 +742,23 @@ class GO4RExtension(omni.ext.IExt):
                             resolution = res_value
             except Exception as e:
                 self._log_message(f"Error getting resolution for camera {prim.GetName()}: {str(e)}")
+
+            cam3d = MonoCamera3D(name=name,
+                                 focal_length=cam_prim.GetFocalLengthAttr().Get(),
+                                 h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
+                                 v_aperature=cam_prim.GetVerticalApertureAttr().Get(),
+                                 aspect_ratio=self._get_prim_attribute(prim, "aspectRatio", None),
+                                 h_res=resolution[0],
+                                 v_res=resolution[1],
+                                 body=prim,
+                                 cost=1.0,
+                                 focal_point=(0, 0, 0)
+                                 )
+            cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
             
-            camera_data = {}
-            camera_data.update({"*Name": name})
-            camera_data.update({"*Path": str(prim.GetPath())})
-            camera_data.update({"*Transform": self._get_world_transform(prim)})
-            camera_data.update({"*Position": camera_data["*Transform"][0]})
-            camera_data.update({"*Rotation": camera_data["*Transform"][1]})
-            camera_data.update({"Stereo Role": cam.GetStereoRoleAttr().Get()})
-            camera_data.update({"Focal Length": cam.GetFocalLengthAttr().Get()})
-            camera_data.update({"Horizontal Aperture": cam.GetHorizontalApertureAttr().Get()})
-            camera_data.update({"Aspect Ratio": self._get_prim_attribute(prim, "aspectRatio", 16.0 / 9.0)})
-            camera_data.update({"Horizontal FOV": 2 * math.atan(camera_data["Horizontal Aperture"] / (2 * camera_data["Focal Length"]))})
-            camera_data.update({"Vertical FOV": 2 * math.atan(math.tan(camera_data["Horizontal FOV"] / 2) / camera_data["Aspect Ratio"])})
-            camera_data.update({"Resolution": resolution})
-            camera_data.update({"Additional Properties": {
+            self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 
-            }})
-            
-            self._log_message(f"Found camera: {camera_data['*Name']} with HFOV: {math.degrees(camera_data['Horizontal FOV']):.2f}°")
-                
-            return camera_data
+            return cam3d_instance
         
         else:
             return None

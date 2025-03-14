@@ -3,8 +3,30 @@ import time
 import PIL
 import PIL.ImageColor
 
+import copy
+import random
+import numpy as np
+
+import matplotlib.pyplot as plt
+from matplotlib.path import Path
+from matplotlib.patches import PathPatch
+from matplotlib.animation import FuncAnimation
+import plotly.graph_objects as go
+
+from scipy.optimize import minimize as scipy_minimize
+from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
+
+try:
+    from pxr import UsdGeom, Gf, Sdf, Usd
+    print("USD found; USD-specific features will work.")
+    USD_MODE = True
+except ImportError:
+    print("USD not found; USD-specific features will not work.")
+    USD_MODE = False
+
 try:
     import open3d as o3d
+    print("Open3D found; Open3D-specific features will work.")
     OPEN3D_MODE = True
 except ImportError:
     print("Open3D not found; Open3D-specific features will not work.")
@@ -17,47 +39,6 @@ except ImportError:
         class utility:
             class Vector3dVector:
                 pass
-
-try:
-    import bpy
-    import bpy.types
-    BLENDER_MODE = True
-except ImportError:
-    print("Running outside Blender; Blender-specific features will not work.")
-    BLENDER_MODE = False
-    # Stub classes so references like bpy.types.Object won't break outside Blender
-    class bpy:
-        class types:
-            class Object:
-                pass
-
-try:
-    import bmesh
-    BMESH_MODE = True
-except ImportError:
-    print("BMesh not found; BMesh-specific features will not work.")
-    BMESH_MODE = False
-    # Stub classes so references like bmesh.types.BMesh won't break outside BMesh
-    class bmesh:
-        class types:
-            class BMesh:
-                pass
-
-from matplotlib.path import Path
-from matplotlib.patches import PathPatch
-import plotly.graph_objects as go
-
-from mpl_toolkits.mplot3d import Axes3D
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-
-import copy
-
-import matplotlib.pyplot as plt
-import numpy as np
-import random
-from scipy.optimize import minimize as scipy_minimize
-from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
-from matplotlib.animation import FuncAnimation
 
 
 class TF:
@@ -101,165 +82,46 @@ class TF:
     
     def inverse_matrix(tf_matrix):
         return np.linalg.inv(tf_matrix)
-    
-
-class Mesh:
-    """
-    A class to represent a 3D mesh object. Allows for easy operation and conversion between Open3D and Blender mesh objects."""
-    
-    def __init__(self, mesh:o3d.geometry.TriangleMesh|bpy.types.Object, name:str=None):
-        """
-        Initialize a new instance of the class.
-        Args:
-            mesh: The mesh to be converted.
-            name (str): The name of the mesh.
-        """
-        self.name = name
-        if isinstance(mesh, o3d.geometry.TriangleMesh):
-            self.omesh = mesh
-            self.bmesh = self.o3d_to_blender(mesh, name)
-        elif isinstance(mesh, bpy.types.Object):
-            self.bmesh = mesh
-            self.omesh = self.blender_to_o3d(mesh, name)
-        else:
-            raise ValueError(f"Invalid mesh type {type(mesh)}. Must be either an Open3D TriangleMesh or a Blender Object.")
 
 
-    def transform(self, tf_matrix):
-        """
-        Transforms the mesh by the given matrix.
-        Args:
-            tf_matrix (np.array): The transformation matrix.
-        """
-        self.omesh.transform(tf_matrix)
-        self.bmesh = self.o3d_to_blender(self.omesh, name=self.name)
-        return self
-    
-    def color(self, color:np.array, alpha:float=1.0):
-        """
-        Colors the mesh with the given color.
-        Args:
-            color (np.array): The color to apply to the mesh.
-        """
-        # BMESH
-        self.bmesh.data.materials.clear()
-        mat = bpy.data.materials.new(name=f"{self.name}_mat")
-        mat.diffuse_color = np.append(color, [alpha])
-        self.bmesh.data.materials.append(mat)
-
-        #OMESH
-        self.omesh.paint_uniform_color(color)
-        return self
-
-    def o3d_to_blender(self, o3d_mesh, name):
-        """
-        Converts an Open3D mesh to a Blender mesh.
-        Args:
-            o3d_mesh (o3d.geometry.TriangleMesh): The Open3D mesh to convert.
-            name (str): The name of the mesh.
-        Returns:
-            bpy.types.Object: The Blender mesh object.
-        """
-
-        # Create a new mesh
-        blender_mesh = bpy.data.meshes.new(name=f"{name}_mesh")
-        blender_object = bpy.data.objects.new(name=f"{name}_obj", object_data=blender_mesh)
-        bpy.context.collection.objects.link(blender_object)
-
-        # Get vertices and faces from Open3D mesh
-        vertices = np.asarray(o3d_mesh.vertices)
-        faces = np.asarray(o3d_mesh.triangles)
-
-        # Create a new bmesh
-        bm = bmesh.new()
-
-        # Add vertices
-        for v in vertices:
-            bm.verts.new(v)
-        bm.verts.ensure_lookup_table()
-
-        # Add faces
-        for f in faces:
-            bm.faces.new([bm.verts[i] for i in f])
-        bm.faces.ensure_lookup_table()
-
-        # Write the bmesh to the Blender mesh
-        bm.to_mesh(blender_mesh)
-        bm.free()
-
-        return blender_object
-    
-    def o3d_show(self):
-        o3d.visualization.draw_geometries([self.omesh])
-
-    def blender_to_o3d(self, b_mesh, name):
-        """
-        Converts a Blender bmesh to an Open3D TriangleMesh.
-        Args:
-            b_mesh (bmesh.types.BMesh): The Blender bmesh to convert.
-            name (str): The name of the mesh.
-        Returns:
-            o3d.geometry.TriangleMesh: The Open3D TriangleMesh object.
-        """
-        vertices = []
-        faces = []
-
-        for v in b_mesh.verts:
-            vertices.append([v.co.x, v.co.y, v.co.z])
-
-        for f in b_mesh.faces:
-            faces.append([v.index for v in f.verts])
-
-        o3d_mesh = o3d.geometry.TriangleMesh()
-        o3d_mesh.vertices = o3d.utility.Vector3dVector(vertices)
-        o3d_mesh.triangles = o3d.utility.Vector3iVector(faces)
-
-        return o3d_mesh
-    
-    def blender_show(self):
-        bpy.context.view_layer.objects.active = self.bmesh
-        self.bmesh.select_set(True)
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
-        bpy.ops.view3d.view_selected()
-        bpy.ops.object.mode_set(mode='OBJECT')
-        bpy.ops.object.select_all(action='DESELECT')
-        self.bmesh.select_set(False)
-    
-    
-    
-class FOV3D:
+class Sensor3D:
     def __init__(self, 
-                 h_fov:float, 
-                 v_fov:float,
-                 distance:float,
-                 cost:float,
-                 body:Mesh=None, 
-                 focal_point:tuple[float, float, float]=(0, 0, 0), 
-                 tf_matrix: np.array = np.eye(4), 
-                 name=None,
-                 color: str = 'purple',
-                 coord_size: float = 0.2
+                 name:str,
+                 type:str,
+                 h_fov:float=None, 
+                 h_res:int=None,
+                 v_fov:float=None,
+                 v_res:int=None,
+                 max_range:float=None,
+                 min_range:float=None,
+                 cost:float=None,
+                 body:UsdGeom.Mesh=None, 
+                 focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
                  ):
         """
         Initialize a new instance of the class.
         Args:
-            h_fov (float): The horizontal field of view *in radians*.
-            v_fov (float): The vertical field of view *in radians*.
-            distance (float): The distance that the sensor can sense in meters.
-            body (open3d.geometry): The body of the sensor.
-            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
-            tf_matrix (float): The initial tf_matrix of the sensor.
             name (str): The name of the sensor.
-            color (str): The color of the sensor.
+            type (str): The type of the sensor.
+            h_fov (float): The horizontal field of view *in radians*.
+            h_res (int): The horizontal resolution of the sensor.
+            v_fov (float): The vertical field of view *in radians*.
+            v_res (int): The vertical resolution of the sensor.
+            distance (float): The distance that the sensor can sense in meters.
+            cost (float): The cost of the sensor.
+            body (USDGeom.Mesh): The body of the sensor.
+            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
         """
         self.h_fov = h_fov
+        self.h_res = h_res
         self.v_fov = v_fov
-        self.distance = distance
+        self.v_res = v_res
+        self.max_range = max_range
+        self.min_range = min_range
         self.cost = cost
         self.name = name
-        self.body = Mesh(body) if not isinstance(body, Mesh) else body
-        self.coord_mesh = Mesh(o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_size, origin=focal_point))
+        self.type = type
+        self.body = body
         if isinstance(focal_point, (list, tuple)):
             self.focal_point = np.array([[1, 0, 0, focal_point[0]],
                                          [0, 1, 0, focal_point[1]],
@@ -267,91 +129,162 @@ class FOV3D:
                                          [0,0,0,1]])
         else:
             self.focal_point = focal_point
-        self.tf_matrix = np.eye(4)
-        self.set_transformation(tf_matrix)
-        if isinstance(color, str):
-            self.color = np.array(PIL.ImageColor.getrgb(color), dtype=np.float64)/255
-        elif isinstance(color, tuple):
-            self.color = np.array(color, dtype=np.float64)/255
-        self.body.color(self.color)
-    
-    def get_fov_mesh(self, obstacles:list[Mesh]=None):
-        """
-        Returns a mesh representing the field of view of the sensor for visualization. 
-        If obstacles are passed in, resultant FOV mesh will be occluded (calculated using ray casting).
-        """
-        # TODO occlusions
-        return None
 
-    def get_viz_meshes(self, viz_body=True, viz_coord=True, viz_fov=True, obstacles=None, show_now=True) -> list[Mesh]:
-        """
-        Plots the field of view (FOV) of the object.
-        Parameters:
-            viz_body (bool): Whether to visualize the body of the sensor.
-            viz_coord (bool): Whether to visualize the coordinate frame of the sensor.
-            viz_fov (bool): Whether to visualize the field of view of the sensor.
-            obstacles (open3d.geometry): The obstacles to consider for occlusion.
-        Returns:
-            a list of open3d.geometry objects representing the visualization meshes.
-        """
-        meshes = []
+    def get_properties_dict(self):
+        properties = {}
+        for key, value in self.__dict__.items():
+            if not key.startswith("__") and not callable(value):
+                properties[key] = value
+        return properties
 
-        if viz_body:
-            if self.body is not None:
-                meshes.append(self.body)
-            else:
-                print(f"Sensor {self.name} has no body to visualize.")
+
+class MonoCamera3D(Sensor3D):
+    def __init__(self,
+                 name:str,
+                 focal_length:float=None,
+                 h_aperature:float=None,
+                 v_aperature:float=None,
+                 aspect_ratio:float=None,
+                 h_res:int=None,
+                 v_res:int=None,
+                 body:UsdGeom.Mesh=None,
+                 cost:float=None,
+                 focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ):
+
+        self.h_aperture = h_aperature
+        self.v_aperture = v_aperature
+        self.aspect_ratio = aspect_ratio
+        self.h_res = h_res
+        self.v_res = v_res
+        self.body = body
+        self.cost = cost
+        self.focal_point = focal_point
+
+        self.h_fov = 2 * np.arctan(h_aperature / (2 * focal_length))
+        self.v_fov = 2 * np.arctan(v_aperature / (2 * focal_length))
+
+        super().__init__(name, "MonoCamera", self.h_fov, self.h_res, self.v_fov, v_res, self.max_range, self.min_range, self.cost, self.body, self.focal_point)
         
-        if viz_coord:
-            meshes.append(self.coord_mesh)
 
-        if viz_fov:
-            meshes.append(self.get_fov_mesh(obstacles))
+class StereoCamera3D(Sensor3D):
+    def __init__(self,
+                 name:str,
+                 camera1:MonoCamera3D,
+                 camera2:MonoCamera3D,
+                 tf_camera1:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 tf_camera2:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 cost:float=None,
+                 body:UsdGeom.Mesh=None,
+                 ):
 
-        if show_now:
-            for mesh in meshes:
-                mesh.o3d_show()
+        self.camera = camera1
+        self.camera2 = camera2
+        self.tf_camera1 = tf_camera1
+        self.tf_camera2 = tf_camera2
+        self.cost = cost
+        self.body = body
+        self.base_line = np.linalg.norm(tf_camera1[0] - tf_camera2[0])
+        self.h_fov = camera1.h_fov
+        self.v_fov = camera1.v_fov
+        self.h_res = camera1.h_res
+        self.v_res = camera1.v_res
+        self.max_range = camera1.max_range
+        self.min_range = camera1.min_range
 
-        return meshes
+        super().__init__(name, "StereoCamera", name=name)
+        
 
-    def transform(self, tf_matrix):
-        """Transforms the FOV by the given matrix. Also returns the self (FOV3D object) for quick use."""
-        print(f"Transforming sensor {self.name} by the tf matrix:\n{tf_matrix}")
-        self.set_transformation(self.tf_matrix @ tf_matrix)
-        print(f" New TF:\n{self.tf_matrix}")
-        print(f" New focal pt:\n{self.focal_point}")
+class Lidar3D(Sensor3D):
+    def __init__(self, 
+                 name:str,
+                 h_fov:float, 
+                 h_res:int,
+                 v_fov:float,
+                 v_res:int,
+                 max_range:float,
+                 min_range:float,
+                 cost:float,
+                 body:UsdGeom.Mesh, 
+                 focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ):
+        """
+        Initialize a new instance of the class.
+        Args:
+            name (str): The name of the sensor.
+            h_fov (float): The horizontal field of view *in radians*.
+            h_res (int): The horizontal resolution of the sensor.
+            v_fov (float): The vertical field of view *in radians*.
+            v_res (int): The vertical resolution of the sensor.
+            distance (float): The distance that the sensor can sense in meters.
+            cost (float): The cost of the sensor.
+            body (USDGeom.Mesh): The body of the sensor.
+            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
+        """
+        super().__init__(name, "Lidar", h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point)
+
+
+class Sensor3D_Instance:
+    def __init__(self,
+                 sensor:Sensor3D,
+                 path:str,
+                 tf:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 name:str|None=None
+                 ):
+        self.name = name
+        self.sensor = copy.deepcopy(sensor)
+        self.path = path
+        self.tf = tf
+
+    def get_position(self):
+        return self.tf[0]
+    
+    def get_rotation(self):
+        return self.tf[1]
+    
+    def get_transform(self):
+        return self.tf
+    
+    def set_position(self, position:Gf.Vec3d|list[float]):
+        if isinstance(position, list):
+            position = Gf.Vec3d(position)
+        else:
+            self.tf[0] = position
+
+    def set_rotation(self, rotation:Gf.Matrix3d):
+        self.tf[1] = rotation
+
+    def set_transform(self, tf:tuple[Gf.Vec3d, Gf.Matrix3d]):
+        self.tf = tf
+    
+    def translate(self, translation:Gf.Vec3d|list[float]):
+        if isinstance(translation, list):
+            translation = Gf.Vec3d(translation)
+        self.tf[0] += translation
         return self
     
-    def set_transformation(self, tf_matrix):
-        """Sets the absolute pose of the focal point of the sensor."""
-        print(f"Transforming sensor {self.name} to:\n{tf_matrix}")
-        # Send the sensor back to the origin
-        self.body.transform(TF.inverse_matrix(self.tf_matrix))
-        self.coord_mesh.transform(TF.inverse_matrix(self.tf_matrix))
-        self.tf_matrix = np.eye(4)
-
-        # Transform the sensor to the new pose
-        self.body.transform(tf_matrix)
-        self.coord_mesh.transform(tf_matrix)
-        self.tf_matrix = tf_matrix
-        self.focal_point = self.focal_point @ tf_matrix
-        print(f" New TF:\n{self.tf_matrix}")
-        print(f" New focal pt:\n{self.focal_point}")
+    def rotate(self, rotation:Gf.Matrix3d):
+        self.tf[1] = self.tf[1] * rotation
+        return self
+    
+    def transform(self, tf_matrix):
+        self.tf[0] = self.tf[0] * tf_matrix
+        self.tf[1] = self.tf[1] * tf_matrix
         return self
     
     def contained_in(self, mesh:o3d.geometry.TriangleMesh):
-        """Returns whether or not the sensor body is within the given polygon."""
+        """Returns whether or not the sensor body is within the given mesh volume."""
         raise NotImplementedError("This method is not yet implemented.")
     
 
 class Bot3d:
     def __init__(self, 
-                 body:o3d.geometry.TriangleMesh,
+                 body:UsdGeom.Mesh,
                  sensor_coverage_requirement:list[o3d.geometry.TriangleMesh],
-                 color:str="blue",
+                 color:str="yellow",
                  sensor_pose_constraint:list[o3d.geometry.TriangleMesh]=None, 
                  occlusions:list[o3d.geometry.TriangleMesh]=None,
-                 sensors:list[FOV3D]=[]):
+                 sensors:list[Sensor3D_Instance]=[]):
         """
         Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
         Args:
@@ -372,11 +305,11 @@ class Bot3d:
 
         # TODO Remove self.body from any of the sensor_coverage_requirement meshes
 
-    def add_sensor_3d(self, sensor:FOV3D|list[FOV3D]|None):
+    def add_sensor_3d(self, sensor:Sensor3D|list[Sensor3D]|None):
         """
         Adds a 3D sensor to the list of sensors. Only adds a sensor if it is not None.
         Parameters:
-            sensor (FOV3D|None): The 3D sensor to be added (or None).
+            sensor (Sensor3D|None): The 3D sensor to be added (or None).
         Returns:
             bool: True if the sensor was added successfully, False otherwise.
         """
@@ -430,43 +363,6 @@ class Bot3d:
 #         for sensor in sensors:
 #             self.add_sensor_2d(sensor)
 
-    def show_bot_blender(self, show_constraint=True, show_coverage_requirement=True, show_sensors=True, show_sensor_fovs=True, show_occlusions=True, title=None, ax=None):
-        """
-        Open Blender showing (optionally, as specified) the robot's shape, sensor constraints, coverage requirements, and sensors.
-        
-        Parameters:
-        -----------
-        show_constraint : bool, optional
-            If True, plots the sensor pose constraints (default is True).
-        show_coverage_requirement : bool, optional
-            If True, plots the sensor coverage requirements (default is True).
-        show_sensors : bool, optional
-            If True, plots the sensors' fields of view (default is True).
-        title : str, optional
-            The title of the plot (default is None).
-        ax : matplotlib.axes.Axes, optional
-            The axes on which to plot. If None, a new figure and axes are created (default is None).
-        
-        Returns:
-        --------
-        fig : matplotlib.figure.Figure
-            The matplotlib figure object containing the plot.
-        """
-
-        # Set the bounds to just beyond the bounds of any of the shapes in the plot
-        all_shapes = [self.shape] + [self.sensor_pose_constraint] + [self.sensor_coverage_requirement] + [sensor.fov for sensor in self.sensors]
-        min_x = min(shape.bounds[0] for shape in all_shapes)
-        min_y = min(shape.bounds[1] for shape in all_shapes)
-        max_x = max(shape.bounds[2] for shape in all_shapes)
-        max_y = max(shape.bounds[3] for shape in all_shapes)
-        ax.set_xlim(min_x - 1, max_x + 1)
-        ax.set_ylim(min_y - 1, max_y + 1)
-        ax.set_aspect('equal', adjustable='box')
-
-        if title is not None:
-            ax.set_title(title)
-        
-    
 #     def is_valid_sensor_pose(self, sensor:FOV2D, verbose=False):
 #         """
 #         Verifies if the sensor's position is within the defined 
