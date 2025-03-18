@@ -1,5 +1,7 @@
 import time
 
+from typing import Type
+
 import PIL
 import PIL.ImageColor
 
@@ -142,8 +144,8 @@ class MonoCamera3D(Sensor3D):
     def __init__(self,
                  name:str,
                  focal_length:float=None,
-                 h_aperature:float=None,
-                 v_aperature:float=None,
+                 h_aperture:float=None,
+                 v_aperture:float=None,
                  aspect_ratio:float=None,
                  h_res:int=None,
                  v_res:int=None,
@@ -152,8 +154,8 @@ class MonoCamera3D(Sensor3D):
                  focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
                  ):
 
-        self.h_aperture = h_aperature
-        self.v_aperture = v_aperature
+        self.h_aperture = h_aperture
+        self.v_aperture = v_aperture
         self.aspect_ratio = aspect_ratio
         self.h_res = h_res
         self.v_res = v_res
@@ -161,8 +163,11 @@ class MonoCamera3D(Sensor3D):
         self.cost = cost
         self.focal_point = focal_point
 
-        self.h_fov = 2 * np.arctan(h_aperature / (2 * focal_length))
-        self.v_fov = 2 * np.arctan(v_aperature / (2 * focal_length))
+        self.h_fov = 2 * np.arctan(h_aperture / (2 * focal_length))
+        self.v_fov = 2 * np.arctan(v_aperture / (2 * focal_length))
+
+        self.max_range = 100.0 # TODO: This should be clipping distance?
+        self.min_range = 0.0 # TODO: This should be clipping distance?
 
         super().__init__(name, "MonoCamera", self.h_fov, self.h_res, self.v_fov, v_res, self.max_range, self.min_range, self.cost, self.body, self.focal_point)
         
@@ -232,7 +237,7 @@ class Sensor3D_Instance:
                  name:str|None=None
                  ):
         self.name = name
-        self.sensor = copy.deepcopy(sensor)
+        self.sensor = sensor
         self.path = path
         self.tf = tf
 
@@ -277,13 +282,13 @@ class Sensor3D_Instance:
         raise NotImplementedError("This method is not yet implemented.")
     
 
-class Bot3d:
+class Bot3D:
     def __init__(self, 
-                 body:UsdGeom.Mesh,
-                 sensor_coverage_requirement:list[o3d.geometry.TriangleMesh],
-                 color:str="yellow",
-                 sensor_pose_constraint:list[o3d.geometry.TriangleMesh]=None, 
-                 occlusions:list[o3d.geometry.TriangleMesh]=None,
+                 name:str,
+                 body:list[UsdGeom.Mesh]=None,
+                 path:str=None,
+                 sensor_coverage_requirement:list[UsdGeom.Mesh]=None,
+                 sensor_pose_constraint:list[UsdGeom.Mesh]=None, 
                  sensors:list[Sensor3D_Instance]=[]):
         """
         Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
@@ -294,16 +299,22 @@ class Bot3d:
             sensor_pose_constraint (list[open3d.geometry]): The constraints on the sensor pose.
             occlusions (list[open3d.geometry]): The occlusions that the sensors must avoid.
         """
+        self.name = name
+        self.path = path
         self.body = body
-        self.color = color
-        self.sensors = []
-        self.add_sensor_3d(sensors)
+        self.sensors = sensors
             
         self.sensor_coverage_requirement = sensor_coverage_requirement
         self.sensor_pose_constraint = sensor_pose_constraint
-        self.occlusions = occlusions
 
         # TODO Remove self.body from any of the sensor_coverage_requirement meshes
+
+    def get_sensors_by_type(self, sensor_type:Type[Sensor3D]) -> list[Sensor3D_Instance]:
+        sensor_instances = []
+        for sensor_instance in self.sensors:
+            if isinstance(sensor_instance.sensor, sensor_type):
+                sensor_instances.append(sensor_instance.sensor)
+        return sensor_instances
 
     def add_sensor_3d(self, sensor:Sensor3D|list[Sensor3D]|None):
         """

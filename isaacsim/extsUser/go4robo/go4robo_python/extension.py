@@ -28,6 +28,8 @@ bot_3d_rep_module_path = sys.path.insert(0, os.path.abspath(os.path.join(os.path
 print(f"Looking for bot_3d_rep in {bot_3d_rep_module_path}")
 from bot_3d_rep import *
 
+sensor_types = [MonoCamera3D, Lidar3D]
+
 class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
     
@@ -62,11 +64,7 @@ class GO4RExtension(omni.ext.IExt):
         events = self._usd_context.get_stage_event_stream()
         self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
 
-        # self._timeline = omni.timeline.get_timeline_interface()
-        # stream = self._timeline.get_timeline_event_stream()
-        # self._timeline_event_sub = stream.create_subscription_to_pop(self._on_timeline_event)
-
-        # Store the robots
+        # A place to store the robots
         self.selected_robots = []
 
         # These just help handle the stage selection and structure
@@ -110,7 +108,6 @@ class GO4RExtension(omni.ext.IExt):
         self.log_messages = []
         self.max_log_messages = 100  # Default value
         self._build_ui()
-        
         self._window.visible = True
         
 
@@ -275,21 +272,25 @@ class GO4RExtension(omni.ext.IExt):
         # Store current selection for future comparison
         self.previous_selection = selection.copy()
 
+        self.selected_robots = []
+
         if not selection:
             self.selected_robot_label.text = "(Select one or more robot from the stage)"
             self.selected_robot_label.style = {"color": ui.color("#FF0000")}
             self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
-            self.selected_robots = []
             return
-
-        self.selected_robots = selection
-        robot_names = [path.split('/')[-1] for path in selection]
-        self.selected_robot_label.text = f"Selected robots: {', '.join(robot_names)}"
+        
+        for robot_path in selection:
+            bot = Bot3D(path=robot_path,
+                        name=robot_path.split('/')[-1]
+            )
+            self.selected_robots.append(bot)
+        self.selected_robot_label.text = f"Selected robots: {', '.join([bot.name for bot in self.selected_robots])}"
         self.enable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#00FF00"))
         self.selected_robot_label.style = {"color": ui.color("#00FF00")}
         
         # Log the selected robots
-        self._log_message(f"Selected robots: {', '.join(robot_names)}")
+        self._log_message(self.selected_robot_label.text)
 
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
@@ -524,47 +525,34 @@ class GO4RExtension(omni.ext.IExt):
         """Refresh the list of detected sensors without analysis"""
         self._log_message("Refreshing sensor list...")
 
-
-
-        # Clear the current sensors
-        self.detected_cameras = []
-        self.detected_lidars = []
-        self.robot_sensors = {}
-        self.processed_lidar_paths = set()
-        
         stage = get_current_stage()
+
         total_cameras = 0
         total_lidars = 0
         
-        for robot_path in self.selected_robots:
-            # Initialize storage for this robot
-            self.robot_sensors[robot_path] = {
-                "name": robot_path.split('/')[-1],
-                "cameras": [],
-                "lidars": []
-            }
+        for bot in self.selected_robots:
             
             # Find robot prim
-            robot_prim = stage.GetPrimAtPath(robot_path)
+            robot_prim = stage.GetPrimAtPath(bot.path)
             if not robot_prim:
-                self._log_message(f"Error: Could not find prim at path {robot_path}")
+                self._log_message(f"Error: Could not find prim at path {bot.path}")
                 continue
                 
             # Search for sensors in this robot
-            self._search_for_sensors(robot_prim, robot_path)
+            self._assign_sensors_to(robot_prim, bot)
             
-            # Count sensors for this robot
-            robot_cameras = self.robot_sensors[robot_path]["cameras"]
-            robot_lidars = self.robot_sensors[robot_path]["lidars"]
+            found_sensors = {}
+            for type in sensor_types:
+                found_sensors[type.__name__] = bot.get_sensors_by_type(type)
+                if found_sensors[type.__name__]:
+                    self._log_message(f"Found {len(found_sensors[type.__name__])} {type.__name__} sensors for robot {bot.name}")
+
+            bot_cameras = found_sensors[MonoCamera3D.__name__]
+            bot_lidars = found_sensors[Lidar3D.__name__]
+            self._log_message(f"Robot {bot.name} has {bot_lidars} lidars and {bot_cameras} cameras")
             
-            total_cameras += len(robot_cameras)
-            total_lidars += len(robot_lidars)
-            
-            # Add to global sensor lists
-            self.detected_cameras.extend(robot_cameras)
-            self.detected_lidars.extend(robot_lidars)
-            
-            self._log_message(f"Robot {self.robot_sensors[robot_path]['name']}: {len(robot_cameras)} cameras and {len(robot_lidars)} LiDARs")
+            total_cameras += len(bot_cameras)
+            total_lidars += len(bot_lidars)
         
         self._log_message(f"Total: {total_cameras} cameras and {total_lidars} LiDARs")
         
@@ -572,19 +560,19 @@ class GO4RExtension(omni.ext.IExt):
         self._update_sensor_list_ui()
 
 
-    def _search_for_sensors(self, prim, robot_path):
+    def _assign_sensors_to(self, prim, bot):
         """Search a level for sensors and add them to the specified robot"""
         for child in prim.GetChildren():
             camera = self._find_camera(child)
             if camera is not None:
-                self.robot_sensors[robot_path]["cameras"].append(camera)
+                bot.sensors.append(camera)
             
             lidar = self._find_lidar(child)
             if lidar is not None:
-                self.robot_sensors[robot_path]["lidars"].append(lidar)
+                bot.sensors.append(lidar)
             
             # Recursively search child prims
-            self._search_for_sensors(child, robot_path)
+            self._assign_sensors_to(child, bot)
 
     
     def _update_sensor_list_ui(self):
@@ -594,14 +582,15 @@ class GO4RExtension(omni.ext.IExt):
         
         with self.sensor_list:
             with ui.VStack(spacing=5):
-                if not self.robot_sensors:
+                if not self.selected_robots:
                     ui.Label("No robots selected")
                 else:
                     # For each robot, create a collapsible frame
-                    for robot_path, robot_data in self.robot_sensors.items():
-                        robot_name = robot_data["name"]
-                        robot_cameras = robot_data["cameras"]
-                        robot_lidars = robot_data["lidars"]
+                    for robot in self.selected_robots:
+
+                        robot_name = robot.name
+                        robot_cameras = robot.get_sensors_by_type(MonoCamera3D)
+                        robot_lidars = robot.get_sensors_by_type(Lidar3D)
                         
                         # Skip robots with no sensors
                         if not robot_cameras and not robot_lidars:
@@ -620,16 +609,16 @@ class GO4RExtension(omni.ext.IExt):
                                     with ui.CollapsableFrame(f"Cameras: {len(robot_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
                                         with ui.VStack(spacing=5):
                                             for idx, camera in enumerate(robot_cameras):
-                                                with ui.CollapsableFrame(f"{idx+1}. {camera['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
+                                                with ui.CollapsableFrame(f"{idx+1}. {camera.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                     with ui.VStack(spacing=2):
-                                                        for property_name, property_value in camera.items():
+                                                        for property_name, property_value in camera.__dict__.items():
                                                             if '*' in property_name:
-                                                                ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
+                                                                ui.Label(f"{property_name}: {property_value}", style={'color':ui.color("#EEE8AA")})
                                                             else:
                                                                 ui.Label(f"{property_name}: {property_value}")
                                                         
                                                         # Show additional properties if available
-                                                        if 'properties' in camera:
+                                                        if 'properties' in camera.__dict__.keys():
                                                             with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
                                                                 with ui.VStack(spacing=2):
                                                                     for prop_name, prop_value in camera['properties'].items():
@@ -640,16 +629,16 @@ class GO4RExtension(omni.ext.IExt):
                                     with ui.CollapsableFrame(f"LiDARs: {len(robot_lidars)}", height=0, style={"border_color": ui.color("#00FFFF")}, collapsed=False):
                                         with ui.VStack(spacing=5):
                                             for idx, lidar in enumerate(robot_lidars):
-                                                with ui.CollapsableFrame(f"{idx+1}. {lidar['*Name']}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
+                                                with ui.CollapsableFrame(f"{idx+1}. {lidar.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                     with ui.VStack(spacing=2):
-                                                        for property_name, property_value in lidar.items():
+                                                        for property_name, property_value in lidar.__dict__:
                                                             if '*' in property_name:
                                                                 ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
                                                             else:
                                                                 ui.Label(f"{property_name}: {property_value}")
                                                             
                                                         # Show additional properties if available
-                                                        if 'properties' in lidar and lidar['properties']:
+                                                        if 'properties' in lidar.dict.keys():
                                                             with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
                                                                 with ui.VStack(spacing=2):
                                                                     for prop_name, prop_value in lidar['properties'].items():
@@ -732,24 +721,15 @@ class GO4RExtension(omni.ext.IExt):
             # Load the camera information into a MonoCamera3D
             cam_prim = UsdGeom.Camera(prim)
 
-            # Try to get additional attributes if available
-            try:
-                if prim.HasAttribute("resolution"):
-                    res_attr = prim.GetAttribute("resolution")
-                    if res_attr.IsValid():
-                        res_value = res_attr.Get()
-                        if isinstance(res_value, tuple) and len(res_value) == 2:
-                            resolution = res_value
-            except Exception as e:
-                self._log_message(f"Error getting resolution for camera {prim.GetName()}: {str(e)}")
+            resolution = self._get_prim_attribute(prim, "aspectRatio", None)
 
             cam3d = MonoCamera3D(name=name,
                                  focal_length=cam_prim.GetFocalLengthAttr().Get(),
                                  h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
-                                 v_aperature=cam_prim.GetVerticalApertureAttr().Get(),
+                                 v_aperture=cam_prim.GetVerticalApertureAttr().Get(),
                                  aspect_ratio=self._get_prim_attribute(prim, "aspectRatio", None),
-                                 h_res=resolution[0],
-                                 v_res=resolution[1],
+                                 h_res=resolution[0] if resolution else None,
+                                 v_res=resolution[1] if resolution else None,
                                  body=prim,
                                  cost=1.0,
                                  focal_point=(0, 0, 0)
@@ -804,25 +784,24 @@ class GO4RExtension(omni.ext.IExt):
                 return children[0]
             return None
                 
-        lidar_data = {}
+        lidar_data = None
         name = prim.GetName()
         is_lidar = is_lidar_prim(prim)
         
         if is_lidar == "lidar by type":
             # Direct LiDAR prim - extract properties
             try:
-                lidar_data.update({"*Name" : name})
-                lidar_data.update({"*Path" : str(prim.GetPath())})
-                lidar_data.update({"*Transform" : self._get_world_transform(prim)})
-                lidar_data.update({"*Position" : lidar_data["*Transform"][0]})
-                lidar_data.update({"*Rotation" : lidar_data["*Transform"][1]})
-                lidar_data.update({"Vertical FOV" : self._get_prim_attribute(prim, "verticalFov")}) # degrees
-                lidar_data.update({"Horizontal FOV" : self._get_prim_attribute(prim, "horizontalFov")}) # degrees
-                lidar_data.update({"Vertical Res" : self._get_prim_attribute(prim, "verticalResolution",)}) # degrees between rays
-                lidar_data.update({"Horizontal Res" : self._get_prim_attribute(prim, "horizontalResolution")})  # degrees between rays
-                lidar_data.update({"Max Range" : self._get_prim_attribute(prim, "maxRange")}) # meters
-                lidar_data.update({"Min Range" : self._get_prim_attribute(prim, "minRange")}) # meters
-                lidar_data.update({"Channels" : self._get_prim_attribute(prim, "channels")})
+                lidar = Lidar3D(name=name,
+                                h_fov=self._get_prim_attribute(prim, "horizontalFov"),
+                                v_fov=self._get_prim_attribute(prim, "verticalFov"),
+                                h_res=self._get_prim_attribute(prim, "horizontalResolution"),
+                                v_res=self._get_prim_attribute(prim, "verticalResolution"),
+                                max_range=self._get_prim_attribute(prim, "maxRange"),
+                                min_range=self._get_prim_attribute(prim, "minRange"),
+                                body=prim,
+                                cost=1.0,
+                                )
+                lidar_data = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
             except Exception as e:
                 self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
         
@@ -836,26 +815,19 @@ class GO4RExtension(omni.ext.IExt):
 
                 # Use name from the parent frame but properties from the child
                 try:
-                    lidar_data.update({"*Name" : name})  # Use parent name (more descriptive)
-                    lidar_data.update({"*Path" : str(prim.GetPath())})
-                    lidar_data.update({"*Transform" : self._get_world_transform(prim)})
-                    lidar_data.update({"*Position" : lidar_data["*Transform"][0]})
-                    lidar_data.update({"*Rotation" : lidar_data["*Transform"][1]})
-                    
-                    # Get properties from the actual LiDAR child
-                    lidar_data.update({"*Child Name" : actual_lidar_prim.GetName()})
-                    lidar_data.update({"*Child Path" : str(actual_lidar_prim.GetPath())})
-                    lidar_data.update({"Vertical FOV" : self._get_prim_attribute(actual_lidar_prim, "verticalFov")})
-                    lidar_data.update({"Horizontal FOV" : self._get_prim_attribute(actual_lidar_prim, "horizontalFov")})
-                    lidar_data.update({"Vertical Res" : self._get_prim_attribute(actual_lidar_prim, "verticalResolution")})
-                    lidar_data.update({"Horizontal Res" : self._get_prim_attribute(actual_lidar_prim, "horizontalResolution")})
-                    lidar_data.update({"Max Range" : self._get_prim_attribute(actual_lidar_prim, "maxRange")})
-                    lidar_data.update({"Min Range" : self._get_prim_attribute(actual_lidar_prim, "minRange")})
-                    lidar_data.update({"Channels" : self._get_prim_attribute(actual_lidar_prim, "channels")})
-                    
-                    self._log_message(f"Found LiDAR hierarchy: {name} → {actual_lidar_prim.GetName()}")
+                    lidar = Lidar3D(name=name,
+                                    h_fov=self._get_prim_attribute(prim, "horizontalFov"),
+                                    v_fov=self._get_prim_attribute(prim, "verticalFov"),
+                                    h_res=self._get_prim_attribute(prim, "horizontalResolution"),
+                                    v_res=self._get_prim_attribute(prim, "verticalResolution"),
+                                    max_range=self._get_prim_attribute(prim, "maxRange"),
+                                    min_range=self._get_prim_attribute(prim, "minRange"),
+                                    body=prim,
+                                    cost=1.0,
+                                    )
+                    lidar_data = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
                 except Exception as e:
-                    self._log_message(f"Error extracting LiDAR properties from child: {str(e)}")
+                    self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
             else:
                 # No suitable child found
                 lidar_data = None
