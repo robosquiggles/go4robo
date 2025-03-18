@@ -531,6 +531,9 @@ class GO4RExtension(omni.ext.IExt):
         total_lidars = 0
         
         for bot in self.selected_robots:
+
+            #Clear sensors
+            bot.sensors = []
             
             # Find robot prim
             robot_prim = stage.GetPrimAtPath(bot.path)
@@ -562,11 +565,28 @@ class GO4RExtension(omni.ext.IExt):
 
     def _assign_sensors_to(self, prim, bot):
         """Search a level for sensors and add them to the specified robot"""
+        # Track processed camera paths to avoid duplicates
+        processed_camera_paths = set()
+        
         for child in prim.GetChildren():
-            camera = self._find_camera(child)
-            if camera is not None:
-                bot.sensors.append(camera)
+            # First check if this is part of a stereo pair
+            stereo_camera = self._find_stereo_camera(child)
+            if stereo_camera is not None:
+                bot.sensors.append(stereo_camera)
+                # Add the paths of both cameras in the stereo pair to processed paths
+                # to avoid adding them individually
+                if hasattr(stereo_camera.sensor, 'camera1') and hasattr(stereo_camera.sensor.camera1, 'body'):
+                    processed_camera_paths.add(str(stereo_camera.sensor.camera1.body.GetPath()))
+                if hasattr(stereo_camera.sensor, 'camera2') and hasattr(stereo_camera.sensor.camera2, 'body'):
+                    processed_camera_paths.add(str(stereo_camera.sensor.camera2.body.GetPath()))
             
+            # Check for mono camera if not part of a processed stereo pair
+            if str(child.GetPath()) not in processed_camera_paths:
+                camera = self._find_camera(child)
+                if camera is not None:
+                    bot.sensors.append(camera)
+            
+            # Check for LiDAR
             lidar = self._find_lidar(child)
             if lidar is not None:
                 bot.sensors.append(lidar)
@@ -589,6 +609,7 @@ class GO4RExtension(omni.ext.IExt):
                     for robot in self.selected_robots:
 
                         robot_name = robot.name
+                        robot_stereo_cameras = robot.get_sensors_by_type(StereoCamera3D)
                         robot_cameras = robot.get_sensors_by_type(MonoCamera3D)
                         robot_lidars = robot.get_sensors_by_type(Lidar3D)
                         
@@ -604,7 +625,24 @@ class GO4RExtension(omni.ext.IExt):
                             collapsed=False
                         ):
                             with ui.VStack(spacing=5):
-                                # Display cameras for this robot
+                                # Display stereo cameras for this robot
+                                if robot_stereo_cameras:
+                                    with ui.CollapsableFrame(f"Stereo Cameras: {len(robot_stereo_cameras)}", height=0, style={"border_color": ui.color("#00FF00")}, collapsed=False):
+                                        with ui.VStack(spacing=5):
+                                            for idx, stereo_camera in enumerate(robot_stereo_cameras):
+                                                with ui.CollapsableFrame(f"{idx+1}. {stereo_camera.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
+                                                    with ui.VStack(spacing=2):
+                                                        for property_name, property_value in stereo_camera.__dict__.items():
+                                                            ui.Label(f"{property_name}: {property_value}")
+                                                        
+                                                        # Show additional properties if available
+                                                        if 'properties' in stereo_camera.__dict__.keys():
+                                                            with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
+                                                                with ui.VStack(spacing=2):
+                                                                    for prop_name, prop_value in stereo_camera['properties'].items():
+                                                                        ui.Label(f"{prop_name}: {prop_value}")
+
+                                # Display mono cameras for this robot
                                 if robot_cameras:
                                     with ui.CollapsableFrame(f"Cameras: {len(robot_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
                                         with ui.VStack(spacing=5):
@@ -612,10 +650,7 @@ class GO4RExtension(omni.ext.IExt):
                                                 with ui.CollapsableFrame(f"{idx+1}. {camera.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                     with ui.VStack(spacing=2):
                                                         for property_name, property_value in camera.__dict__.items():
-                                                            if '*' in property_name:
-                                                                ui.Label(f"{property_name}: {property_value}", style={'color':ui.color("#EEE8AA")})
-                                                            else:
-                                                                ui.Label(f"{property_name}: {property_value}")
+                                                            ui.Label(f"{property_name}: {property_value}")
                                                         
                                                         # Show additional properties if available
                                                         if 'properties' in camera.__dict__.keys():
@@ -631,14 +666,11 @@ class GO4RExtension(omni.ext.IExt):
                                             for idx, lidar in enumerate(robot_lidars):
                                                 with ui.CollapsableFrame(f"{idx+1}. {lidar.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                     with ui.VStack(spacing=2):
-                                                        for property_name, property_value in lidar.__dict__:
-                                                            if '*' in property_name:
-                                                                ui.Label(f"{property_name.replace('*','')}: {property_value}", style={'color':ui.color("#EEE8AA")})
-                                                            else:
-                                                                ui.Label(f"{property_name}: {property_value}")
+                                                        for property_name, property_value in lidar.__dict__.items():
+                                                            ui.Label(f"{property_name}: {property_value}")
                                                             
                                                         # Show additional properties if available
-                                                        if 'properties' in lidar.dict.keys():
+                                                        if 'properties' in lidar.__dict__.keys():
                                                             with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
                                                                 with ui.VStack(spacing=2):
                                                                     for prop_name, prop_value in lidar['properties'].items():
@@ -742,6 +774,126 @@ class GO4RExtension(omni.ext.IExt):
         
         else:
             return None
+        
+    def _find_stereo_camera(self, prim, left_prim=None) -> Sensor3D_Instance:
+        """Find stereo camera pairs and combine them into a StereoCamera3D
+        
+        Args:
+            prim (Usd.Prim): The prim to check for camera pairs
+            left_prim (Usd.Prim, optional): A previously found left camera to pair with
+            
+        Returns:
+            Sensor3D_Instance: A StereoCamera3D instance if a pair is found, None otherwise
+        """
+        # Skip non-camera prims
+        if not prim.IsA(UsdGeom.Camera):
+            return None
+        
+        # Get camera name
+        name = prim.GetName()
+        path = str(prim.GetPath())
+        
+        # Check if this is a right camera looking for its left pair
+        if "_right" in name.lower() or "right_" in name.lower() or "right" == name.lower():
+            # This is a right camera, look for corresponding left camera
+            left_name = name.lower().replace("right", "left")
+            parent_path = str(prim.GetParent().GetPath())
+            possible_left_paths = [
+                f"{parent_path}/{left_name}",
+                f"{parent_path}/{left_name.capitalize()}",
+                f"{parent_path}/{left_name.upper()}",
+                f"{parent_path.replace('right', 'left')}/{left_name}",
+                f"{parent_path.replace('right', 'left')}/{left_name.capitalize()}",
+                f"{parent_path.replace('right', 'left')}/{left_name.upper()}"
+            ]
+            
+            stage = get_current_stage()
+            left_prim = None
+            
+            # Try to find the left camera
+            for left_path in possible_left_paths:
+                left_prim = stage.GetPrimAtPath(left_path)
+                if left_prim and left_prim.IsA(UsdGeom.Camera):
+                    self._log_message(f"Found left camera at {left_path} to pair with right camera {name}")
+                    break
+            
+            if not left_prim:
+                self._log_message(f"Could not find matching left camera for right camera {name}")
+                return None
+            
+            # Create individual camera instances
+            left_cam_instance = self._find_camera(left_prim)
+            right_cam_instance = self._find_camera(prim)
+            
+            if not left_cam_instance or not right_cam_instance:
+                return None
+            
+            # Calculate baseline (distance between cameras)
+            left_pos, left_rot = left_cam_instance.tf
+            right_pos, right_rot = right_cam_instance.tf
+            
+            # Create stereo camera
+            stereo_name = name.replace("_right", "").replace("right_", "").replace("right", "")
+            if not stereo_name:
+                stereo_name = "stereo_camera"
+            
+            try:
+                stereo_cam = StereoCamera3D(
+                    name=stereo_name,
+                    camera1=left_cam_instance.sensor,
+                    camera2=right_cam_instance.sensor,
+                    tf_camera1=left_cam_instance.tf,
+                    tf_camera2=right_cam_instance.tf,
+                    cost=left_cam_instance.sensor.cost + right_cam_instance.sensor.cost,
+                    body=prim
+                )
+                
+                # Use the left camera's position for the stereo camera
+                stereo_instance = Sensor3D_Instance(
+                    stereo_cam, 
+                    path=left_prim.GetPath(),
+                    tf=left_cam_instance.tf,
+                    name=stereo_name
+                )
+                
+                self._log_message(f"Created stereo camera {stereo_name} with baseline: {stereo_cam.base_line:.3f} units")
+                
+                return stereo_instance
+                
+            except Exception as e:
+                self._log_message(f"Error creating stereo camera: {str(e)}")
+                return None
+        
+        # Check if this is a left camera (for when we encounter left first)
+        elif "_left" in name.lower() or "left_" in name.lower() or "left" == name.lower():
+            # This is a left camera, look for corresponding right camera
+            right_name = name.lower().replace("left", "right")
+            parent_path = str(prim.GetParent().GetPath())
+            possible_right_paths = [
+                f"{parent_path}/{right_name}",
+                f"{parent_path}/{right_name.capitalize()}",
+                f"{parent_path}/{right_name.upper()}",
+                f"{parent_path.replace('left', 'right')}/{right_name}",
+                f"{parent_path.replace('left', 'right')}/{right_name.capitalize()}",
+                f"{parent_path.replace('left', 'right')}/{right_name.upper()}"
+            ]
+            
+            stage = get_current_stage()
+            right_prim = None
+            
+            # Try to find the right camera
+            for right_path in possible_right_paths:
+                right_prim = stage.GetPrimAtPath(right_path)
+                if right_prim and right_prim.IsA(UsdGeom.Camera):
+                    # Call this function with the right camera as primary
+                    return self._find_stereo_camera(right_prim, left_prim=prim)
+            
+            # No matching right camera found
+            self._log_message(f"Could not find matching right camera for left camera {name}")
+            return None
+        
+        # This is neither a left nor right camera
+        return None
 
     def _find_lidar(self, prim:Usd.Prim) -> Dict:
         """Find LiDARs that are descendants of the selected robot"""

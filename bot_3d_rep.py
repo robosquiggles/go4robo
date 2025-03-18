@@ -197,7 +197,7 @@ class StereoCamera3D(Sensor3D):
         self.max_range = camera1.max_range
         self.min_range = camera1.min_range
 
-        super().__init__(name, "StereoCamera", name=name)
+        super().__init__(name, "StereoCamera", h_fov=self.h_fov, h_res=self.h_res, v_fov=self.v_fov, v_res=self.v_res, max_range=self.max_range, min_range=self.min_range, cost=self.cost, body=self.body, focal_point=(0.0, 0.0, 0.0))
         
 
 class Lidar3D(Sensor3D):
@@ -313,7 +313,7 @@ class Bot3D:
         sensor_instances = []
         for sensor_instance in self.sensors:
             if isinstance(sensor_instance.sensor, sensor_type):
-                sensor_instances.append(sensor_instance.sensor)
+                sensor_instances.append(sensor_instance)
         return sensor_instances
 
     def add_sensor_3d(self, sensor:Sensor3D|list[Sensor3D]|None):
