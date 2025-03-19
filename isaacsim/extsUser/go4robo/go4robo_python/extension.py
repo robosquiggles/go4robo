@@ -526,13 +526,15 @@ class GO4RExtension(omni.ext.IExt):
         self._log_message("Refreshing sensor list...")
 
         stage = get_current_stage()
+        
+        # Reset processed lidar paths
+        self.processed_lidar_paths = set()
 
         total_cameras = 0
         total_lidars = 0
         
         for bot in self.selected_robots:
-
-            #Clear sensors
+            # Clear existing sensors before searching again
             bot.sensors = []
             
             # Find robot prim
@@ -541,7 +543,7 @@ class GO4RExtension(omni.ext.IExt):
                 self._log_message(f"Error: Could not find prim at path {bot.path}")
                 continue
                 
-            # Search for sensors in this robot
+            # Search for sensors in this robot (with a new empty processed_camera_paths set)
             self._assign_sensors_to(robot_prim, bot)
             
             found_sensors = {}
@@ -563,36 +565,47 @@ class GO4RExtension(omni.ext.IExt):
         self._update_sensor_list_ui()
 
 
-    def _assign_sensors_to(self, prim, bot):
+    def _assign_sensors_to(self, prim, bot, processed_camera_paths=None):
         """Search a level for sensors and add them to the specified robot"""
-        # Track processed camera paths to avoid duplicates
-        processed_camera_paths = set()
+        # Initialize processed paths set if not provided
+        if processed_camera_paths is None:
+            processed_camera_paths = set()
         
         for child in prim.GetChildren():
+            child_path = str(child.GetPath())
+            
+            # Skip if this prim has already been processed
+            if child_path in processed_camera_paths:
+                continue
+                
             # First check if this is part of a stereo pair
             stereo_camera = self._find_stereo_camera(child)
             if stereo_camera is not None:
                 bot.sensors.append(stereo_camera)
                 # Add the paths of both cameras in the stereo pair to processed paths
-                # to avoid adding them individually
                 if hasattr(stereo_camera.sensor, 'camera1') and hasattr(stereo_camera.sensor.camera1, 'body'):
                     processed_camera_paths.add(str(stereo_camera.sensor.camera1.body.GetPath()))
                 if hasattr(stereo_camera.sensor, 'camera2') and hasattr(stereo_camera.sensor.camera2, 'body'):
                     processed_camera_paths.add(str(stereo_camera.sensor.camera2.body.GetPath()))
+                # Add this child path to processed paths
+                processed_camera_paths.add(child_path)
             
             # Check for mono camera if not part of a processed stereo pair
-            if str(child.GetPath()) not in processed_camera_paths:
+            elif child_path not in processed_camera_paths:
                 camera = self._find_camera(child)
                 if camera is not None:
                     bot.sensors.append(camera)
+                    processed_camera_paths.add(child_path)
             
             # Check for LiDAR
-            lidar = self._find_lidar(child)
-            if lidar is not None:
-                bot.sensors.append(lidar)
+            if child_path not in self.processed_lidar_paths:
+                lidar = self._find_lidar(child)
+                if lidar is not None:
+                    bot.sensors.append(lidar)
+                    self.processed_lidar_paths.add(child_path)
             
             # Recursively search child prims
-            self._assign_sensors_to(child, bot)
+            self._assign_sensors_to(child, bot, processed_camera_paths)
 
     
     def _update_sensor_list_ui(self):
