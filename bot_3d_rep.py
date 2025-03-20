@@ -189,7 +189,7 @@ class StereoCamera3D(Sensor3D):
         self.tf_2 = tf_sensor2
         self.cost = cost
         self.body = body
-        self.base_line = np.linalg.norm(tf_1[0] - tf_2[0])
+        self.base_line = np.linalg.norm(tf_sensor1[0] - tf_sensor2[0])
         self.h_fov = sensor1.h_fov
         self.v_fov = sensor1.v_fov
         self.h_res = sensor1.h_res

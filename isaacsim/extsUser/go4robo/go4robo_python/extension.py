@@ -28,7 +28,7 @@ bot_3d_rep_module_path = sys.path.insert(0, os.path.abspath(os.path.join(os.path
 print(f"Looking for bot_3d_rep in {bot_3d_rep_module_path}")
 from bot_3d_rep import *
 
-sensor_types = [MonoCamera3D, Lidar3D]
+sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
 class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
@@ -530,9 +530,8 @@ class GO4RExtension(omni.ext.IExt):
         # Reset processed lidar paths
         self.processed_lidar_paths = set()
 
-        total_cameras = 0
-        total_lidars = 0
         
+        total_sensors = dict.fromkeys(sensor_types, 0)
         for bot in self.selected_robots:
             # Clear existing sensors before searching again
             bot.sensors = []
@@ -544,68 +543,182 @@ class GO4RExtension(omni.ext.IExt):
                 continue
                 
             # Search for sensors in this robot (with a new empty processed_camera_paths set)
-            self._assign_sensors_to(robot_prim, bot)
+            self._assign_sensors_to_robot(robot_prim, bot)
             
             found_sensors = {}
             for type in sensor_types:
                 found_sensors[type.__name__] = bot.get_sensors_by_type(type)
-                if found_sensors[type.__name__]:
-                    self._log_message(f"Found {len(found_sensors[type.__name__])} {type.__name__} sensors for robot {bot.name}")
-
-            bot_cameras = found_sensors[MonoCamera3D.__name__]
-            bot_lidars = found_sensors[Lidar3D.__name__]
-            self._log_message(f"Robot {bot.name} has {bot_lidars} lidars and {bot_cameras} cameras")
+                total_sensors[type] += len(found_sensors[type.__name__])
+                self._log_message(f"Found {len(found_sensors[type.__name__])} {type.__name__} sensors for robot {bot.name}")
             
-            total_cameras += len(bot_cameras)
-            total_lidars += len(bot_lidars)
-        
-        self._log_message(f"Total: {total_cameras} cameras and {total_lidars} LiDARs")
+        self._log_message(f"Total sensors found: " + ', '.join([f"{total_sensors[type]} {type.__name__}(s)" for type in sensor_types]))
         
         # Update the sensor list UI
         self._update_sensor_list_ui()
 
+    def _find_camera(self, prim) -> Sensor3D_Instance:
+        """Find cameras that are descendants of the selected robot"""
 
-    def _assign_sensors_to(self, prim, bot, processed_camera_paths=None):
-        """Search a level for sensors and add them to the specified robot"""
-        # Initialize processed paths set if not provided
-        if processed_camera_paths is None:
-            processed_camera_paths = set()
-        
-        for child in prim.GetChildren():
-            child_path = str(child.GetPath())
+        # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
+
+        if prim.IsA(UsdGeom.Camera):
+            # Skip editor cameras if a specific robot is selected
+            name = prim.GetName()
             
-            # Skip if this prim has already been processed
-            if child_path in processed_camera_paths:
-                continue
+            # Load the camera information into a MonoCamera3D
+            cam_prim = UsdGeom.Camera(prim)
+
+            # Get resolution more robustly - try different attribute names or patterns
+            resolution = None
+            # Try standard resolution attribute
+            if prim.HasAttribute("resolution"):
+                resolution = prim.GetAttribute("resolution").Get()
+            # Try common alternatives
+            elif prim.HasAttribute("horizontalImageSize") and prim.HasAttribute("verticalImageSize"):
+                h_size = prim.GetAttribute("horizontalImageSize").Get()
+                v_size = prim.GetAttribute("verticalImageSize").Get()
+                if h_size is not None and v_size is not None:
+                    resolution = (h_size, v_size)
+            # Try isaac-specific attributes
+            elif prim.HasAttribute("sensorWidth") and prim.HasAttribute("sensorHeight"):
+                resolution = (prim.GetAttribute("sensorWidth").Get(), 
+                             prim.GetAttribute("sensorHeight").Get())
+            
+            # If resolution still not found, try to infer from other parameters
+            if resolution is None:
+                # Log that we couldn't find resolution directly
+                self._log_message(f"Warning: Could not find resolution for camera {prim.GetName()}")
+                # Default to HD resolution as fallback
+                # resolution = (1280, 720)
+
+            try:
+                cam3d = MonoCamera3D(name=name,
+                                    focal_length=cam_prim.GetFocalLengthAttr().Get(),
+                                    h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
+                                    v_aperture=cam_prim.GetVerticalApertureAttr().Get(),
+                                    aspect_ratio=self._get_prim_attribute(prim, "aspectRatio", None),
+                                    h_res=resolution[0] if resolution else None,
+                                    v_res=resolution[1] if resolution else None,
+                                    body=prim,
+                                    cost=1.0,
+                                    focal_point=(0, 0, 0)
+                                    )
+                cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
+                self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
+            except Exception as e:
+                self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
                 
-            # First check if this is part of a stereo pair
-            stereo_camera = self._find_stereo_camera(child)
-            if stereo_camera is not None:
-                bot.sensors.append(stereo_camera)
-                # Add the paths of both cameras in the stereo pair to processed paths
-                if hasattr(stereo_camera.sensor, 'camera1') and hasattr(stereo_camera.sensor.camera1, 'body'):
-                    processed_camera_paths.add(str(stereo_camera.sensor.camera1.body.GetPath()))
-                if hasattr(stereo_camera.sensor, 'camera2') and hasattr(stereo_camera.sensor.camera2, 'body'):
-                    processed_camera_paths.add(str(stereo_camera.sensor.camera2.body.GetPath()))
-                # Add this child path to processed paths
-                processed_camera_paths.add(child_path)
+            return cam3d_instance
+        
+        else:
+            return None
+
+    def _find_lidar(self, prim:Usd.Prim) -> Dict:
+        """Find LiDARs that are descendants of the selected robot"""
+
+        # self._log_message(f"DEBUG: Checking for LiDAR prim {prim.GetName()} of type {prim.GetTypeName()}")
+
+        type_name = str(prim.GetTypeName()).lower()
+        lidar_instance = None
+        
+        if "lidar" in type_name or "range" in type_name:
+            name = prim.GetName()
+            if name.lower() != "lidar":
+                # Get the name from the parent
+                name = prim.GetParent().GetName()
+            # Direct LiDAR prim - extract properties
+            try:
+                lidar = Lidar3D(name=name,
+                                h_fov=self._get_prim_attribute(prim, "horizontalFov"),
+                                v_fov=self._get_prim_attribute(prim, "verticalFov"),
+                                h_res=self._get_prim_attribute(prim, "horizontalResolution"),
+                                v_res=self._get_prim_attribute(prim, "verticalResolution"),
+                                max_range=self._get_prim_attribute(prim, "maxRange"),
+                                min_range=self._get_prim_attribute(prim, "minRange"),
+                                body=prim,
+                                cost=1.0,
+                                )
+                lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
+                self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
+            except Exception as e:
+                self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
+        
+        return lidar_instance
+
+
+    def _assign_sensors_to_robot(self, prim, bot, processed_camera_paths=None):
+        """Search a level for sensors and add them to the specified robot"""
+        # Check if this node contains a sensor, regardless of whether it's a leaf
+        # This allows finding sensors at any level of the hierarchy
+        
+        # Check for LiDAR first
+        lidar = self._find_lidar(prim)
+        if lidar is not None:
+            self._log_message(f"Adding LiDAR: {lidar.name} to robot {bot.name}")
+            bot.sensors.append(lidar)
+            # Don't return, continue searching in case there are other sensors
+
+        # Check for camera
+        camera = self._find_camera(prim)
+        if camera is not None:
+            self._log_message(f"Found camera at path: {prim.GetPath()}")
             
-            # Check for mono camera if not part of a processed stereo pair
-            elif child_path not in processed_camera_paths:
-                camera = self._find_camera(child)
-                if camera is not None:
-                    bot.sensors.append(camera)
-                    processed_camera_paths.add(child_path)
-            
-            # Check for LiDAR
-            if child_path not in self.processed_lidar_paths:
-                lidar = self._find_lidar(child)
-                if lidar is not None:
-                    bot.sensors.append(lidar)
-                    self.processed_lidar_paths.add(child_path)
-            
-            # Recursively search child prims
-            self._assign_sensors_to(child, bot, processed_camera_paths)
+            # Handle stereo camera pairing
+            found_stereo_pair = False
+            for role in ["left", "right"]:
+                if (role in camera.name.lower() or 
+                    (prim.HasAttribute("stereoRole") and prim.GetAttribute("stereoRole").Get() == role)):
+                    this_cam_role = role
+                    this_cam_name = camera.name
+                    this_cam_path_str = prim.GetPath().pathString
+                    other_cam_role = "left" if role == "right" else "right"
+                    other_cam_name = camera.name.replace(role, other_cam_role)
+                    other_cam_path_str = str(this_cam_path_str).replace(role, other_cam_role)
+
+                    # Check if the other camera is already in the sensors list
+                    for i, sensor_instance in enumerate(bot.sensors):
+                        if isinstance(sensor_instance.sensor, MonoCamera3D):
+                            if sensor_instance.name == other_cam_name:
+                                # Found the other camera, create a stereo camera
+                                self._log_message(f"Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
+                                self._log_message(f"  Path 1: {this_cam_path_str}")
+                                self._log_message(f"  Path 2: {sensor_instance.path.pathString}")
+                                # Find the common parent of the two cameras based on the paths
+                                common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path.pathString])
+                                self._log_message(f"  Common: {common_parent_path}")
+                                common_parent_prim = get_current_stage().GetPrimAtPath(common_parent_path)
+                                if not common_parent_prim:
+                                    self._log_message(f"Error: Could not find common parent prim at path {common_parent_path}")
+                                    common_parent_name=this_cam_name.replace(this_cam_role, "")
+                                else:
+                                    common_parent_name = common_parent_prim.GetName()
+
+
+                                stereo_cam = StereoCamera3D(
+                                    name=common_parent_name,
+                                    sensor1=sensor_instance.sensor if this_cam_role == "left" else camera.sensor,
+                                    sensor2=sensor_instance.sensor if this_cam_role == "right" else camera.sensor,
+                                    tf_sensor1=sensor_instance.tf if this_cam_role == "left" else camera.tf,
+                                    tf_sensor2=sensor_instance.tf if this_cam_role == "right" else camera.tf,
+                                    cost=sensor_instance.sensor.cost + camera.sensor.cost,
+                                    body=prim
+                                )
+                                stereo_instance = Sensor3D_Instance(stereo_cam, path= common_parent_path, 
+                                                                 name=common_parent_name, 
+                                                                 tf=camera.tf)
+                                bot.sensors[i] = stereo_instance  # Replace the mono camera with stereo
+                                found_stereo_pair = True
+                                break
+                    break  # Found a role, no need to check other roles
+                    
+            # Add camera only if it wasn't part of a stereo pair
+            if not found_stereo_pair:
+                self._log_message(f"Adding camera: {camera.name} to robot {bot.name}")
+                bot.sensors.append(camera)
+        
+        # Always continue recursively even if sensors were found at this level
+        for child in prim.GetChildren():
+            self._assign_sensors_to_robot(child, bot, processed_camera_paths)
 
 
     def _display_sensor_instance_properties(self, sensor_instance):
@@ -613,8 +726,7 @@ class GO4RExtension(omni.ext.IExt):
             if "sensor" in attr:
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
                     with ui.VStack(spacing=2):
-                        for s_attr, s_value in value.__dict__.items():
-                            ui.Label(f"{s_attr}: {s_value}")
+                        self._display_sensor_instance_properties(value)
             elif "tf" in attr:
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
                     with ui.VStack(spacing=2):
@@ -720,254 +832,6 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Error getting attribute {attr_name}: {str(e)}")
         
         return default_value
-    
-    def _find_camera(self, prim) -> Sensor3D_Instance:
-        """Find cameras that are descendants of the selected robot"""
-
-        # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
-
-        if prim.IsA(UsdGeom.Camera):
-            # Skip editor cameras if a specific robot is selected
-            name = prim.GetName()
-            
-            # Load the camera information into a MonoCamera3D
-            cam_prim = UsdGeom.Camera(prim)
-
-            resolution = self._get_prim_attribute(prim, "aspectRatio", None)
-
-            cam3d = MonoCamera3D(name=name,
-                                 focal_length=cam_prim.GetFocalLengthAttr().Get(),
-                                 h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
-                                 v_aperture=cam_prim.GetVerticalApertureAttr().Get(),
-                                 aspect_ratio=self._get_prim_attribute(prim, "aspectRatio", None),
-                                 h_res=resolution[0] if resolution else None,
-                                 v_res=resolution[1] if resolution else None,
-                                 body=prim,
-                                 cost=1.0,
-                                 focal_point=(0, 0, 0)
-                                 )
-            cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
-            
-            self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
-                
-            return cam3d_instance
-        
-        else:
-            return None
-        
-    def _find_stereo_camera(self, prim, left_prim=None) -> Sensor3D_Instance:
-        """Find stereo camera pairs and combine them into a StereoCamera3D
-        
-        Args:
-            prim (Usd.Prim): The prim to check for camera pairs
-            left_prim (Usd.Prim, optional): A previously found left camera to pair with
-            
-        Returns:
-            Sensor3D_Instance: A StereoCamera3D instance if a pair is found, None otherwise
-        """
-        # Skip non-camera prims
-        if not prim.IsA(UsdGeom.Camera):
-            return None
-        
-        # Get camera name
-        name = prim.GetName()
-        path = str(prim.GetPath())
-        
-        # Check if this is a right camera looking for its left pair
-        if "_right" in name.lower() or "right_" in name.lower() or "right" == name.lower():
-            # This is a right camera, look for corresponding left camera
-            left_name = name.lower().replace("right", "left")
-            parent_path = str(prim.GetParent().GetPath())
-            possible_left_paths = [
-                f"{parent_path}/{left_name}",
-                f"{parent_path}/{left_name.capitalize()}",
-                f"{parent_path}/{left_name.upper()}",
-                f"{parent_path.replace('right', 'left')}/{left_name}",
-                f"{parent_path.replace('right', 'left')}/{left_name.capitalize()}",
-                f"{parent_path.replace('right', 'left')}/{left_name.upper()}"
-            ]
-            
-            stage = get_current_stage()
-            left_prim = None
-            
-            # Try to find the left camera
-            for left_path in possible_left_paths:
-                left_prim = stage.GetPrimAtPath(left_path)
-                if left_prim and left_prim.IsA(UsdGeom.Camera):
-                    self._log_message(f"Found left camera at {left_path} to pair with right camera {name}")
-                    break
-            
-            if not left_prim:
-                self._log_message(f"Could not find matching left camera for right camera {name}")
-                return None
-            
-            # Create individual camera instances
-            left_cam_instance = self._find_camera(left_prim)
-            right_cam_instance = self._find_camera(prim)
-            
-            if not left_cam_instance or not right_cam_instance:
-                return None
-            
-            # Calculate baseline (distance between cameras)
-            left_pos, left_rot = left_cam_instance.tf
-            right_pos, right_rot = right_cam_instance.tf
-            
-            # Create stereo camera
-            stereo_name = name.replace("_right", "").replace("right_", "").replace("right", "")
-            if not stereo_name:
-                stereo_name = "stereo_camera"
-            
-            try:
-                stereo_cam = StereoCamera3D(
-                    name=stereo_name,
-                    camera1=left_cam_instance.sensor,
-                    camera2=right_cam_instance.sensor,
-                    tf_camera1=left_cam_instance.tf,
-                    tf_camera2=right_cam_instance.tf,
-                    cost=left_cam_instance.sensor.cost + right_cam_instance.sensor.cost,
-                    body=prim
-                )
-                
-                # Use the left camera's position for the stereo camera
-                stereo_instance = Sensor3D_Instance(
-                    stereo_cam, 
-                    path=left_prim.GetPath(),
-                    tf=left_cam_instance.tf,
-                    name=stereo_name
-                )
-                
-                self._log_message(f"Created stereo camera {stereo_name} with baseline: {stereo_cam.base_line:.3f} units")
-                
-                return stereo_instance
-                
-            except Exception as e:
-                self._log_message(f"Error creating stereo camera: {str(e)}")
-                return None
-        
-        # Check if this is a left camera (for when we encounter left first)
-        elif "_left" in name.lower() or "left_" in name.lower() or "left" == name.lower():
-            # This is a left camera, look for corresponding right camera
-            right_name = name.lower().replace("left", "right")
-            parent_path = str(prim.GetParent().GetPath())
-            possible_right_paths = [
-                f"{parent_path}/{right_name}",
-                f"{parent_path}/{right_name.capitalize()}",
-                f"{parent_path}/{right_name.upper()}",
-                f"{parent_path.replace('left', 'right')}/{right_name}",
-                f"{parent_path.replace('left', 'right')}/{right_name.capitalize()}",
-                f"{parent_path.replace('left', 'right')}/{right_name.upper()}"
-            ]
-            
-            stage = get_current_stage()
-            right_prim = None
-            
-            # Try to find the right camera
-            for right_path in possible_right_paths:
-                right_prim = stage.GetPrimAtPath(right_path)
-                if right_prim and right_prim.IsA(UsdGeom.Camera):
-                    # Call this function with the right camera as primary
-                    return self._find_stereo_camera(right_prim, left_prim=prim)
-            
-            # No matching right camera found
-            self._log_message(f"Could not find matching right camera for left camera {name}")
-            return None
-        
-        # This is neither a left nor right camera
-        return None
-
-    def _find_lidar(self, prim:Usd.Prim) -> Dict:
-        """Find LiDARs that are descendants of the selected robot"""
-
-        # Skip if the prim has already been processed as a child
-        if str(prim.GetPath()) in self.processed_lidar_paths:
-            return None
-
-        def is_lidar_prim(prim:Usd.Prim) -> str:
-            """Check if a prim is a LiDAR"""
-            # Check by type
-            type_name = str(prim.GetTypeName()).lower()
-            if "lidar" in type_name or "range" in type_name:
-                self._log_message(f"Found LiDAR: '{prim.GetName()}' using type name")
-                return "lidar by type"
-            
-            # Check by name - this is a fallback approach
-            name = prim.GetName().lower()
-            lidar_prim_names = ["lidar", "velodyne", "ouster", "hesai", "sick", "lms"]
-            if any(lidar_name in name for lidar_name in lidar_prim_names):
-                # If this is named lidar, likely there is a lidar under this prim
-                self._log_message(f"Found LiDAR: '{prim.GetName()}' using prim name")
-                return "lidar by name"
-            
-            return False
-        
-        def find_actual_lidar_child(parent_prim):
-            """Search for the actual LiDAR component among children"""
-            for child in parent_prim.GetChildren():
-                child_type = str(child.GetTypeName()).lower()
-                child_name = child.GetName().lower()
-                
-                # Look for a child that is actually a LiDAR type
-                if "lidar" in child_type or "range" in child_type or "lidar" in child_name:
-                    return child
-                    
-            # If no specific LiDAR child found, just return the first child
-            children = list(parent_prim.GetChildren())
-            if children:
-                return children[0]
-            return None
-                
-        lidar_data = None
-        name = prim.GetName()
-        is_lidar = is_lidar_prim(prim)
-        
-        if is_lidar == "lidar by type":
-            # Direct LiDAR prim - extract properties
-            try:
-                lidar = Lidar3D(name=name,
-                                h_fov=self._get_prim_attribute(prim, "horizontalFov"),
-                                v_fov=self._get_prim_attribute(prim, "verticalFov"),
-                                h_res=self._get_prim_attribute(prim, "horizontalResolution"),
-                                v_res=self._get_prim_attribute(prim, "verticalResolution"),
-                                max_range=self._get_prim_attribute(prim, "maxRange"),
-                                min_range=self._get_prim_attribute(prim, "minRange"),
-                                body=prim,
-                                cost=1.0,
-                                )
-                lidar_data = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
-            except Exception as e:
-                self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
-        
-        elif is_lidar == "lidar by name":
-            # This is a container/frame for a LiDAR - find the actual LiDAR component
-            actual_lidar_prim = find_actual_lidar_child(prim)
-            
-            if actual_lidar_prim:
-                
-                self.processed_lidar_paths.add(str(actual_lidar_prim.GetPath())) # Add to the already explored prims
-
-                # Use name from the parent frame but properties from the child
-                try:
-                    lidar = Lidar3D(name=name,
-                                    h_fov=self._get_prim_attribute(prim, "horizontalFov"),
-                                    v_fov=self._get_prim_attribute(prim, "verticalFov"),
-                                    h_res=self._get_prim_attribute(prim, "horizontalResolution"),
-                                    v_res=self._get_prim_attribute(prim, "verticalResolution"),
-                                    max_range=self._get_prim_attribute(prim, "maxRange"),
-                                    min_range=self._get_prim_attribute(prim, "minRange"),
-                                    body=prim,
-                                    cost=1.0,
-                                    )
-                    lidar_data = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
-                except Exception as e:
-                    self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
-            else:
-                # No suitable child found
-                lidar_data = None
-        else:
-            lidar_data = None
-        
-        return lidar_data
-
     
     def _get_world_transform(self, prim) -> Tuple[Gf.Vec3d, Gf.Rotation]:
         """Get the world transform (position and rotation) of a prim"""
