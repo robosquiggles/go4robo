@@ -127,7 +127,7 @@ class GO4RExtension(omni.ext.IExt):
                                 self.refresh_sensors_btn = ui.Button("Refresh Sensor List", clicked_fn=self._refresh_sensor_list, height=36, width=0)
                                 self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
                             self.sensor_list = ui.ScrollingFrame(
-                                height=250,
+                                height=500,
                             )
                             with ui.CollapsableFrame("Data Export", height=0, collapsed=True):
                                 with ui.VStack(spacing=5, height=0):
@@ -607,6 +607,22 @@ class GO4RExtension(omni.ext.IExt):
             # Recursively search child prims
             self._assign_sensors_to(child, bot, processed_camera_paths)
 
+
+    def _display_sensor_instance_properties(self, sensor_instance):
+        for attr, value in sensor_instance.__dict__.items():
+            if "sensor" in attr:
+                with ui.CollapsableFrame(attr, height=0, collapsed=True):
+                    with ui.VStack(spacing=2):
+                        for s_attr, s_value in value.__dict__.items():
+                            ui.Label(f"{s_attr}: {s_value}")
+            elif "tf" in attr:
+                with ui.CollapsableFrame(attr, height=0, collapsed=True):
+                    with ui.VStack(spacing=2):
+                        ui.Label(f"position: {value[0]}")
+                        ui.Label(f"rotation: {value[1]}")
+            else:
+                ui.Label(f"{attr}: {value}")
+
     
     def _update_sensor_list_ui(self):
         """Update the sensor list UI with the detected sensors for all robots"""
@@ -620,75 +636,26 @@ class GO4RExtension(omni.ext.IExt):
                 else:
                     # For each robot, create a collapsible frame
                     for robot in self.selected_robots:
-
-                        robot_name = robot.name
-                        robot_stereo_cameras = robot.get_sensors_by_type(StereoCamera3D)
-                        robot_cameras = robot.get_sensors_by_type(MonoCamera3D)
-                        robot_lidars = robot.get_sensors_by_type(Lidar3D)
-                        
-                        # Skip robots with no sensors
-                        if not robot_cameras and not robot_lidars:
-                            continue
                             
                         # Create collapsible frame for this robot with blue border
                         with ui.CollapsableFrame(
-                            f"Robot: {robot_name}", 
+                            f"Robot: {robot.name}", 
                             height=0, 
-                            style={"border_width": 2, "border_color": ui.color("#0088FF")}, 
+                            style={"border_width": 2, "border_color": ui.color("#0059ff")}, 
                             collapsed=False
                         ):
                             with ui.VStack(spacing=5):
-                                # Display stereo cameras for this robot
-                                if robot_stereo_cameras:
-                                    with ui.CollapsableFrame(f"Stereo Cameras: {len(robot_stereo_cameras)}", height=0, style={"border_color": ui.color("#00FF00")}, collapsed=False):
-                                        with ui.VStack(spacing=5):
-                                            for idx, stereo_camera in enumerate(robot_stereo_cameras):
-                                                with ui.CollapsableFrame(f"{idx+1}. {stereo_camera.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
-                                                    with ui.VStack(spacing=2):
-                                                        for property_name, property_value in stereo_camera.__dict__.items():
-                                                            ui.Label(f"{property_name}: {property_value}")
-                                                        
-                                                        # Show additional properties if available
-                                                        if 'properties' in stereo_camera.__dict__.keys():
-                                                            with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
-                                                                with ui.VStack(spacing=2):
-                                                                    for prop_name, prop_value in stereo_camera['properties'].items():
-                                                                        ui.Label(f"{prop_name}: {prop_value}")
-
-                                # Display mono cameras for this robot
-                                if robot_cameras:
-                                    with ui.CollapsableFrame(f"Cameras: {len(robot_cameras)}", height=0, style={"border_color": ui.color("#FF00FF")}, collapsed=False):
-                                        with ui.VStack(spacing=5):
-                                            for idx, camera in enumerate(robot_cameras):
-                                                with ui.CollapsableFrame(f"{idx+1}. {camera.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
-                                                    with ui.VStack(spacing=2):
-                                                        for property_name, property_value in camera.__dict__.items():
-                                                            ui.Label(f"{property_name}: {property_value}")
-                                                        
-                                                        # Show additional properties if available
-                                                        if 'properties' in camera.__dict__.keys():
-                                                            with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
-                                                                with ui.VStack(spacing=2):
-                                                                    for prop_name, prop_value in camera['properties'].items():
-                                                                        ui.Label(f"{prop_name}: {prop_value}")
+                                for sensor_type in sensor_types:
+                                    sensors = robot.get_sensors_by_type(sensor_type)
+                                    if sensors:
+                                        with ui.CollapsableFrame(f"{sensor_type.__name__}s: {len(sensors)}", height=0, style={"border_color": ui.color("#00c3ff")}, collapsed=False):
+                                            with ui.VStack(spacing=5):
+                                                for idx, sensor_instance in enumerate(sensors):
+                                                    with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
+                                                        with ui.VStack(spacing=2):
+                                                            self._display_sensor_instance_properties(sensor_instance)
                                 
-                                # Display LiDARs for this robot
-                                if robot_lidars:
-                                    with ui.CollapsableFrame(f"LiDARs: {len(robot_lidars)}", height=0, style={"border_color": ui.color("#00FFFF")}, collapsed=False):
-                                        with ui.VStack(spacing=5):
-                                            for idx, lidar in enumerate(robot_lidars):
-                                                with ui.CollapsableFrame(f"{idx+1}. {lidar.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
-                                                    with ui.VStack(spacing=2):
-                                                        for property_name, property_value in lidar.__dict__.items():
-                                                            ui.Label(f"{property_name}: {property_value}")
-                                                            
-                                                        # Show additional properties if available
-                                                        if 'properties' in lidar.__dict__.keys():
-                                                            with ui.CollapsableFrame("Additional Properties", height=0, collapsed=True):
-                                                                with ui.VStack(spacing=2):
-                                                                    for prop_name, prop_value in lidar['properties'].items():
-                                                                        ui.Label(f"{prop_name}: {prop_value}")
-    
+
     def _update_object_weight(self, obj_type: str, weight: float):
         """Update the weight of a specific object type"""
         self.target_objects[obj_type]["weight"] = weight

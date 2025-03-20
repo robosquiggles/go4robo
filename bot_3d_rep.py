@@ -175,27 +175,27 @@ class MonoCamera3D(Sensor3D):
 class StereoCamera3D(Sensor3D):
     def __init__(self,
                  name:str,
-                 camera1:MonoCamera3D,
-                 camera2:MonoCamera3D,
-                 tf_camera1:tuple[Gf.Vec3d, Gf.Matrix3d],
-                 tf_camera2:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 sensor1:MonoCamera3D,
+                 sensor2:MonoCamera3D,
+                 tf_sensor1:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 tf_sensor2:tuple[Gf.Vec3d, Gf.Matrix3d],
                  cost:float=None,
                  body:UsdGeom.Mesh=None,
                  ):
 
-        self.camera = camera1
-        self.camera2 = camera2
-        self.tf_camera1 = tf_camera1
-        self.tf_camera2 = tf_camera2
+        self.sensor1 = sensor1
+        self.sensor2 = sensor2
+        self.tf_1 = tf_sensor1
+        self.tf_2 = tf_sensor2
         self.cost = cost
         self.body = body
-        self.base_line = np.linalg.norm(tf_camera1[0] - tf_camera2[0])
-        self.h_fov = camera1.h_fov
-        self.v_fov = camera1.v_fov
-        self.h_res = camera1.h_res
-        self.v_res = camera1.v_res
-        self.max_range = camera1.max_range
-        self.min_range = camera1.min_range
+        self.base_line = np.linalg.norm(tf_1[0] - tf_2[0])
+        self.h_fov = sensor1.h_fov
+        self.v_fov = sensor1.v_fov
+        self.h_res = sensor1.h_res
+        self.v_res = sensor1.v_res
+        self.max_range = sensor1.max_range
+        self.min_range = sensor1.min_range
 
         super().__init__(name, "StereoCamera", h_fov=self.h_fov, h_res=self.h_res, v_fov=self.v_fov, v_res=self.v_res, max_range=self.max_range, min_range=self.min_range, cost=self.cost, body=self.body, focal_point=(0.0, 0.0, 0.0))
         
