@@ -1,0 +1,9 @@
+# Ignore these:
+isaacsim/*
+
+# Don't ignore these:
+!.gitignore
+!isaacsim/extsUser/
+!isaacsim/extsUser/*
+!.vscode/
+!.vscode/*
