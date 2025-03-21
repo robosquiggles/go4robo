@@ -110,6 +110,9 @@ class GO4RExtension(omni.ext.IExt):
         self._build_ui()
         self._window.visible = True
         
+        # Add a property to track the selected perception area mesh
+        self.perception_mesh = None
+        self.perception_mesh_path = None
 
     def _build_ui(self):
         """Build the UI for the extension"""
@@ -124,11 +127,9 @@ class GO4RExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5, height=0):
                             with ui.HStack(spacing=5):
                                 self.selected_robot_label = ui.Label("(Select one or more robot from the stage)", style = {"color": ui.color("#FF0000")})
-                                self.refresh_sensors_btn = ui.Button("Refresh Sensor List", clicked_fn=self._refresh_sensor_list, height=36, width=0)
+                                self.refresh_sensors_btn = ui.Button("Refresh Robots & Sensors", clicked_fn=self._refresh_sensor_list, height=36, width=0)
                                 self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
-                            self.sensor_list = ui.ScrollingFrame(
-                                height=500,
-                            )
+                            self.sensor_list = ui.ScrollingFrame(height=300)
                             with ui.CollapsableFrame("Data Export", height=0, collapsed=True):
                                 with ui.VStack(spacing=5, height=0):
                                     with ui.HStack(spacing=5):
@@ -145,45 +146,64 @@ class GO4RExtension(omni.ext.IExt):
 
                     ui.Spacer(height=10)
                     
-                    with ui.CollapsableFrame("Settings", height=0):
+                    with ui.CollapsableFrame("Perception Entropy", height=0):
                         with ui.VStack(spacing=5, height=0):
-                            ui.Label("Perception Space (meters)")
-                            
-                            with ui.HStack(spacing=5):
-                                ui.Label("X Range:", width=70)
-                                self.x_min_field = ui.FloatField(width=50)
-                                self.x_min_field.model.set_value(self.perception_space["x_range"][0])
-                                ui.Label("to", width=20)
-                                self.x_max_field = ui.FloatField(width=50)
-                                self.x_max_field.model.set_value(self.perception_space["x_range"][1])
-                            
-                            with ui.HStack(spacing=5):
-                                ui.Label("Y Range:", width=70)
-                                self.y_min_field = ui.FloatField(width=50)
-                                self.y_min_field.model.set_value(self.perception_space["y_range"][0])
-                                ui.Label("to", width=20)
-                                self.y_max_field = ui.FloatField(width=50)
-                                self.y_max_field.model.set_value(self.perception_space["y_range"][1])
-                            
-                            with ui.HStack(spacing=5):
-                                ui.Label("Z Range:", width=70)
-                                self.z_min_field = ui.FloatField(width=50)
-                                self.z_min_field.model.set_value(self.perception_space["z_range"][0])
-                                ui.Label("to", width=20)
-                                self.z_max_field = ui.FloatField(width=50)
-                                self.z_max_field.model.set_value(self.perception_space["z_range"][1])
-                    
-                    with ui.CollapsableFrame("Object Types", height=0):
-                        with ui.VStack(spacing=5, height=0):
-                            for obj_type in self.target_objects:
-                                with ui.HStack(spacing=5):
-                                    ui.Label(f"{obj_type.capitalize()}", width=100)
-                                    ui.Label("Weight:", width=50)
-                                    weight_field = ui.FloatField(width=50)
-                                    weight_field.model.set_value(self.target_objects[obj_type]["weight"])
-                                    weight_field.model.add_value_changed_fn(
-                                        lambda w, obj=obj_type: self._update_object_weight(obj, w)
-                                    )
+                            with ui.CollapsableFrame("Target Perception Area", height=0):
+                                with ui.VStack(spacing=5, height=0):
+                                    ui.Label("Perception Area Selection")
+                                    
+                                    # Add mesh selection UI
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Perception Mesh:", width=120)
+                                        self.perception_mesh_label = ui.Label("(Not selected)", width=0)
+                                        self.select_mesh_btn = ui.Button("Select...", width=80, clicked_fn=self._select_perception_mesh)
+                                    
+                                    with ui.HStack(spacing=5):
+                                        self.use_mesh_toggle = ui.CheckBox(width=20)
+                                        self.use_mesh_toggle.model.set_value(False)
+                                        ui.Label("Use Selected Mesh (when checked) or Manual Bounds (when unchecked)")
+                                    
+                                    # Show bounds of selected mesh if available
+                                    self.mesh_bounds_label = ui.Label("Mesh Bounds: Not selected")
+                                    
+                                    # Existing manual input fields for fallback
+                                    ui.Label("Manual Perception Space (meters)")
+                                    
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("X Range:", width=70)
+                                        self.x_min_field = ui.FloatField(width=50)
+                                        self.x_min_field.model.set_value(self.perception_space["x_range"][0])
+                                        ui.Label("to", width=20)
+                                        self.x_max_field = ui.FloatField(width=50)
+                                        self.x_max_field.model.set_value(self.perception_space["x_range"][1])
+                                    
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Y Range:", width=70)
+                                        self.y_min_field = ui.FloatField(width=50)
+                                        self.y_min_field.model.set_value(self.perception_space["y_range"][0])
+                                        ui.Label("to", width=20)
+                                        self.y_max_field = ui.FloatField(width=50)
+                                        self.y_max_field.model.set_value(self.perception_space["y_range"][1])
+                                    
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Z Range:", width=70)
+                                        self.z_min_field = ui.FloatField(width=50)
+                                        self.z_min_field.model.set_value(self.perception_space["z_range"][0])
+                                        ui.Label("to", width=20)
+                                        self.z_max_field = ui.FloatField(width=50)
+                                        self.z_max_field.model.set_value(self.perception_space["z_range"][1])
+                        
+                            with ui.CollapsableFrame("Object Types", height=0):
+                                with ui.VStack(spacing=5, height=0):
+                                    for obj_type in self.target_objects:
+                                        with ui.HStack(spacing=5):
+                                            ui.Label(f"{obj_type.capitalize()}", width=100)
+                                            ui.Label("Weight:", width=50)
+                                            weight_field = ui.FloatField(width=50)
+                                            weight_field.model.set_value(self.target_objects[obj_type]["weight"])
+                                            weight_field.model.add_value_changed_fn(
+                                                lambda w, obj=obj_type: self._update_object_weight(obj, w)
+                                            )
                     
                     ui.Spacer(height=10)
                     
@@ -519,6 +539,13 @@ class GO4RExtension(omni.ext.IExt):
             self.target_objects[obj_type]["weight"] = 1.0
             
         self._log_message("Settings reset to default values")
+        
+        # Reset perception mesh settings
+        self.perception_mesh = None
+        self.perception_mesh_path = None
+        self.perception_mesh_label.text = "(Not selected)"
+        self.mesh_bounds_label.text = "Mesh Bounds: Not selected"
+        self.use_mesh_toggle.model.set_value(False)
     
     def _refresh_sensor_list(self):
         """Refresh the list of detected sensors without analysis"""
@@ -953,25 +980,146 @@ class GO4RExtension(omni.ext.IExt):
         """Generate sample points in the perception space with associated object types and weights"""
         sample_points = []
         
+        # Check if we should use selected mesh
+        use_mesh = self.use_mesh_toggle.model.get_value_as_bool() and self.perception_mesh is not None
+        
         # Coarse sampling for efficiency; adjust step size as needed
         step_size = 5.0  # meters
         
-        x_range = self.perception_space["x_range"]
-        y_range = self.perception_space["y_range"]
-        z_range = self.perception_space["z_range"]
-        
-        # Place samples for each object type
-        for obj_type, obj_data in self.target_objects.items():
-            weight = obj_data["weight"]
+        if use_mesh:
+            bounds = self._get_mesh_bounds(self.perception_mesh)
+            if bounds:
+                min_point, max_point = bounds
+                
+                # Use mesh bounds for sampling range
+                x_range = [min_point[0], max_point[0]]
+                y_range = [min_point[1], max_point[1]]
+                z_range = [min_point[2], max_point[2]]
+                
+                # Place samples for each object type
+                for obj_type, obj_data in self.target_objects.items():
+                    weight = obj_data["weight"]
+                    
+                    for x in np.arange(x_range[0], x_range[1], step_size):
+                        for y in np.arange(y_range[0], y_range[1], step_size):
+                            for z in np.arange(z_range[0], z_range[1], step_size):
+                                point = Gf.Vec3d(x, y, z)
+                                
+                                # Check if point is inside the mesh (simplified to bounding box for now)
+                                if self._is_point_in_mesh(point, self.perception_mesh):
+                                    sample_points.append((point, obj_type, weight))
+        else:
+            # Fall back to manual ranges if mesh not selected or not using mesh
+            x_range = self.perception_space["x_range"]
+            y_range = self.perception_space["y_range"]
+            z_range = self.perception_space["z_range"]
             
-            for x in np.arange(x_range[0], x_range[1], step_size):
-                for y in np.arange(y_range[0], y_range[1], step_size):
-                    # For simplicity, we place objects on the ground (z=0)
-                    # In a more complex simulation, we'd vary height as well
-                    point = Gf.Vec3d(x, y, z_range[0])
-                    sample_points.append((point, obj_type, weight))
+            # Place samples for each object type
+            for obj_type, obj_data in self.target_objects.items():
+                weight = obj_data["weight"]
+                
+                for x in np.arange(x_range[0], x_range[1], step_size):
+                    for y in np.arange(y_range[0], y_range[1], step_size):
+                        # For simplicity, we place objects on the ground (z=0)
+                        # In a more complex simulation, we'd vary height as well
+                        point = Gf.Vec3d(x, y, z_range[0])
+                        sample_points.append((point, obj_type, weight))
         
+        self._log_message(f"Generated {len(sample_points)} sample points in perception area")
         return sample_points
+
+    def _select_perception_mesh(self):
+        """Select a mesh to use as the target perception area"""
+        # Get current selection
+        selection = self._usd_context.get_selection().get_selected_prim_paths()
+        
+        if not selection:
+            self._log_message("No mesh selected. Please select a mesh prim in the stage.")
+            self.perception_mesh_label.text = "(Not selected)"
+            self.mesh_bounds_label.text = "Mesh Bounds: Not selected"
+            self.perception_mesh = None
+            self.perception_mesh_path = None
+            return
+        
+        # Use the first selected item
+        mesh_path = selection[0]
+        stage = get_current_stage()
+        mesh_prim = stage.GetPrimAtPath(mesh_path)
+        
+        if not mesh_prim:
+            self._log_message(f"Error: Could not find prim at path {mesh_path}")
+            return
+        
+        # Check if it's a mesh or has a bounding box we can use
+        if not (mesh_prim.IsA(UsdGeom.Mesh) or mesh_prim.IsA(UsdGeom.Boundable)):
+            self._log_message(f"Selected prim {mesh_path} is not a mesh or boundable object")
+            return
+        
+        # Store the mesh prim for later use
+        self.perception_mesh = mesh_prim
+        self.perception_mesh_path = mesh_path
+        self.perception_mesh_label.text = mesh_path.split('/')[-1]
+        
+        # Get and display bounds
+        bounds = self._get_mesh_bounds(mesh_prim)
+        if bounds:
+            min_point, max_point = bounds
+            self.mesh_bounds_label.text = (
+                f"Mesh Bounds: X: [{min_point[0]:.2f}, {max_point[0]:.2f}], "
+                f"Y: [{min_point[1]:.2f}, {max_point[1]:.2f}], "
+                f"Z: [{min_point[2]:.2f}, {max_point[2]:.2f}]"
+            )
+            
+            # Update manual values to match mesh bounds
+            self.x_min_field.model.set_value(min_point[0])
+            self.x_max_field.model.set_value(max_point[0])
+            self.y_min_field.model.set_value(min_point[1])
+            self.y_max_field.model.set_value(max_point[1])
+            self.z_min_field.model.set_value(min_point[2])
+            self.z_max_field.model.set_value(max_point[2])
+            
+            # Update perception space with mesh bounds
+            self.perception_space = {
+                "x_range": [min_point[0], max_point[0]],
+                "y_range": [min_point[1], max_point[1]],
+                "z_range": [min_point[2], max_point[2]]
+            }
+        
+        self._log_message(f"Selected mesh '{mesh_path}' as perception area")
+        # Auto-enable the use mesh toggle
+        self.use_mesh_toggle.model.set_value(True)
+
+    def _get_mesh_bounds(self, mesh_prim):
+        """Get the bounding box of a mesh prim"""
+        try:
+            if mesh_prim.IsA(UsdGeom.Boundable):
+                # Get the bounding box in world space
+                bound = UsdGeom.Boundable(mesh_prim).ComputeWorldBound(
+                    Usd.TimeCode.Default(), UsdGeom.Tokens.default_
+                )
+                box = bound.ComputeAlignedBox()
+                min_point = box.GetMin()
+                max_point = box.GetMax()
+                return (min_point, max_point)
+        except Exception as e:
+            self._log_message(f"Error getting bounds of mesh: {str(e)}")
+        
+        return None
+
+    def _is_point_in_mesh(self, point, mesh_prim):
+        """Determine if a point is inside the mesh (simple bounding box check for now)"""
+        if mesh_prim and mesh_prim.IsValid():
+            bounds = self._get_mesh_bounds(mesh_prim)
+            if bounds:
+                min_point, max_point = bounds
+                # Check if point is within bounding box
+                inside = (
+                    min_point[0] <= point[0] <= max_point[0] and
+                    min_point[1] <= point[1] <= max_point[1] and
+                    min_point[2] <= point[2] <= max_point[2]
+                )
+                return inside
+        return False
     
     def _calculate_camera_pixel_count(self, camera: Dict, point: Gf.Vec3d, obj_type: str) -> int:
         """Calculate the number of pixels an object at given point would occupy in the camera"""
