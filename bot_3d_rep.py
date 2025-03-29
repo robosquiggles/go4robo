@@ -307,6 +307,9 @@ class Bot3D:
         self.sensor_coverage_requirement = sensor_coverage_requirement
         self.sensor_pose_constraint = sensor_pose_constraint
 
+        self.perception_entropy = 0.0
+        self.perception_coverage_percentage = 0.0
+
         # TODO Remove self.body from any of the sensor_coverage_requirement meshes
 
     def get_sensors_by_type(self, sensor_type:Type[Sensor3D]) -> list[Sensor3D_Instance]:

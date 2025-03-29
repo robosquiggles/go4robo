@@ -71,14 +71,6 @@ class GO4RExtension(omni.ext.IExt):
         self.previous_selection = []
         self.processed_lidar_paths = set()
         
-        # Constants for calculation based on the paper
-        # TODO: Make this based on mesh/objects in the scene
-        self.perception_space = {
-            "x_range": [-80.0, 80.0],  # meters
-            "y_range": [-40.0, 40.0],  # meters
-            "z_range": [0.0, 5.0]      # meters
-        }
-        
         # Constants for camera AP calculation
         self.camera_ap_constants = {
             "a": 0.055,  # coefficient from the paper
@@ -92,11 +84,9 @@ class GO4RExtension(omni.ext.IExt):
         }
         
         # Voxel size for object representation (in meters)
-        # TODO: Make this adjustable in the UI
         self.voxel_size = 0.1
         
         # Target object types with their typical dimensions (length, width, height in meters)
-        # TODO: Make this based on objects in the scene?
         self.target_objects = {
             "car": {"dimensions": [4.5, 1.8, 1.5], "weight": 1.0},
             "pedestrian": {"dimensions": [0.6, 0.6, 1.7], "weight": 1.0},
@@ -107,12 +97,14 @@ class GO4RExtension(omni.ext.IExt):
 
         self.log_messages = []
         self.max_log_messages = 100  # Default value
-        self._build_ui()
-        self._window.visible = True
         
         # Add a property to track the selected perception area mesh
         self.perception_mesh = None
         self.perception_mesh_path = None
+        self.step_size = 5.0  # meters - sampling step size
+        
+        self._build_ui()
+        self._window.visible = True
 
     def _build_ui(self):
         """Build the UI for the extension"""
@@ -158,40 +150,25 @@ class GO4RExtension(omni.ext.IExt):
                                         self.perception_mesh_label = ui.Label("(Not selected)", width=0)
                                         self.select_mesh_btn = ui.Button("Select...", width=80, clicked_fn=self._select_perception_mesh)
                                     
-                                    with ui.HStack(spacing=5):
-                                        self.use_mesh_toggle = ui.CheckBox(width=20)
-                                        self.use_mesh_toggle.model.set_value(False)
-                                        ui.Label("Use Selected Mesh (when checked) or Manual Bounds (when unchecked)")
-                                    
                                     # Show bounds of selected mesh if available
                                     self.mesh_bounds_label = ui.Label("Mesh Bounds: Not selected")
                                     
-                                    # Existing manual input fields for fallback
-                                    ui.Label("Manual Perception Space (meters)")
-                                    
+                                    # Add sampling step size UI
                                     with ui.HStack(spacing=5):
-                                        ui.Label("X Range:", width=70)
-                                        self.x_min_field = ui.FloatField(width=50)
-                                        self.x_min_field.model.set_value(self.perception_space["x_range"][0])
-                                        ui.Label("to", width=20)
-                                        self.x_max_field = ui.FloatField(width=50)
-                                        self.x_max_field.model.set_value(self.perception_space["x_range"][1])
+                                        ui.Label("Sampling Density:", width=120)
+                                        self.step_size_field = ui.FloatField(width=60)
+                                        self.step_size_field.model.set_value(self.step_size)
+                                        ui.Label("meters between sample points", width=0)
+                                        
+                                        def _update_step_size(value):
+                                            # Extract the actual float value from the model object
+                                            float_value = value.get_value_as_float()
+                                            self.step_size = max(0.1, float_value)  # Minimum 0.1m
+                                            self._log_message(f"Sampling step size set to {self.step_size} meters")
+                                        
+                                        self.step_size_field.model.add_value_changed_fn(_update_step_size)
                                     
-                                    with ui.HStack(spacing=5):
-                                        ui.Label("Y Range:", width=70)
-                                        self.y_min_field = ui.FloatField(width=50)
-                                        self.y_min_field.model.set_value(self.perception_space["y_range"][0])
-                                        ui.Label("to", width=20)
-                                        self.y_max_field = ui.FloatField(width=50)
-                                        self.y_max_field.model.set_value(self.perception_space["y_range"][1])
-                                    
-                                    with ui.HStack(spacing=5):
-                                        ui.Label("Z Range:", width=70)
-                                        self.z_min_field = ui.FloatField(width=50)
-                                        self.z_min_field.model.set_value(self.perception_space["z_range"][0])
-                                        ui.Label("to", width=20)
-                                        self.z_max_field = ui.FloatField(width=50)
-                                        self.z_max_field.model.set_value(self.perception_space["z_range"][1])
+                                    ui.Label("Note: You must select a mesh to define the perception area")
                         
                             with ui.CollapsableFrame("Object Types", height=0):
                                 with ui.VStack(spacing=5, height=0):
@@ -205,22 +182,23 @@ class GO4RExtension(omni.ext.IExt):
                                                 lambda w, obj=obj_type: self._update_object_weight(obj, w)
                                             )
                     
-                    ui.Spacer(height=10)
-                    
-                    # Buttons for operations
-                    with ui.HStack(spacing=5, height=0):
-                        self.analyze_btn = ui.Button("Analyze Robot Sensors", clicked_fn=self._analyze_sensors, height=36)
-                        self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
+                            # Buttons for operations
+                            with ui.HStack(spacing=5, height=0):
+                                self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropy, height=36)
+                                # Initially disable the button since no mesh is selected
+                                self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+                                self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
                     
                     ui.Spacer(height=10)
                     
                     # Results section
                     with ui.CollapsableFrame("Results", height=0):
                         with ui.VStack(spacing=5):
-                            self.camera_label = ui.Label("Cameras: Not analyzed")
-                            self.lidar_label = ui.Label("LiDARs: Not analyzed")
-                            self.total_label = ui.Label("Total Perception Entropy: N/A")
-                            
+                            self.results_list = ui.ScrollingFrame(height=250)
+                            # Initialize with empty results
+                            with self.results_list:
+                                ui.Label("Run analysis to see results")
+                    
                     ui.Spacer(height=20)
                     
                     # Log section for detailed information
@@ -304,7 +282,7 @@ class GO4RExtension(omni.ext.IExt):
         for robot_path in selection:
             bot_prim = get_current_stage().GetPrimAtPath(robot_path)
             self.selected_robot_prims.append(bot_prim)
-        self.selected_robot_label.text = f"Selected robots: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_robot_prims])}"
+        self.selected_robot_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_robot_prims])}"
         self.enable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#00FF00"))
         self.selected_robot_label.style = {"color": ui.color("#00FF00")}
         
@@ -314,7 +292,6 @@ class GO4RExtension(omni.ext.IExt):
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
         self.max_log_messages = max(1, int(value))
-        self._update_log_display()  # Refresh display with new limit
         
     def _clear_log(self):
         """Clear all log messages"""
@@ -333,15 +310,12 @@ class GO4RExtension(omni.ext.IExt):
         if len(self.log_messages) > self.max_log_messages:
             self.log_messages = self.log_messages[-self.max_log_messages:]
         
-        # Update display
+        # Update the log display with the new messages - this line is missing
         self._update_log_display()
-        
+
     def _update_log_display(self):
         """Update the log display with current messages"""
         self.log_label.text = "\n".join(self.log_messages)
-        
-        # Auto-scroll to bottom - this is handled by ScrollingFrame automatically
-        # when content changes, but we could add explicit scrolling if needed
 
     def _browse_export_path(self):
         """Open a file dialog to select export location"""
@@ -520,32 +494,24 @@ class GO4RExtension(omni.ext.IExt):
     
     def _reset_settings(self):
         """Reset all settings to default values"""
-        self.perception_space = {
-            "x_range": [-80.0, 80.0],
-            "y_range": [-40.0, 40.0],
-            "z_range": [0.0, 5.0]
-        }
-        
-        # Update UI fields
-        self.x_min_field.model.set_value(self.perception_space["x_range"][0])
-        self.x_max_field.model.set_value(self.perception_space["x_range"][1])
-        self.y_min_field.model.set_value(self.perception_space["y_range"][0])
-        self.y_max_field.model.set_value(self.perception_space["y_range"][1])
-        self.z_min_field.model.set_value(self.perception_space["z_range"][0])
-        self.z_max_field.model.set_value(self.perception_space["z_range"][1])
-        
         # Reset object weights
         for obj_type in self.target_objects:
             self.target_objects[obj_type]["weight"] = 1.0
-            
-        self._log_message("Settings reset to default values")
         
         # Reset perception mesh settings
         self.perception_mesh = None
         self.perception_mesh_path = None
         self.perception_mesh_label.text = "(Not selected)"
         self.mesh_bounds_label.text = "Mesh Bounds: Not selected"
-        self.use_mesh_toggle.model.set_value(False)
+        
+        # Disable analyze button when mesh is reset
+        self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+        
+        # Reset sampling step size
+        self.step_size = 5.0
+        self.step_size_field.model.set_value(self.step_size)
+        
+        self._log_message("Settings reset to default values")
     
     def _refresh_sensor_list(self):
         """Refresh the list of detected sensors without analysis"""
@@ -800,47 +766,209 @@ class GO4RExtension(omni.ext.IExt):
         self.target_objects[obj_type]["weight"] = weight
         self._log_message(f"Updated weight for {obj_type} to {weight}")
 
-    def _analyze_sensors(self):
+    def _calc_perception_entropy(self):
         """Main function to analyze all sensors on the robot"""
-        self._log_message("Starting sensor analysis...")
+        self._log_message("Starting perception entropy analysis...")
         
-        # Update perception space from UI fields
-        self.perception_space["x_range"] = [self.x_min_field.model.get_value_as_float(), 
-                                           self.x_max_field.model.get_value_as_float()]
-        self.perception_space["y_range"] = [self.y_min_field.model.get_value_as_float(), 
-                                           self.y_max_field.model.get_value_as_float()]
-        self.perception_space["z_range"] = [self.z_min_field.model.get_value_as_float(), 
-                                           self.z_max_field.model.get_value_as_float()]
+        # Check if we have a valid mesh for perception area
+        if not self.perception_mesh or not self.perception_mesh.IsValid():
+            self._log_message("Error: No valid perception mesh selected. Please select a mesh first.")
+            return
         
-        # Refresh sensor list
-        self._refresh_sensor_list()
+        # Check if we have robots to analyze
+        if not self.robots:
+            self._log_message("Error: No robots selected for analysis.")
+            return
         
-        # Use the detected sensors for analysis
-        cameras = self.detected_cameras
-        lidars = self.detected_lidars
-        
-        # Calculate perception entropy for cameras
-        camera_entropy = self._calculate_camera_entropy(cameras)
-        self.camera_label.text = f"Cameras: {camera_entropy:.4f}"
-        
-        # Calculate perception entropy for LiDARs
-        lidar_entropy = self._calculate_lidar_entropy(lidars)
-        self.lidar_label.text = f"LiDARs: {lidar_entropy:.4f}"
-        
-        # Calculate total perception entropy (late fusion of sensors)
-        if cameras and lidars:
-            # Using late fusion strategy from the paper
-            total_entropy = self._apply_late_fusion([camera_entropy, lidar_entropy])
-            self.total_label.text = f"Total Perception Entropy: {total_entropy:.4f}"
-        elif cameras:
-            self.total_label.text = f"Total Perception Entropy: {camera_entropy:.4f}"
-        elif lidars:
-            self.total_label.text = f"Total Perception Entropy: {lidar_entropy:.4f}"
-        else:
-            self.total_label.text = "Total Perception Entropy: N/A"
-            self._log_message("No sensors found for analysis")
+        # Generate sample points once for efficiency
+        sample_points = self._generate_sample_points()
+        if not sample_points:
+            self._log_message("Error: Could not generate sample points. Check perception mesh.")
+            return
             
+        # Store results for all robots
+        results_data = {}
+        
+        # Track overall results for combined metrics
+        all_cameras_entropy = []
+        all_lidars_entropy = []
+        
+        # Analyze each robot separately
+        for robot in self.robots:
+            robot_name = robot.name
+            robot_results = {'cameras': 0.0, 'lidars': 0.0, 'total': 0.0, 'camera_details': {}, 'lidar_details': {}}
+            
+            # Calculate entropy for cameras
+            cameras = robot.get_sensors_by_type(MonoCamera3D) + robot.get_sensors_by_type(StereoCamera3D)
+            if cameras:
+                camera_entropies = []
+                for camera in cameras:
+                    # Convert sensor instance to dictionary for compatibility with existing calculation methods
+                    cam_dict = {
+                        "name": camera.name,
+                        "transform": camera.tf,
+                        "hfov": camera.sensor.h_fov,
+                        "resolution": (camera.sensor.h_res, camera.sensor.v_res) if camera.sensor.h_res and camera.sensor.v_res else (1920, 1080)
+                    }
+                    
+                    # Calculate entropy for this camera
+                    entropy = self._calculate_single_sensor_entropy(cam_dict, sample_points, is_camera=True)
+                    camera_entropies.append(entropy)
+                    robot_results['camera_details'][camera.name] = entropy
+                    
+                # Calculate combined camera entropy if we have multiple cameras
+                if camera_entropies:
+                    robot_results['cameras'] = self._apply_early_fusion(camera_entropies)
+                    all_cameras_entropy.extend(camera_entropies)
+            
+            # Calculate entropy for lidars
+            lidars = robot.get_sensors_by_type(Lidar3D)
+            if lidars:
+                lidar_entropies = []
+                for lidar in lidars:
+                    # Convert sensor instance to dictionary for compatibility
+                    lidar_dict = {
+                        "name": lidar.name,
+                        "transform": lidar.tf,
+                        "fov_horizontal": lidar.sensor.h_fov,
+                        "fov_vertical": lidar.sensor.v_fov,
+                        "channels": lidar.sensor.v_res,
+                        "max_range": lidar.sensor.max_range
+                    }
+                    
+                    # Calculate entropy for this lidar
+                    entropy = self._calculate_single_sensor_entropy(lidar_dict, sample_points, is_camera=False)
+                    lidar_entropies.append(entropy)
+                    robot_results['lidar_details'][lidar.name] = entropy
+                    
+                # Calculate combined lidar entropy
+                if lidar_entropies:
+                    robot_results['lidars'] = self._apply_early_fusion(lidar_entropies)
+                    all_lidars_entropy.extend(lidar_entropies)
+            
+            # Calculate total entropy for this robot using late fusion
+            if robot_results['cameras'] > 0 and robot_results['lidars'] > 0:
+                robot_results['total'] = self._apply_late_fusion([robot_results['cameras'], robot_results['lidars']])
+            elif robot_results['cameras'] > 0:
+                robot_results['total'] = robot_results['cameras']
+            elif robot_results['lidars'] > 0:
+                robot_results['total'] = robot_results['lidars']
+            
+            # Store results for this robot
+            results_data[robot_name] = robot_results
+        
+        # Calculate combined results across all robots
+        combined_results = {
+            'cameras': self._apply_early_fusion(all_cameras_entropy) if all_cameras_entropy else 0.0,
+            'lidars': self._apply_early_fusion(all_lidars_entropy) if all_lidars_entropy else 0.0,
+            'total': 0.0
+        }
+        
+        # Calculate overall total entropy using late fusion
+        if combined_results['cameras'] > 0 and combined_results['lidars'] > 0:
+            combined_results['total'] = self._apply_late_fusion([combined_results['cameras'], combined_results['lidars']])
+        elif combined_results['cameras'] > 0:
+            combined_results['total'] = combined_results['cameras']
+        elif combined_results['lidars'] > 0:
+            combined_results['total'] = combined_results['lidars']
+        
+        # Add combined results to results data
+        results_data['combined'] = combined_results
+        
+        # Update the results UI
+        self._update_results_ui(results_data)
+        
         self._log_message("Analysis complete")
+
+    def _update_results_ui(self, results_data=None):
+        """Update the results UI with entropy results for each robot"""
+        # Clear existing results
+        self.results_list.clear()
+        
+        with self.results_list:
+            with ui.VStack(spacing=5):
+                if not self.robots:
+                    ui.Label("No robots selected")
+                elif not results_data:
+                    ui.Label("Run analysis to see results")
+                else:
+                    # Add an overall results section
+                    with ui.CollapsableFrame(
+                        "Overall Results", 
+                        height=0,
+                        style={"border_width": 2, "border_color": ui.color("#00aa00")},
+                        collapsed=False
+                    ):
+                        with ui.VStack(spacing=5):
+                            # Display combined results if available
+                            if "combined" in results_data:
+                                combined = results_data["combined"]
+                                ui.Label(f"Total Perception Entropy: {combined['total']:.4f}")
+                                ui.Label(f"All Cameras: {combined['cameras']:.4f}")
+                                ui.Label(f"All LiDARs: {combined['lidars']:.4f}")
+                    
+                    # For each robot, create a collapsible frame with its results
+                    for robot_name, robot_results in results_data.items():
+                        if robot_name == "combined":
+                            continue  # Skip the combined results as they're already displayed
+                        
+                        with ui.CollapsableFrame(
+                            f"Robot: {robot_name}", 
+                            height=0,
+                            style={"border_width": 2, "border_color": ui.color("#0059ff")},
+                            collapsed=False
+                        ):
+                            with ui.VStack(spacing=5):
+                                ui.Label(f"Total Entropy: {robot_results['total']:.4f}")
+                                
+                                # Camera results
+                                with ui.CollapsableFrame(
+                                    f"Cameras: {robot_results['cameras']:.4f}", 
+                                    height=0,
+                                    style={"border_color": ui.color("#00c3ff")},
+                                    collapsed=False
+                                ):
+                                    with ui.VStack(spacing=2):
+                                        for camera_name, camera_entropy in robot_results.get('camera_details', {}).items():
+                                            ui.Label(f"{camera_name}: {camera_entropy:.4f}")
+                                
+                                # LiDAR results
+                                with ui.CollapsableFrame(
+                                    f"LiDARs: {robot_results['lidars']:.4f}", 
+                                    height=0,
+                                    style={"border_color": ui.color("#00c3ff")},
+                                    collapsed=False
+                                ):
+                                    with ui.VStack(spacing=2):
+                                        for lidar_name, lidar_entropy in robot_results.get('lidar_details', {}).items():
+                                            ui.Label(f"{lidar_name}: {lidar_entropy:.4f}")
+
+    def _calculate_single_sensor_entropy(self, sensor_dict, sample_points, is_camera=True):
+        """Calculate entropy for a single sensor"""
+        entropy_sum = 0.0
+        total_weight = 0.0
+        
+        for point, obj_type, weight in sample_points:
+            # Calculate measurement (pixel count or point count)
+            if is_camera:
+                measurement = self._calculate_camera_pixel_count(sensor_dict, point, obj_type)
+                ap = self._calculate_camera_ap(measurement)
+            else:
+                measurement = self._calculate_lidar_point_count(sensor_dict, point, obj_type)
+                ap = self._calculate_lidar_ap(measurement)
+            
+            # Convert AP to standard deviation
+            sigma = self._ap_to_sigma(ap)
+            
+            # Calculate entropy
+            point_entropy = self._gaussian_entropy(sigma)
+            entropy_sum += point_entropy * weight
+            total_weight += weight
+        
+        if total_weight > 0:
+            return entropy_sum / total_weight
+        else:
+            return 0.0
 
     def _get_prim_attribute(self, prim, attr_name, default_value=None):
         """Get the value of a prim attribute or return a default value"""
@@ -889,143 +1017,205 @@ class GO4RExtension(omni.ext.IExt):
         
         return relative_position, relative_rotation
     
-    def _calculate_camera_entropy(self, cameras: List[Dict]) -> float:
-        """Calculate perception entropy for all cameras"""
-        if not cameras:
-            return 0.0
-        
-        # Generate sample points in the perception space
-        sample_points = self._generate_sample_points()
-        
-        # For each camera, calculate entropy at each sample point
-        camera_entropies = []
-        
-        for camera in cameras:
-            entropy_sum = 0.0
-            total_weight = 0.0
-            
-            for point, obj_type, weight in sample_points:
-                # Calculate pixel count (sensor measurement) for this point
-                pixel_count = self._calculate_camera_pixel_count(camera, point, obj_type)
-                
-                # Convert pixel count to AP
-                ap = self._calculate_camera_ap(pixel_count)
-                
-                # Convert AP to standard deviation
-                sigma = self._ap_to_sigma(ap)
-                
-                # Calculate entropy
-                point_entropy = self._gaussian_entropy(sigma)
-                entropy_sum += point_entropy * weight
-                total_weight += weight
-            
-            if total_weight > 0:
-                camera_entropies.append(entropy_sum / total_weight)
-                self._log_message(f"Camera {camera['name']} entropy: {camera_entropies[-1]:.4f}")
-        
-        # Use early fusion strategy for multiple cameras (sum of measurements)
-        # In practice, we'd need a more sophisticated fusion model
-        if len(camera_entropies) > 1:
-            combined_entropy = self._apply_early_fusion(camera_entropies)
-            return combined_entropy
-        elif camera_entropies:
-            return camera_entropies[0]
-        else:
-            return 0.0
-    
-    def _calculate_lidar_entropy(self, lidars: List[Dict]) -> float:
-        """Calculate perception entropy for all LiDARs"""
-        if not lidars:
-            return 0.0
-        
-        # Generate sample points in the perception space
-        sample_points = self._generate_sample_points()
-        
-        # For each LiDAR, calculate entropy at each sample point
-        lidar_entropies = []
-        
-        for lidar in lidars:
-            entropy_sum = 0.0
-            total_weight = 0.0
-            
-            for point, obj_type, weight in sample_points:
-                # Calculate point count (sensor measurement) for this point
-                point_count = self._calculate_lidar_point_count(lidar, point, obj_type)
-                
-                # Convert point count to AP
-                ap = self._calculate_lidar_ap(point_count)
-                
-                # Convert AP to standard deviation
-                sigma = self._ap_to_sigma(ap)
-                
-                # Calculate entropy
-                point_entropy = self._gaussian_entropy(sigma)
-                entropy_sum += point_entropy * weight
-                total_weight += weight
-            
-            if total_weight > 0:
-                lidar_entropies.append(entropy_sum / total_weight)
-                self._log_message(f"LiDAR {lidar['name']} entropy: {lidar_entropies[-1]:.4f}")
-        
-        # Use early fusion strategy for multiple LiDARs (sum of measurements)
-        if len(lidar_entropies) > 1:
-            combined_entropy = self._apply_early_fusion(lidar_entropies)
-            return combined_entropy
-        elif lidar_entropies:
-            return lidar_entropies[0]
-        else:
-            return 0.0
-    
     def _generate_sample_points(self) -> List[Tuple[Gf.Vec3d, str, float]]:
         """Generate sample points in the perception space with associated object types and weights"""
         sample_points = []
         
-        # Check if we should use selected mesh
-        use_mesh = self.use_mesh_toggle.model.get_value_as_bool() and self.perception_mesh is not None
+        # Check if we have a valid mesh
+        if not self.perception_mesh or not self.perception_mesh.IsValid():
+            self._log_message("Error: No valid perception mesh selected. Please select a mesh first.")
+            return []
         
-        # Coarse sampling for efficiency; adjust step size as needed
-        step_size = 5.0  # meters
+        # If the mesh is a simple cube, use voxel sampling
+        if self.perception_mesh.GetTypeName() == 'Cube':
+            return self._generate_box_sample_points()
         
-        if use_mesh:
-            bounds = self._get_mesh_bounds(self.perception_mesh)
-            if bounds:
-                min_point, max_point = bounds
-                
-                # Use mesh bounds for sampling range
-                x_range = [min_point[0], max_point[0]]
-                y_range = [min_point[1], max_point[1]]
-                z_range = [min_point[2], max_point[2]]
-                
-                # Place samples for each object type
-                for obj_type, obj_data in self.target_objects.items():
-                    weight = obj_data["weight"]
-                    
-                    for x in np.arange(x_range[0], x_range[1], step_size):
-                        for y in np.arange(y_range[0], y_range[1], step_size):
-                            for z in np.arange(z_range[0], z_range[1], step_size):
-                                point = Gf.Vec3d(x, y, z)
-                                
-                                # Check if point is inside the mesh (simplified to bounding box for now)
-                                if self._is_point_in_mesh(point, self.perception_mesh):
-                                    sample_points.append((point, obj_type, weight))
-        else:
-            # Fall back to manual ranges if mesh not selected or not using mesh
-            x_range = self.perception_space["x_range"]
-            y_range = self.perception_space["y_range"]
-            z_range = self.perception_space["z_range"]
+        # For more complex meshes, use mesh-aware sampling
+        if not self.perception_mesh.IsA(UsdGeom.Mesh):
+            self._log_message("Warning: Selected prim is not a mesh. Using bounding box sampling instead.")
+            return self._generate_box_sample_points()
+        
+        # Get the mesh geometry
+        mesh_geom = UsdGeom.Mesh(self.perception_mesh)
+        
+        # Get the points and face indices
+        points = mesh_geom.GetPointsAttr().Get()
+        face_vertex_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
+        face_vertex_indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
+        
+        if not points or not face_vertex_counts or not face_vertex_indices:
+            self._log_message(f"Missing mesh data for {self.perception_mesh.GetPath()}. Using bounding box sampling instead.")
+            return self._generate_box_sample_points()
+        
+        # Get the mesh transform
+        xform = UsdGeom.Xformable(self.perception_mesh)
+        local_to_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        
+        # Convert mesh to world space
+        world_points = [Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))) for p in points]
+        
+        # Get the mesh bounding box for determining sampling density
+        bounds = self._get_mesh_bounds(self.perception_mesh)
+        if not bounds:
+            self._log_message("Error: Could not determine mesh bounds.")
+            return []
+        
+        min_point, max_point = bounds
+        dx = max_point[0] - min_point[0]
+        dy = max_point[1] - min_point[1]
+        dz = max_point[2] - min_point[2]
+        
+        # Estimate total volume and target number of samples
+        volume = dx * dy * dz
+        # Adjust the density factor based on how fine-grained you want the sampling to be
+        density_factor = 1.0 / (self.step_size ** 3)
+        target_samples = int(volume * density_factor)
+        
+        self._log_message(f"Generating approximately {target_samples} sample points for mesh")
+        
+        # Calculate centroid of mesh to use as starting point
+        centroid = Gf.Vec3d(0, 0, 0)
+        for p in world_points:
+            centroid += p
+        if len(world_points) > 0:
+            centroid /= len(world_points)
+        
+        # Use an octree-inspired approach for adaptive sampling
+        # Start with the bounding box and recursively subdivide where needed
+        sample_points.extend(self._adaptive_sample_mesh(min_point, max_point, target_samples))
+        
+        self._log_message(f"Generated {len(sample_points)} sample points inside mesh area")
+        return sample_points
+
+    def _generate_box_sample_points(self) -> List[Tuple[Gf.Vec3d, str, float]]:
+        """Generate sample points using the bounding box approach (fallback method)"""
+        sample_points = []
+        
+        bounds = self._get_mesh_bounds(self.perception_mesh)
+        if not bounds:
+            self._log_message("Error: Could not determine mesh bounds.")
+            return []
+        
+        min_point, max_point = bounds
+        
+        # Generate sample points within mesh bounds
+        step = self.step_size  # Use the configurable step size
+        
+        # Place samples for each object type
+        for obj_type, obj_data in self.target_objects.items():
+            weight = obj_data["weight"]
+            
+            # Sample the mesh volume with the specified step size
+            for x in np.arange(min_point[0], max_point[0], step):
+                for y in np.arange(min_point[1], max_point[1], step):
+                    for z in np.arange(min_point[2], max_point[2], step):
+                        point = Gf.Vec3d(x, y, z)
+                        
+                        # Check if point is inside the mesh
+                        if self._is_point_in_mesh(point, self.perception_mesh):
+                            sample_points.append((point, obj_type, weight))
+        
+        self._log_message(f"Generated {len(sample_points)} sample points inside bounding box")
+        return sample_points
+
+    def _adaptive_sample_mesh(self, min_corner, max_corner, target_samples, depth=0, max_depth=5):
+        """Recursively sample a region of space, focusing on areas inside the mesh"""
+        sample_points = []
+        
+        # Stop recursion if we've reached max depth or the region is too small
+        if depth >= max_depth:
+            # At max depth, apply regular grid sampling in this small region
+            step = self.step_size
+            
+            # Create a smaller step size for regions we're focusing on
+            adjusted_step = max(step, (max_corner[0] - min_corner[0]) / 3.0)
             
             # Place samples for each object type
             for obj_type, obj_data in self.target_objects.items():
                 weight = obj_data["weight"]
                 
-                for x in np.arange(x_range[0], x_range[1], step_size):
-                    for y in np.arange(y_range[0], y_range[1], step_size):
-                        # For simplicity, we place objects on the ground (z=0)
-                        # In a more complex simulation, we'd vary height as well
-                        point = Gf.Vec3d(x, y, z_range[0])
-                        sample_points.append((point, obj_type, weight))
+                # Sample this subregion using a grid
+                for x in np.arange(min_corner[0], max_corner[0], adjusted_step):
+                    for y in np.arange(min_corner[1], max_corner[1], adjusted_step):
+                        for z in np.arange(min_corner[2], max_corner[2], adjusted_step):
+                            point = Gf.Vec3d(x, y, z)
+                            
+                            # Check if point is inside the mesh
+                            if self._is_point_in_mesh(point, self.perception_mesh):
+                                sample_points.append((point, obj_type, weight))
+            return sample_points
         
-        self._log_message(f"Generated {len(sample_points)} sample points in perception area")
+        # Calculate the center of the current region
+        center = (min_corner + max_corner) * 0.5
+        
+        # Probe the center point to see if it's inside the mesh
+        center_inside = self._is_point_in_mesh(center, self.perception_mesh)
+        
+        # Probe the corners to see if they're inside the mesh
+        corners = [
+            Gf.Vec3d(min_corner[0], min_corner[1], min_corner[2]),
+            Gf.Vec3d(max_corner[0], min_corner[1], min_corner[2]),
+            Gf.Vec3d(min_corner[0], max_corner[1], min_corner[2]),
+            Gf.Vec3d(max_corner[0], max_corner[1], min_corner[2]),
+            Gf.Vec3d(min_corner[0], min_corner[1], max_corner[2]),
+            Gf.Vec3d(max_corner[0], min_corner[1], max_corner[2]),
+            Gf.Vec3d(min_corner[0], max_corner[1], max_corner[2]),
+            Gf.Vec3d(max_corner[0], max_corner[1], max_corner[2])
+        ]
+        corners_inside = [self._is_point_in_mesh(c, self.perception_mesh) for c in corners]
+        
+        # If all corners and center are outside, skip this region
+        if not center_inside and not any(corners_inside):
+            return []
+        
+        # If all corners and center are inside, we can be more efficient with sampling
+        if center_inside and all(corners_inside):
+            # This region is fully inside the mesh, sample it with a coarser grid
+            adjusted_step = self.step_size * 2  # Coarser sampling for interior regions
+            for obj_type, obj_data in self.target_objects.items():
+                weight = obj_data["weight"]
+                
+                # Determine how many points to sample based on volume
+                dx = max_corner[0] - min_corner[0]
+                dy = max_corner[1] - min_corner[1]
+                dz = max_corner[2] - min_corner[2]
+                volume = dx * dy * dz
+                
+                # Generate a uniform sampling but with larger step size
+                for x in np.arange(min_corner[0], max_corner[0], adjusted_step):
+                    for y in np.arange(min_corner[1], max_corner[1], adjusted_step):
+                        for z in np.arange(min_corner[2], max_corner[2], adjusted_step):
+                            point = Gf.Vec3d(x, y, z)
+                            sample_points.append((point, obj_type, weight))
+            return sample_points
+        
+        # Otherwise, this region intersects the mesh boundary, subdivide it
+        mid_x = (min_corner[0] + max_corner[0]) / 2
+        mid_y = (min_corner[1] + max_corner[1]) / 2
+        mid_z = (min_corner[2] + max_corner[2]) / 2
+        
+        # Generate 8 octants
+        octants = [
+            (Gf.Vec3d(min_corner[0], min_corner[1], min_corner[2]), Gf.Vec3d(mid_x, mid_y, mid_z)),
+            (Gf.Vec3d(mid_x, min_corner[1], min_corner[2]), Gf.Vec3d(max_corner[0], mid_y, mid_z)),
+            (Gf.Vec3d(min_corner[0], mid_y, min_corner[2]), Gf.Vec3d(mid_x, max_corner[1], mid_z)),
+            (Gf.Vec3d(mid_x, mid_y, min_corner[2]), Gf.Vec3d(max_corner[0], max_corner[1], mid_z)),
+            (Gf.Vec3d(min_corner[0], min_corner[1], mid_z), Gf.Vec3d(mid_x, mid_y, max_corner[2])),
+            (Gf.Vec3d(mid_x, min_corner[1], mid_z), Gf.Vec3d(max_corner[0], mid_y, max_corner[2])),
+            (Gf.Vec3d(min_corner[0], mid_y, mid_z), Gf.Vec3d(mid_x, max_corner[1], max_corner[2])),
+            (Gf.Vec3d(mid_x, mid_y, mid_z), Gf.Vec3d(max_corner[0], max_corner[1], max_corner[2]))
+        ]
+        
+        # Recursively sample each octant
+        for min_pt, max_pt in octants:
+            # Adjust target samples based on volume ratio
+            octant_volume = (max_pt[0] - min_pt[0]) * (max_pt[1] - min_pt[1]) * (max_pt[2] - min_pt[2])
+            total_volume = (max_corner[0] - min_corner[0]) * (max_corner[1] - min_corner[1]) * (max_corner[2] - min_corner[2])
+            octant_target = max(1, int(target_samples * (octant_volume / total_volume)))
+            
+            # Recursively sample this octant
+            sample_points.extend(self._adaptive_sample_mesh(min_pt, max_pt, octant_target, depth + 1, max_depth))
+        
         return sample_points
 
     def _select_perception_mesh(self):
@@ -1039,6 +1229,8 @@ class GO4RExtension(omni.ext.IExt):
             self.mesh_bounds_label.text = "Mesh Bounds: Not selected"
             self.perception_mesh = None
             self.perception_mesh_path = None
+            # Disable analyze button when no mesh is selected
+            self.disable_ui_element(self.analyze_btn)
             return
         
         # Use the first selected item
@@ -1060,6 +1252,9 @@ class GO4RExtension(omni.ext.IExt):
         self.perception_mesh_path = mesh_path
         self.perception_mesh_label.text = mesh_path.split('/')[-1]
         
+        # Enable analyze button now that we have a mesh
+        self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+        
         # Get and display bounds
         bounds = self._get_mesh_bounds(mesh_prim)
         if bounds:
@@ -1070,24 +1265,21 @@ class GO4RExtension(omni.ext.IExt):
                 f"Z: [{min_point[2]:.2f}, {max_point[2]:.2f}]"
             )
             
-            # Update manual values to match mesh bounds
-            self.x_min_field.model.set_value(min_point[0])
-            self.x_max_field.model.set_value(max_point[0])
-            self.y_min_field.model.set_value(min_point[1])
-            self.y_max_field.model.set_value(max_point[1])
-            self.z_min_field.model.set_value(min_point[2])
-            self.z_max_field.model.set_value(max_point[2])
+            # Calculate the largest dimension of the mesh
+            dimensions = [
+                max_point[0] - min_point[0],
+                max_point[1] - min_point[1],
+                max_point[2] - min_point[2]
+            ]
+            largest_dimension = max(dimensions)
             
-            # Update perception space with mesh bounds
-            self.perception_space = {
-                "x_range": [min_point[0], max_point[0]],
-                "y_range": [min_point[1], max_point[1]],
-                "z_range": [min_point[2], max_point[2]]
-            }
+            # Set step size to 1/10th of the largest dimension (with min of 0.1m)
+            new_step_size = max(0.1, largest_dimension / 10.0)
+            self.step_size = new_step_size
+            self.step_size_field.model.set_value(new_step_size)
+            self._log_message(f"Setting sampling density to {new_step_size:.2f}m (1/10th of largest dimension)")
         
         self._log_message(f"Selected mesh '{mesh_path}' as perception area")
-        # Auto-enable the use mesh toggle
-        self.use_mesh_toggle.model.set_value(True)
 
     def _get_mesh_bounds(self, mesh_prim):
         """Get the bounding box of a mesh prim"""
@@ -1107,19 +1299,108 @@ class GO4RExtension(omni.ext.IExt):
         return None
 
     def _is_point_in_mesh(self, point, mesh_prim):
-        """Determine if a point is inside the mesh (simple bounding box check for now)"""
-        if mesh_prim and mesh_prim.IsValid():
-            bounds = self._get_mesh_bounds(mesh_prim)
-            if bounds:
-                min_point, max_point = bounds
-                # Check if point is within bounding box
-                inside = (
-                    min_point[0] <= point[0] <= max_point[0] and
-                    min_point[1] <= point[1] <= max_point[1] and
-                    min_point[2] <= point[2] <= max_point[2]
-                )
-                return inside
-        return False
+        """
+        Determine if a point is inside the mesh using PhysX scene queries.
+        
+        This leverages Isaac Sim's built-in physics system for more efficient spatial queries.
+        """
+        # First do a quick bounds check for efficiency
+        if not mesh_prim or not mesh_prim.IsValid():
+            return False
+            
+        bounds = self._get_mesh_bounds(mesh_prim)
+        if not bounds:
+            return False
+            
+        min_point, max_point = bounds
+        # Quick reject if point is outside bounding box
+        if (point[0] < min_point[0] or point[0] > max_point[0] or
+            point[1] < min_point[1] or point[1] > max_point[1] or
+            point[2] < min_point[2] or point[2] > max_point[2]):
+            return False
+        
+        # If the mesh is a simple box or plane, just use the bounds check
+        if mesh_prim.GetTypeName() == 'Cube' or mesh_prim.GetTypeName() == 'Plane':
+            return True
+        
+        # For complex meshes, use PhysX overlap test
+        try:
+            # Get the physics scene
+            physics_scene = _physx.get_physics_scene()
+            if not physics_scene:
+                self._log_message("PhysX scene not available, falling back to bounds check")
+                return True
+            
+            # Create a small sphere at the test point (proxy for the point)
+            radius = 0.01  # Small radius
+            # Note: PhysX uses a different coordinate system than USD, so we need to convert
+            physx_point = carb.Float3(point[0], point[1], point[2])
+            
+            # Get the path of the mesh to test against
+            mesh_path = str(mesh_prim.GetPath())
+            
+            # Perform the overlap test
+            overlaps = physics_scene.overlap_sphere(radius, physx_point, mesh_path)
+            
+            # If there are any overlaps, the point is inside or very close to the mesh
+            return len(overlaps) > 0
+            
+        except Exception as e:
+            self._log_message(f"Error in PhysX point-in-mesh test: {str(e)}")
+            
+        # Fall back to bounding box test if any issues occur
+        return True  # If we're inside bounds and PhysX test failed, assume inside
+
+    def _ray_intersects_triangle(self, origin, direction, triangle_vertices):
+        """
+        Check if a ray intersects a triangle.
+        
+        Implementation of Möller–Trumbore ray-triangle intersection algorithm.
+        """
+        # Need at least 3 vertices for a triangle
+        if len(triangle_vertices) < 3:
+            return False
+            
+        # Get the first three vertices to form a triangle
+        v0 = Gf.Vec3d(triangle_vertices[0])
+        v1 = Gf.Vec3d(triangle_vertices[1])
+        v2 = Gf.Vec3d(triangle_vertices[2])
+        
+        # Compute edge vectors
+        e1 = v1 - v0
+        e2 = v2 - v0
+        
+        # Calculate determinant
+        p = Gf.Cross(direction, e2)
+        det = Gf.Dot(e1, p)
+        
+        # If determinant is near zero, ray is parallel to triangle
+        epsilon = 1e-8
+        if abs(det) < epsilon:
+            return False
+        
+        inv_det = 1.0 / det
+        
+        # Calculate barycentric coordinates
+        t = origin - v0
+        u = Gf.Dot(t, p) * inv_det
+        
+        # Check if intersection is outside triangle
+        if u < 0.0 or u > 1.0:
+            return False
+        
+        q = Gf.Cross(t, e1)
+        v = Gf.Dot(direction, q) * inv_det
+        
+        # Check if intersection is outside triangle
+        if v < 0.0 or u + v > 1.0:
+            return False
+        
+        # Calculate distance to intersection
+        distance = Gf.Dot(e2, q) * inv_det
+        
+        # Check if intersection is in positive ray direction
+        return distance >= epsilon
     
     def _calculate_camera_pixel_count(self, camera: Dict, point: Gf.Vec3d, obj_type: str) -> int:
         """Calculate the number of pixels an object at given point would occupy in the camera"""
