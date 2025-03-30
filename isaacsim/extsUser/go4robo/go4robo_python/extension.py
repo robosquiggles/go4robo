@@ -69,19 +69,6 @@ class GO4RExtension(omni.ext.IExt):
 
         # These just help handle the stage selection and structure
         self.previous_selection = []
-        self.processed_lidar_paths = set()
-        
-        # Constants for camera AP calculation
-        self.camera_ap_constants = {
-            "a": 0.055,  # coefficient from the paper
-            "b": 0.155   # coefficient from the paper
-        }
-        
-        # Constants for LiDAR AP calculation
-        self.lidar_ap_constants = {
-            "a": 0.152,  # coefficient from the paper
-            "b": 0.659   # coefficient from the paper
-        }
         
         # Voxel size for object representation (in meters)
         self.voxel_size = 0.1
@@ -101,7 +88,6 @@ class GO4RExtension(omni.ext.IExt):
         # Add a property to track the selected perception area mesh
         self.perception_mesh = None
         self.perception_mesh_path = None
-        self.step_size = 5.0  # meters - sampling step size
         
         self._build_ui()
         self._window.visible = True
@@ -156,17 +142,17 @@ class GO4RExtension(omni.ext.IExt):
                                     # Add sampling step size UI
                                     with ui.HStack(spacing=5):
                                         ui.Label("Sampling Density:", width=120)
-                                        self.step_size_field = ui.FloatField(width=60)
-                                        self.step_size_field.model.set_value(self.step_size)
+                                        self.voxel_size_field = ui.FloatField(width=60)
+                                        self.voxel_size_field.model.set_value(self.voxel_size)
                                         ui.Label("meters between sample points", width=0)
                                         
                                         def _update_step_size(value):
                                             # Extract the actual float value from the model object
                                             float_value = value.get_value_as_float()
-                                            self.step_size = max(0.1, float_value)  # Minimum 0.1m
-                                            self._log_message(f"Sampling step size set to {self.step_size} meters")
+                                            self.voxel_size = max(0.1, float_value)  # Minimum 0.1m
+                                            self._log_message(f"Sampling voxel size set to {self.voxel_size} meters")
                                         
-                                        self.step_size_field.model.add_value_changed_fn(_update_step_size)
+                                        self.voxel_size_field.model.add_value_changed_fn(_update_step_size)
                                     
                                     ui.Label("Note: You must select a mesh to define the perception area")
                         
@@ -508,8 +494,8 @@ class GO4RExtension(omni.ext.IExt):
         self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
         
         # Reset sampling step size
-        self.step_size = 5.0
-        self.step_size_field.model.set_value(self.step_size)
+        self.voxel_size = 5.0
+        self.voxel_size_field.model.set_value(self.voxel_size)
         
         self._log_message("Settings reset to default values")
     
@@ -714,7 +700,7 @@ class GO4RExtension(omni.ext.IExt):
         self._update_sensor_list_ui()
 
 
-    def _display_sensor_instance_properties(self, sensor_instance):
+    def _display_sensor_instance_properties(self, sensor_instance:Sensor3D_Instance):
         for attr, value in sensor_instance.__dict__.items():
             if "sensor" in attr:
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
@@ -725,6 +711,24 @@ class GO4RExtension(omni.ext.IExt):
                     with ui.VStack(spacing=2):
                         ui.Label(f"position: {value[0]}")
                         ui.Label(f"rotation: {value[1]}")
+            elif "ap_constants" in attr:
+                self._log_message(f"Average Precision Constants for {sensor_instance.name}: {value}")
+                with ui.CollapsableFrame("Average Precision Parameters", height=0, collapsed=True):
+                    with ui.VStack(spacing=2):
+                        ui.Label("AP = a ln(m) + b, values depend on the detection algorithm.")
+                        ui.Label("Default values are from \"Perception Entropy [...]\" Ma et al. 2021.")
+                        for const, val in value.items():
+                            with ui.HStack(spacing=5):
+                                ui.Label(f"{const}:", width=120)
+                                ap_field = ui.FloatField(width=80)
+                                ap_field.model.set_value(val)
+                                
+                                # Update the sensor instance's average_precision constant when changed
+                                def on_param_changed(new_value):
+                                    sensor_instance.ap_constants[const] = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                    self._log_message(f"Set {sensor_instance.name} {attr} to {val:.2f}")
+                                    
+                                ap_field.model.add_value_changed_fn(on_param_changed)
             else:
                 ui.Label(f"{attr}: {value}")
 
@@ -756,10 +760,30 @@ class GO4RExtension(omni.ext.IExt):
                                         with ui.CollapsableFrame(f"{sensor_type.__name__}s: {len(sensors)}", height=0, style={"border_color": ui.color("#00c3ff")}, collapsed=False):
                                             with ui.VStack(spacing=5):
                                                 for idx, sensor_instance in enumerate(sensors):
+                                                    # Set default average precision if not set
+                                                    # if not hasattr(sensor_instance, 'average_precision') or sensor_instance.average_precision is None:
+                                                    #     sensor_instance.average_precision = 0.9
+                                                        
                                                     with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
-                                                        with ui.VStack(spacing=2):
-                                                            self._display_sensor_instance_properties(sensor_instance)
-                                
+                                                        # with ui.VStack(spacing=2):
+                                                        #     # Add average precision input directly at the top level
+                                                        #     with ui.HStack(spacing=5):
+                                                        #         ui.Label("Average Precision:", width=120)
+                                                        #         ap_field = ui.FloatField(width=80)
+                                                        #         ap_field.model.set_value(sensor_instance.average_precision)
+                                                                
+                                                        #         # Update the sensor instance's average_precision when changed
+                                                        #         def on_ap_changed(new_value, sensor=sensor_instance):
+                                                        #             ap = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                        #             sensor.average_precision = ap
+                                                        #             self._log_message(f"Set {sensor.name} average precision to {ap:.2f}")
+                                                                
+                                                        #         ap_field.model.add_value_changed_fn(on_ap_changed)
+                                                            
+                                                            # Show other properties in collapsible section
+                                                            with ui.CollapsableFrame("Properties", height=0, collapsed=True):
+                                                                with ui.VStack(spacing=2):
+                                                                    self._display_sensor_instance_properties(sensor_instance)
 
     def _update_object_weight(self, obj_type: str, weight: float):
         """Update the weight of a specific object type"""
@@ -803,16 +827,8 @@ class GO4RExtension(omni.ext.IExt):
             if cameras:
                 camera_entropies = []
                 for camera in cameras:
-                    # Convert sensor instance to dictionary for compatibility with existing calculation methods
-                    cam_dict = {
-                        "name": camera.name,
-                        "transform": camera.tf,
-                        "hfov": camera.sensor.h_fov,
-                        "resolution": (camera.sensor.h_res, camera.sensor.v_res) if camera.sensor.h_res and camera.sensor.v_res else (1920, 1080)
-                    }
-                    
                     # Calculate entropy for this camera
-                    entropy = self._calculate_single_sensor_entropy(cam_dict, sample_points, is_camera=True)
+                    entropy = self._calculate_single_sensor_entropy(camera, sample_points)
                     camera_entropies.append(entropy)
                     robot_results['camera_details'][camera.name] = entropy
                     
@@ -826,18 +842,8 @@ class GO4RExtension(omni.ext.IExt):
             if lidars:
                 lidar_entropies = []
                 for lidar in lidars:
-                    # Convert sensor instance to dictionary for compatibility
-                    lidar_dict = {
-                        "name": lidar.name,
-                        "transform": lidar.tf,
-                        "fov_horizontal": lidar.sensor.h_fov,
-                        "fov_vertical": lidar.sensor.v_fov,
-                        "channels": lidar.sensor.v_res,
-                        "max_range": lidar.sensor.max_range
-                    }
-                    
                     # Calculate entropy for this lidar
-                    entropy = self._calculate_single_sensor_entropy(lidar_dict, sample_points, is_camera=False)
+                    entropy = self._calculate_single_sensor_entropy(lidar, sample_points)
                     lidar_entropies.append(entropy)
                     robot_results['lidar_details'][lidar.name] = entropy
                     
@@ -943,19 +949,16 @@ class GO4RExtension(omni.ext.IExt):
                                         for lidar_name, lidar_entropy in robot_results.get('lidar_details', {}).items():
                                             ui.Label(f"{lidar_name}: {lidar_entropy:.4f}")
 
-    def _calculate_single_sensor_entropy(self, sensor_dict, sample_points, is_camera=True):
+    def _calculate_single_sensor_entropy(self, sensor:Sensor3D, sample_points):
         """Calculate entropy for a single sensor"""
         entropy_sum = 0.0
         total_weight = 0.0
-        
+
         for point, obj_type, weight in sample_points:
             # Calculate measurement (pixel count or point count)
-            if is_camera:
-                measurement = self._calculate_camera_pixel_count(sensor_dict, point, obj_type)
-                ap = self._calculate_camera_ap(measurement)
-            else:
-                measurement = self._calculate_lidar_point_count(sensor_dict, point, obj_type)
-                ap = self._calculate_lidar_ap(measurement)
+            measurement = self._calculate_camera_pixel_count(sensor, point, obj_type)
+            ap = sensor.calculate_ap(measurement)
+
             
             # Convert AP to standard deviation
             sigma = self._ap_to_sigma(ap)
@@ -1068,7 +1071,7 @@ class GO4RExtension(omni.ext.IExt):
         # Estimate total volume and target number of samples
         volume = dx * dy * dz
         # Adjust the density factor based on how fine-grained you want the sampling to be
-        density_factor = 1.0 / (self.step_size ** 3)
+        density_factor = 1.0 / (self.voxel_size ** 3)
         target_samples = int(volume * density_factor)
         
         self._log_message(f"Generating approximately {target_samples} sample points for mesh")
@@ -1099,7 +1102,7 @@ class GO4RExtension(omni.ext.IExt):
         min_point, max_point = bounds
         
         # Generate sample points within mesh bounds
-        step = self.step_size  # Use the configurable step size
+        step = self.voxel_size  # Use the configurable step size
         
         # Place samples for each object type
         for obj_type, obj_data in self.target_objects.items():
@@ -1125,7 +1128,7 @@ class GO4RExtension(omni.ext.IExt):
         # Stop recursion if we've reached max depth or the region is too small
         if depth >= max_depth:
             # At max depth, apply regular grid sampling in this small region
-            step = self.step_size
+            step = self.voxel_size
             
             # Create a smaller step size for regions we're focusing on
             adjusted_step = max(step, (max_corner[0] - min_corner[0]) / 3.0)
@@ -1171,7 +1174,7 @@ class GO4RExtension(omni.ext.IExt):
         # If all corners and center are inside, we can be more efficient with sampling
         if center_inside and all(corners_inside):
             # This region is fully inside the mesh, sample it with a coarser grid
-            adjusted_step = self.step_size * 2  # Coarser sampling for interior regions
+            adjusted_step = self.voxel_size * 2  # Coarser sampling for interior regions
             for obj_type, obj_data in self.target_objects.items():
                 weight = obj_data["weight"]
                 
@@ -1275,8 +1278,8 @@ class GO4RExtension(omni.ext.IExt):
             
             # Set step size to 1/10th of the largest dimension (with min of 0.1m)
             new_step_size = max(0.1, largest_dimension / 10.0)
-            self.step_size = new_step_size
-            self.step_size_field.model.set_value(new_step_size)
+            self.voxel_size = new_step_size
+            self.voxel_size_field.model.set_value(new_step_size)
             self._log_message(f"Setting sampling density to {new_step_size:.2f}m (1/10th of largest dimension)")
         
         self._log_message(f"Selected mesh '{mesh_path}' as perception area")
@@ -1525,50 +1528,6 @@ class GO4RExtension(omni.ext.IExt):
         point_count = max(1, int(horizontal_points * vertical_points * attenuation_factor))
         
         return point_count
-    
-    def _calculate_camera_ap(self, pixel_count: int) -> float:
-        """Calculate Average Precision (AP) based on pixel count using the paper's formula"""
-        if pixel_count <= 0:
-            return 0.001  # Minimal AP for numerical stability
-        
-        # Using the formula from the paper: AP ≈ a * ln(m) + b
-        a = self.camera_ap_constants["a"]
-        b = self.camera_ap_constants["b"]
-        
-        ap = a * math.log(pixel_count) + b
-        
-        # Clamp AP to valid range
-        ap = max(0.001, min(0.999, ap))
-        
-        return ap
-    
-    def _calculate_lidar_ap(self, point_count: int) -> float:
-        """Calculate Average Precision (AP) based on point count using the paper's formula"""
-        if point_count <= 0:
-            return 0.001  # Minimal AP for numerical stability
-        
-        # Using the formula from the paper: AP ≈ a * ln(m) + b
-        a = self.lidar_ap_constants["a"]
-        b = self.lidar_ap_constants["b"]
-        
-        ap = a * math.log(point_count) + b
-        
-        # Clamp AP to valid range
-        ap = max(0.001, min(0.999, ap))
-        
-        return ap
-    
-    def _ap_to_sigma(self, ap: float) -> float:
-        """Convert Average Precision (AP) to standard deviation using the paper's formula"""
-        # Using the formula from the paper: σ = 1/AP - 1
-        sigma = (1 / ap) - 1
-        return sigma
-    
-    def _gaussian_entropy(self, sigma: float) -> float:
-        """Calculate the entropy of a 2D Gaussian distribution with given standard deviation"""
-        # Using the formula from the paper: H(S|m, q) = 2*ln(σ) + 1 + ln(2π)
-        entropy = 2 * math.log(sigma) + 1 + math.log(2 * math.pi)
-        return entropy
     
     def _apply_early_fusion(self, entropies: List[float]) -> float:
         """Apply early fusion strategy to combine entropies (average them)"""

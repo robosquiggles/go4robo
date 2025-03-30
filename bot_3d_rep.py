@@ -8,6 +8,7 @@ import PIL.ImageColor
 import copy
 import random
 import numpy as np
+import math
 
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
@@ -89,7 +90,6 @@ class TF:
 class Sensor3D:
     def __init__(self, 
                  name:str,
-                 type:str,
                  h_fov:float=None, 
                  h_res:int=None,
                  v_fov:float=None,
@@ -99,12 +99,15 @@ class Sensor3D:
                  cost:float=None,
                  body:UsdGeom.Mesh=None, 
                  focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ap_constants:dict = {
+                        "a": 0.055,  # coefficient from the paper for camera
+                        "b": 0.155   # coefficient from the paper for camera
+                    }
                  ):
         """
         Initialize a new instance of the class.
         Args:
             name (str): The name of the sensor.
-            type (str): The type of the sensor.
             h_fov (float): The horizontal field of view *in radians*.
             h_res (int): The horizontal resolution of the sensor.
             v_fov (float): The vertical field of view *in radians*.
@@ -132,12 +135,40 @@ class Sensor3D:
         else:
             self.focal_point = focal_point
 
+        self.ap_constants = ap_constants
+
     def get_properties_dict(self):
         properties = {}
         for key, value in self.__dict__.items():
             if not key.startswith("__") and not callable(value):
                 properties[key] = value
         return properties
+    
+    def calculate_ap(self, pixel_count: int) -> float:
+        """Calculate Average Precision (AP) based on pixel count using the paper's formula"""
+        if pixel_count <= 0:
+            return 0.001  # Minimal AP for numerical stability
+        
+        # Using the formula from the paper: AP ≈ a * ln(m) + b
+        
+        ap = self.ap_constants['a'] * math.log(pixel_count) + self.ap_constants['b']
+        
+        # Clamp AP to valid range
+        ap = max(0.001, min(0.999, ap))
+        
+        return ap
+    
+    def calculate_ap_sigma(self, pixel_count: int) -> float:
+        ap = self.calculate_ap(pixel_count)
+        sigma = (1 / ap) - 1
+        return sigma
+    
+    def calculate_gaussian_entropy(self, sigma: float) -> float:
+        """Calculate the entropy of a 2D Gaussian distribution with given standard deviation"""
+        # Using the formula from the paper: H(S|m, q) = 2*ln(σ) + 1 + ln(2π)
+        sigma = self.calculate_ap_sigma(sigma)
+        entropy = 2 * math.log(sigma) + 1 + math.log(2 * math.pi)
+        return entropy
 
 
 class MonoCamera3D(Sensor3D):
@@ -152,8 +183,27 @@ class MonoCamera3D(Sensor3D):
                  body:UsdGeom.Mesh=None,
                  cost:float=None,
                  focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ap_constants:dict = {
+                        "a": 0.055,  # coefficient from the paper for camera
+                        "b": 0.155   # coefficient from the paper for camera
+                    }
                  ):
+        """
+        Initialize a new instance of the class.
+        Args:
+            name (str): The name of the sensor.
+            focal_length (float): The focal length of the camera.
+            h_aperture (float): The horizontal aperture of the camera.
+            v_aperture (float): The vertical aperture of the camera.
+            aspect_ratio (float): The aspect ratio of the camera.
+            h_res (int): The horizontal resolution of the camera.
+            v_res (int): The vertical resolution of the camera.
+            body (USDGeom.Mesh): The body of the sensor.
+            cost (float): The cost of the sensor.
+            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
+        """
 
+        self.name = name
         self.h_aperture = h_aperture
         self.v_aperture = v_aperture
         self.aspect_ratio = aspect_ratio
@@ -161,7 +211,13 @@ class MonoCamera3D(Sensor3D):
         self.v_res = v_res
         self.body = body
         self.cost = cost
-        self.focal_point = focal_point
+        if isinstance(focal_point, (list, tuple)):
+            self.focal_point = np.array([[1, 0, 0, focal_point[0]],
+                                         [0, 1, 0, focal_point[1]],
+                                         [0, 0, 1, focal_point[2]],
+                                         [0,0,0,1]])
+        else:
+            self.focal_point = focal_point
 
         self.h_fov = 2 * np.arctan(h_aperture / (2 * focal_length))
         self.v_fov = 2 * np.arctan(v_aperture / (2 * focal_length))
@@ -169,7 +225,7 @@ class MonoCamera3D(Sensor3D):
         self.max_range = 100.0 # TODO: This should be clipping distance?
         self.min_range = 0.0 # TODO: This should be clipping distance?
 
-        super().__init__(name, "MonoCamera", self.h_fov, self.h_res, self.v_fov, v_res, self.max_range, self.min_range, self.cost, self.body, self.focal_point)
+        self.ap_constants = ap_constants
         
 
 class StereoCamera3D(Sensor3D):
@@ -182,7 +238,19 @@ class StereoCamera3D(Sensor3D):
                  cost:float=None,
                  body:UsdGeom.Mesh=None,
                  ):
+        """
+        Initialize a new instance of the class.
+        Args:
+            name (str): The name of the sensor.
+            sensor1 (MonoCamera3D): The first camera sensor.
+            sensor2 (MonoCamera3D): The second camera sensor.
+            tf_sensor1 (tuple[Gf.Vec3d, Gf.Matrix3d]): The transformation matrix for the first camera.
+            tf_sensor2 (tuple[Gf.Vec3d, Gf.Matrix3d]): The transformation matrix for the second camera.
+            cost (float): The cost of the sensor.
+            body (USDGeom.Mesh): The body of the sensor.
+        """
 
+        self.name = name
         self.sensor1 = sensor1
         self.sensor2 = sensor2
         self.tf_1 = tf_sensor1
@@ -195,10 +263,8 @@ class StereoCamera3D(Sensor3D):
         self.h_res = sensor1.h_res
         self.v_res = sensor1.v_res
         self.max_range = sensor1.max_range
-        self.min_range = sensor1.min_range
+        self.min_range = sensor1.min_range        
 
-        super().__init__(name, "StereoCamera", h_fov=self.h_fov, h_res=self.h_res, v_fov=self.v_fov, v_res=self.v_res, max_range=self.max_range, min_range=self.min_range, cost=self.cost, body=self.body, focal_point=(0.0, 0.0, 0.0))
-        
 
 class Lidar3D(Sensor3D):
     def __init__(self, 
@@ -212,6 +278,10 @@ class Lidar3D(Sensor3D):
                  cost:float,
                  body:UsdGeom.Mesh, 
                  focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ap_constants = {
+                        "a": 0.152,  # coefficient from the paper for lidar
+                        "b": 0.659   # coefficient from the paper for lidar
+                    }
                  ):
         """
         Initialize a new instance of the class.
@@ -226,7 +296,7 @@ class Lidar3D(Sensor3D):
             body (USDGeom.Mesh): The body of the sensor.
             focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
         """
-        super().__init__(name, "Lidar", h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point)
+        super().__init__(name, h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point, ap_constants=ap_constants)
 
 
 class Sensor3D_Instance:
