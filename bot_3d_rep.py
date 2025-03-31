@@ -5,7 +5,7 @@ from typing import Type
 import PIL
 import PIL.ImageColor
 
-import copy
+import os
 import random
 import numpy as np
 import math
@@ -18,6 +18,9 @@ import plotly.graph_objects as go
 
 from scipy.optimize import minimize as scipy_minimize
 from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
+
+
+import omni.isaac.core.utils.prims as prim_utils
 
 try:
     from pxr import UsdGeom, Gf, Sdf, Usd
@@ -102,7 +105,8 @@ class Sensor3D:
                  ap_constants:dict = {
                         "a": 0.055,  # coefficient from the paper for camera
                         "b": 0.155   # coefficient from the paper for camera
-                    }
+                    },
+                 ray_caster=None
                  ):
         """
         Initialize a new instance of the class.
@@ -136,6 +140,7 @@ class Sensor3D:
             self.focal_point = focal_point
 
         self.ap_constants = ap_constants
+        self.ray_caster = ray_caster
 
     def get_properties_dict(self):
         properties = {}
@@ -169,6 +174,7 @@ class Sensor3D:
         sigma = self.calculate_ap_sigma(sigma)
         entropy = 2 * math.log(sigma) + 1 + math.log(2 * math.pi)
         return entropy
+
 
 
 class MonoCamera3D(Sensor3D):
@@ -310,7 +316,75 @@ class Sensor3D_Instance:
         self.sensor = sensor
         self.path = path
         self.tf = tf
+        self.ray_casters = []
 
+    def create_ray_casters(self, stage):
+        """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
+        import omni.kit.commands
+
+        if self.ray_casters == []: # No ray casters are loaded
+            if isinstance(self.sensor, StereoCamera3D):
+                sensors = [self.sensor.sensor1, self.sensor.sensor2]
+            else:
+                sensors = [self.sensor]
+            for sensor in sensors:
+                parent_path = self.get_ancestor_path(1)
+                ray_caster_path = parent_path + f'/GO4R_RAYCASTER_{sensor.name}'
+                # First check the stage for the ray caster
+                if stage.GetPrimAtPath(ray_caster_path).IsValid():
+                    print(f"Ray caster {ray_caster_path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
+                    self.ray_casters.append(prim_utils.get_prim_at_path(ray_caster_path))
+                    continue
+
+                # If the ray caster does not exist, create it
+                else:
+                    result, prim = omni.kit.commands.execute('RangeSensorCreateLidar',
+                        path=f'/GO4R_RAYCASTER_{sensor.name}',
+                        parent=parent_path,
+                        min_range=sensor.min_range,
+                        max_range=sensor.max_range,
+                        draw_points=False,
+                        draw_lines=True,
+                        horizontal_fov=sensor.h_fov,
+                        vertical_fov=sensor.v_fov,
+                        horizontal_resolution=sensor.h_res,
+                        vertical_resolution=sensor.v_res,
+                        rotation_rate=0.0, # Generate all points at once!
+                        high_lod=False,
+                        yaw_offset=0.0,
+                        enable_semantics=False)
+                if result:
+                    self.ray_casters.append(prim)
+                else:
+                    print(f"Failed to create ray caster for {sensor.name} at {self.path}. Skipping!")
+        else:
+            print(f"Ray casters already exist for {self.name}. Skipping creation.")
+        # Set the transform of the ray casters to match the sensor
+        for i, ray_caster in enumerate(self.ray_casters):
+            if isinstance(self.sensor, StereoCamera3D):
+                sensor = self.sensor.__getattribute__('sensor' + str(i+1))
+            else:
+                sensor = self.sensor
+
+            rc_xform = UsdGeom.Xformable(ray_caster)
+            rc_world_transform = rc_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+
+            sensor_xform = UsdGeom.Xformable(sensor.body)
+            sensor_world_transform = sensor_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            # Set the transform of the ray caster to match the sensor
+            # omni.kit.commands.execute('TransformPrim',
+            #     path=ray_caster.GetPath(),
+            #     new_translations=self.tf[0],
+            #     new_rotation=self.tf[1])
+            omni.kit.commands.execute('TransformPrimCommand',
+                path=ray_caster.GetPath(),
+                old_transform_matrix=rc_world_transform,
+                new_transform_matrix=sensor_world_transform,
+                time_code=Usd.TimeCode(),
+                had_transform_at_key=False)
+
+        return self.ray_casters
+    
     def get_position(self):
         return self.tf[0]
     
@@ -350,6 +424,13 @@ class Sensor3D_Instance:
     def contained_in(self, mesh:o3d.geometry.TriangleMesh):
         """Returns whether or not the sensor body is within the given mesh volume."""
         raise NotImplementedError("This method is not yet implemented.")
+    
+    def get_ancestor_path(self, level:int=1):
+        """Returns the path to the ancestor of the sensor instance at the given level. 1 is the direct parent, 2 is the grandparent, etc."""
+        path = self.path
+        for i in range(level):
+            path = str(path).rsplit('/', 1)[0]
+        return path
     
 
 class Bot3D:

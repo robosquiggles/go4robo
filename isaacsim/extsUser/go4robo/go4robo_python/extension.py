@@ -8,10 +8,12 @@ from omni.isaac.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics
 import omni.isaac.core.utils.prims as prim_utils
+import isaacsim.core.utils.collisions as collisions_utils
+from isaacsim.sensors.physx import _range_sensor
 
-import omni.isaac.sensor as sensor
+import asyncio # Used to run sample asynchronously to not block rendering thread
 
 import numpy as np
 import math
@@ -39,6 +41,10 @@ class GO4RExtension(omni.ext.IExt):
         self.ext_id = ext_id
         self._usd_context = omni.usd.get_context()
 
+        self.stage = omni.usd.get_context().get_stage()                      # Used to access Geometry
+        self.timeline = omni.timeline.get_timeline_interface()               # Used to interact with simulation
+        self.lidarInterface = _range_sensor.acquire_lidar_sensor_interface() # Used to interact with the LIDAR
+
         self._window = ScrollingWindow(title=EXTENSION_TITLE, width=600, height=700)
         # self._window.set_visibility_changed_fn(self._on_window)
 
@@ -60,12 +66,11 @@ class GO4RExtension(omni.ext.IExt):
         self.selected_export_path=None
 
         # Events
-        self._usd_context = omni.usd.get_context()
         events = self._usd_context.get_stage_event_stream()
         self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
 
         # A place to store the robots
-        self.selected_robots = []
+        self.robots = []
 
         # These just help handle the stage selection and structure
         self.previous_selection = []
@@ -535,7 +540,7 @@ class GO4RExtension(omni.ext.IExt):
                     # Log that we couldn't find resolution directly
                     self._log_message(f"Warning: Could not find resolution for camera {prim.GetName()}")
                     # Default to HD resolution as fallback
-                    # resolution = (1280, 720)
+                    resolution = (1280, 720)
 
                 try:
                     cam3d = MonoCamera3D(name=name,
@@ -550,9 +555,11 @@ class GO4RExtension(omni.ext.IExt):
                                         focal_point=(0, 0, 0)
                                         )
                     cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=name, tf=self._get_robot_to_sensor_transform(prim, robot_prim))
+                    cam3d_instance.create_ray_casters(get_current_stage())
                     self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
+                    raise e
                     
                 return cam3d_instance
             
@@ -569,7 +576,10 @@ class GO4RExtension(omni.ext.IExt):
             
             if "lidar" in type_name or "range" in type_name:
                 name = prim.GetName()
-                if name.lower() != "lidar":
+                if "go4r_raycaster" in name.lower():
+                    # Skip if this is a raycaster created by the extension
+                    return None
+                if name.lower() == "lidar":
                     # Get the name from the parent
                     name = prim.GetParent().GetName()
                 # Direct LiDAR prim - extract properties
@@ -585,6 +595,7 @@ class GO4RExtension(omni.ext.IExt):
                                     cost=1.0,
                                     )
                     lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_robot_to_sensor_transform(prim, robot_prim))
+                    lidar_instance.create_ray_casters(get_current_stage())
                     self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
@@ -605,7 +616,7 @@ class GO4RExtension(omni.ext.IExt):
                 # Don't return, continue searching in case there are other sensors
 
             # Check for camera
-            camera = _find_camera(prim, )
+            camera = _find_camera(prim)
             if camera is not None:
                 self._log_message(f"Found camera at path: {prim.GetPath()}")
                 
@@ -729,6 +740,11 @@ class GO4RExtension(omni.ext.IExt):
                                     self._log_message(f"Set {sensor_instance.name} {attr} to {val:.2f}")
                                     
                                 ap_field.model.add_value_changed_fn(on_param_changed)
+            elif "ray_casters" in attr:
+                with ui.CollapsableFrame(attr, height=0, collapsed=True):
+                    with ui.VStack(spacing=2):
+                        for i, rc in enumerate(value):
+                            ui.Label(f"rc{i+1} at {prim_utils.get_prim_path(rc)}")
             else:
                 ui.Label(f"{attr}: {value}")
 
@@ -794,15 +810,21 @@ class GO4RExtension(omni.ext.IExt):
         """Main function to analyze all sensors on the robot"""
         self._log_message("Starting perception entropy analysis...")
         
-        # Check if we have a valid mesh for perception area
-        if not self.perception_mesh or not self.perception_mesh.IsValid():
-            self._log_message("Error: No valid perception mesh selected. Please select a mesh first.")
-            return
-        
         # Check if we have robots to analyze
         if not self.robots:
             self._log_message("Error: No robots selected for analysis.")
             return
+        
+        # Check if we have a perception mesh
+        if not self.perception_mesh:
+            self._log_message("Error: No perception mesh selected.")
+            return
+        else:
+            UsdPhysics.CollisionAPI.Apply(self.perception_mesh)
+        
+        # Start the simulation and log the lidar readings
+        self.timeline.play()
+        asyncio.ensure_future(self._get_num_points_raycast(self.robots[0].get_sensors_by_type(Lidar3D)[0], self.perception_mesh.GetPrimPath()))                        # Only ask for data after sweep is complete
         
         # Generate sample points once for efficiency
         sample_points = self._generate_sample_points()
@@ -823,7 +845,9 @@ class GO4RExtension(omni.ext.IExt):
             robot_results = {'cameras': 0.0, 'lidars': 0.0, 'total': 0.0, 'camera_details': {}, 'lidar_details': {}}
             
             # Calculate entropy for cameras
-            cameras = robot.get_sensors_by_type(MonoCamera3D) + robot.get_sensors_by_type(StereoCamera3D)
+            cameras = robot.get_sensors_by_type(MonoCamera3D)
+            for pair in robot.get_sensors_by_type(StereoCamera3D):
+                cameras.append([pair.sensor1, pair.sensor2])
             if cameras:
                 camera_entropies = []
                 for camera in cameras:
@@ -956,7 +980,7 @@ class GO4RExtension(omni.ext.IExt):
 
         for point, obj_type, weight in sample_points:
             # Calculate measurement (pixel count or point count)
-            measurement = self._calculate_camera_pixel_count(sensor, point, obj_type)
+            measurement = self._calculate_pixel_count(sensor, point, obj_type)
             ap = sensor.calculate_ap(measurement)
 
             
@@ -1021,7 +1045,7 @@ class GO4RExtension(omni.ext.IExt):
         return relative_position, relative_rotation
     
     def _generate_sample_points(self) -> List[Tuple[Gf.Vec3d, str, float]]:
-        """Generate sample points in the perception space with associated object types and weights"""
+        """Generate sample points in the perception space"""
         sample_points = []
         
         # Check if we have a valid mesh
@@ -1029,11 +1053,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message("Error: No valid perception mesh selected. Please select a mesh first.")
             return []
         
-        # If the mesh is a simple cube, use voxel sampling
-        if self.perception_mesh.GetTypeName() == 'Cube':
-            return self._generate_box_sample_points()
-        
-        # For more complex meshes, use mesh-aware sampling
+        # For more stuff that is not a mesh, use bounding box sampling
         if not self.perception_mesh.IsA(UsdGeom.Mesh):
             self._log_message("Warning: Selected prim is not a mesh. Using bounding box sampling instead.")
             return self._generate_box_sample_points()
@@ -1405,130 +1425,12 @@ class GO4RExtension(omni.ext.IExt):
         # Check if intersection is in positive ray direction
         return distance >= epsilon
     
-    def _calculate_camera_pixel_count(self, camera: Dict, point: Gf.Vec3d, obj_type: str) -> int:
-        """Calculate the number of pixels an object at given point would occupy in the camera"""
-        # Extract camera properties
-        cam_pos, cam_rot_matrix = camera["transform"]
-        hfov = camera["hfov"]
-        resolution = camera["resolution"]
+    def _calculate_pixel_count(self, sensor_instance: Sensor3D_Instance, object_path) -> int:
+        """Calculate the number of rays cast by the sensor instance that hit the object at the given point"""
+        value = collisions_utils.ray_cast(position=sensor_instance.get_position(), orientation=sensor_instance.get_rotation, offset=sensor_instance.sensor.max_range)
         
-        # Get object dimensions
-        obj_dimensions = self.target_objects[obj_type]["dimensions"]
-        
-        # Calculate vector from camera to point in world space
-        direction_vector = point - cam_pos
-        distance = direction_vector.GetLength()
-        
-        # Skip if too far
-        if distance <= 0 or distance > 150:  # Maximum reasonable distance
-            return 0
-        
-        # Transform the direction vector to camera space using the rotation matrix
-        # Camera looks along +Z axis, with +Y up and +X to the right
-        # We need to invert the rotation matrix to convert from world to camera space
-        cam_rot_inverse = cam_rot_matrix.GetInverse()
-        direction_camera_space = cam_rot_inverse * direction_vector
-        
-        # Check if the point is in front of the camera (positive Z in camera space)
-        if direction_camera_space[2] <= 0:
-            return 0  # Behind the camera
-        
-        # Calculate the horizontal and vertical angles in camera space
-        horizontal_angle = math.atan2(direction_camera_space[0], direction_camera_space[2])
-        vertical_angle = math.atan2(direction_camera_space[1], direction_camera_space[2])
-        
-        # Check if within camera FOV
-        # Assuming the vertical FOV is derived from horizontal FOV and aspect ratio
-        aspect_ratio = resolution[0] / resolution[1]
-        vfov = hfov / aspect_ratio
-        
-        if abs(horizontal_angle) > hfov/2 or abs(vertical_angle) > vfov/2:
-            return 0  # Outside field of view
-        
-        # Calculate object dimensions in camera view
-        obj_width = obj_dimensions[1]   # Width of object
-        obj_height = obj_dimensions[2]  # Height of object
-        
-        # Calculate angular width and height in radians
-        angular_width = math.atan2(obj_width, distance)
-        angular_height = math.atan2(obj_height, distance)
-        
-        # Calculate pixel width and height based on angular size
-        pixel_width = (angular_width / hfov) * resolution[0]
-        pixel_height = (angular_height / vfov) * resolution[1]
-        
-        # Calculate pixel count
-        pixel_count = max(0, int(pixel_width * pixel_height))
-        
-        return pixel_count
-    
-    def _calculate_lidar_point_count(self, lidar: Dict, point: Gf.Vec3d, obj_type: str) -> int:
-        """Calculate the number of LiDAR points that would hit an object at the given point"""
-        # Extract LiDAR properties
-        lidar_pos, lidar_rot_matrix = lidar["transform"]
-        channels = lidar["channels"]
-        fov_vertical = lidar["fov_vertical"]
-        fov_horizontal = lidar["fov_horizontal"]
-        max_range = lidar["max_range"]
-        
-        # Get object dimensions
-        obj_dimensions = self.target_objects[obj_type]["dimensions"]
-        
-        # Calculate vector from LiDAR to point in world space
-        direction_vector = point - lidar_pos
-        distance = direction_vector.GetLength()
-        
-        # Skip if the point is too far
-        if distance > max_range or distance <= 0:
-            return 0
-        
-        # Transform the direction vector to LiDAR space using the rotation matrix
-        # Assuming LiDAR looks along +X axis, with +Z up and +Y to the right
-        # We need to invert the rotation matrix to convert from world to LiDAR space
-        lidar_rot_inverse = lidar_rot_matrix.GetInverse()
-        direction_lidar_space = lidar_rot_inverse * direction_vector
-        
-        # Normalize the vector in LiDAR space
-        dir_norm = direction_lidar_space.GetNormalized()
-        
-        # Calculate angles in LiDAR space
-        # Horizontal angle (in xy plane) - azimuth
-        horizontal_angle = math.atan2(dir_norm[1], dir_norm[0])
-        
-        # Vertical angle (elevation from xy plane)
-        vertical_angle = math.asin(dir_norm[2])
-        
-        # Check if point is within LiDAR's FOV
-        if abs(horizontal_angle) > fov_horizontal/2 or abs(vertical_angle) > fov_vertical/2:
-            return 0  # Outside field of view
-        
-        # Estimate point density based on angular resolution and channels
-        # Horizontal resolution depends on scan rate and rotation speed
-        # Simplification: assuming uniform angular resolution
-        horizontal_resolution = 0.2 * math.degrees(fov_horizontal) # points per degree horizontally
-        vertical_resolution = channels / math.degrees(fov_vertical) # points per degree vertically
-        
-        # Calculate angular dimensions of the object from the LiDAR's perspective
-        obj_width = obj_dimensions[1]   # Width of object
-        obj_height = obj_dimensions[2]  # Height of object
-        
-        # Calculate angular width and height in degrees
-        angular_width_deg = math.degrees(math.atan2(obj_width, distance))
-        angular_height_deg = math.degrees(math.atan2(obj_height, distance))
-        
-        # Calculate estimated point count based on angular size and resolution
-        horizontal_points = angular_width_deg * horizontal_resolution
-        vertical_points = angular_height_deg * vertical_resolution
-        
-        # Calculate total points, with distance attenuation factor
-        # Points decrease with square of distance due to beam divergence
-        attenuation_factor = 50.0 / (distance * distance) # Adjust the constant as needed
-        attenuation_factor = min(1.0, max(0.1, attenuation_factor)) # Clamp to reasonable range
-        
-        point_count = max(1, int(horizontal_points * vertical_points * attenuation_factor))
-        
-        return point_count
-    
+        raise NotImplementedError("Not implemented yet")
+
     def _apply_early_fusion(self, entropies: List[float]) -> float:
         """Apply early fusion strategy to combine entropies (average them)"""
         if not entropies:
@@ -1592,3 +1494,88 @@ class GO4RExtension(omni.ext.IExt):
             self._window = None
         self._cleanup_ui()
         gc.collect()
+
+    def target_prim_collision(self, prim_path):
+        """Set the target prim collisions on for ray cast / lidar sensing, set all the other prims to be non-collidable"""
+        stage = get_current_stage()
+        prim = stage.GetPrimAtPath(prim_path)
+        
+        if not prim:
+            return
+        if not prim.IsValid():
+            return
+        if not prim.IsA(UsdGeom.Mesh):
+            return
+        
+        # Search through all the prims in the stage and set them to be non-collidable
+        for p in stage.Traverse():
+            if p.IsA(UsdGeom.Mesh):
+                collision_api = UsdPhysics.CollisionAPI(p)
+                if collision_api:
+                        # Get the collision enabled attribute
+                        collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                else:
+                    self._log_message(f"Prim {p.GetPath()} does not have a CollisionAPI, skipping")
+                    continue
+
+                if p != prim:
+                    # Set the other prims to be non-collidable
+                        
+                    # Disable collisions
+                    collision_enabled_attr.Set(False)
+                else:
+                    # Set the target prim to be collidable
+                    collision_enabled_attr.Set(True)
+        
+        self._log_message(f"Set {prim.GetPath()} as target for ray cast / lidar sensing")
+
+    def untarget_prim_collision(self, prim_path):
+        """Set the target prim collisions off for ray cast / lidar sensing. Don't change the rest."""
+        prim = get_current_stage().GetPrimAtPath(prim_path)
+
+        if not prim:
+            return
+        if not prim.IsValid():
+            return
+        if not prim.IsA(UsdGeom.Mesh):
+            return
+        
+        # Set the target prim to be non-collidable
+        collision_api = UsdPhysics.CollisionAPI(prim)
+
+        # Check if it has the API
+        if collision_api:
+            # Get the collision enabled attribute
+            collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+            
+            # Disable collisions
+            collision_enabled_attr.Set(False)
+            self._log_message(f"Unset {prim.GetPath()} as target for ray cast / lidar sensing")
+        else:
+            self._log_message(f"Prim {prim.GetPath()} does not have a CollisionAPI, skipping")
+
+    
+    async def _get_num_points_raycast(self, ray_caster_instance:Sensor3D, prim_path:Sdf.Path):
+        """Get the number of points from a raycast that land on the given prim"""
+
+        self.target_prim_collision(prim_path)
+        
+        try:
+            await omni.kit.app.get_app().next_update_async()                 # wait one frame for data
+            self.timeline.pause()                                            # Pause the simulation to populate the LIDAR's depth buffers
+            pathstr = str(ray_caster_instance.path)
+
+            #Get the linear depth data from the lidar. If the linear depth of a point != the maximum range, it means that the point hit something
+            lin_depth = self.lidarInterface.get_linear_depth_data(pathstr)
+            num_points = np.count_nonzero(lin_depth != ray_caster_instance.sensor.max_range)
+            
+            print(f"Num points hitting {prim_path}: {num_points}")
+
+            return num_points
+            
+        except Exception as e:
+            print(f"Error in raycast: {e}")
+            self._log_message(f"Error in raycast: {e}")
+            return None
+
+        
