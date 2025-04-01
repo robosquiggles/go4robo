@@ -19,7 +19,6 @@ import plotly.graph_objects as go
 from scipy.optimize import minimize as scipy_minimize
 from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
 
-
 import omni.isaac.core.utils.prims as prim_utils
 
 try:
@@ -225,8 +224,8 @@ class MonoCamera3D(Sensor3D):
         else:
             self.focal_point = focal_point
 
-        self.h_fov = 2 * np.arctan(h_aperture / (2 * focal_length))
-        self.v_fov = 2 * np.arctan(v_aperture / (2 * focal_length))
+        self.h_fov = np.rad2deg(2 * np.arctan(h_aperture / (2 * focal_length)))
+        self.v_fov = np.rad2deg(2 * np.arctan(v_aperture / (2 * focal_length)))
 
         self.max_range = 100.0 # TODO: This should be clipping distance?
         self.min_range = 0.0 # TODO: This should be clipping distance?

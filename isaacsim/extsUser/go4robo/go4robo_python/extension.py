@@ -8,7 +8,7 @@ from omni.isaac.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt
 import omni.isaac.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
 from isaacsim.sensors.physx import _range_sensor
@@ -17,7 +17,7 @@ import asyncio # Used to run sample asynchronously to not block rendering thread
 
 import numpy as np
 import math
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 import carb
 import time
 
@@ -131,35 +131,30 @@ class GO4RExtension(omni.ext.IExt):
                     
                     with ui.CollapsableFrame("Perception Entropy", height=0):
                         with ui.VStack(spacing=5, height=0):
-                            with ui.CollapsableFrame("Target Perception Area", height=0):
-                                with ui.VStack(spacing=5, height=0):
-                                    ui.Label("Perception Area Selection")
-                                    
-                                    # Add mesh selection UI
-                                    with ui.HStack(spacing=5):
-                                        ui.Label("Perception Mesh:", width=120)
-                                        self.perception_mesh_label = ui.Label("(Not selected)", width=0)
-                                        self.select_mesh_btn = ui.Button("Select...", width=80, clicked_fn=self._select_perception_mesh)
-                                    
-                                    # Show bounds of selected mesh if available
-                                    self.mesh_bounds_label = ui.Label("Mesh Bounds: Not selected")
-                                    
-                                    # Add sampling step size UI
-                                    with ui.HStack(spacing=5):
-                                        ui.Label("Sampling Density:", width=120)
-                                        self.voxel_size_field = ui.FloatField(width=60)
-                                        self.voxel_size_field.model.set_value(self.voxel_size)
-                                        ui.Label("meters between sample points", width=0)
-                                        
-                                        def _update_step_size(value):
-                                            # Extract the actual float value from the model object
-                                            float_value = value.get_value_as_float()
-                                            self.voxel_size = max(0.1, float_value)  # Minimum 0.1m
-                                            self._log_message(f"Sampling voxel size set to {self.voxel_size} meters")
-                                        
-                                        self.voxel_size_field.model.add_value_changed_fn(_update_step_size)
-                                    
-                                    ui.Label("Note: You must select a mesh to define the perception area")
+
+                            # Add sampling step size UI
+                            with ui.HStack(spacing=5):
+                                ui.Label("Sampling Density:", width=120)
+                                self.voxel_size_field = ui.FloatField(width=60)
+                                self.voxel_size_field.model.set_value(self.voxel_size)
+                                ui.Label("meters between sample points", width=0)
+                                
+                                def _update_step_size(value:float):
+                                    # Extract the actual float value from the model object
+                                    float_value = value.get_value_as_float()
+                                    self.voxel_size = float_value
+                                    self._log_message(f"Sampling voxel size set to {self.voxel_size} meters")
+                                
+                                self.voxel_size_field.model.add_value_changed_fn(_update_step_size)
+                                
+                            # Add mesh selection UI
+                            with ui.HStack(spacing=5):
+                                ui.Label("Perception Mesh:", width=120)
+                                self.perception_mesh_label = ui.Label("(Not selected)", style={"color": ui.color("#FF0000")})
+                                self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._voxelize_perception_mesh)
+                            
+                            # Show bounds of selected mesh if available
+                            self.mesh_bounds_label = ui.Label("Mesh Bounds: Not selected")
                         
                             with ui.CollapsableFrame("Object Types", height=0):
                                 with ui.VStack(spacing=5, height=0):
@@ -183,7 +178,7 @@ class GO4RExtension(omni.ext.IExt):
                     ui.Spacer(height=10)
                     
                     # Results section
-                    with ui.CollapsableFrame("Results", height=0):
+                    with ui.CollapsableFrame("Results", height=0, collapsed=True):
                         with ui.VStack(spacing=5):
                             self.results_list = ui.ScrollingFrame(height=250)
                             # Initialize with empty results
@@ -202,19 +197,15 @@ class GO4RExtension(omni.ext.IExt):
                                 self.max_messages_field.model.add_value_changed_fn(self._update_max_log_messages)
                                 self.clear_log_btn = ui.Button("Clear Log", width=80, clicked_fn=self._clear_log, height=18)
 
-                            self.log_text = ui.ScrollingFrame(
-                                height=250, 
+                            self.log_field = ui.StringField(
+                                read_only=True,  # Make it read-only so users can't edit the log
+                                multiline=True,  # Enable multi-line text
+                                height=250,
                                 style={
-                                    "border_width": 1, 
-                                    "border_color": 0xFF0000FF, 
-                                    "border_radius": 3,
-                                    "alignment": ui.Alignment.TOP,
-                                    "margin": 4
-                                },
-                                scroll_to_bottom_on_change=True
+                                    "font_size": 14,
+                                    "border_width": 0,  # No border for the field itself
+                                }
                             )
-                            with self.log_text:
-                                self.log_label = ui.Label("")
         
         except Exception as e:
             print(f"Error building UI: {str(e)}")
@@ -262,20 +253,43 @@ class GO4RExtension(omni.ext.IExt):
         # Store current selection for future comparison
         self.previous_selection = selection.copy()
 
-        self.selected_robot_prims = []
+        self.selected_prims = []
 
         if not selection:
             self.selected_robot_label.text = "(Select one or more robot from the stage)"
             self.selected_robot_label.style = {"color": ui.color("#FF0000")}
             self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+
+            self.perception_mesh_label.text = "(Select one mesh from the stage)"
+            self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
+            self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
             return
         
         for robot_path in selection:
             bot_prim = get_current_stage().GetPrimAtPath(robot_path)
-            self.selected_robot_prims.append(bot_prim)
-        self.selected_robot_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_robot_prims])}"
+            self.selected_prims.append(bot_prim)
+
+        self.selected_robot_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_prims])}"
         self.enable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#00FF00"))
         self.selected_robot_label.style = {"color": ui.color("#00FF00")}
+
+        if len(self.selected_prims) > 1:
+            self.perception_mesh_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_prims])}"
+            self.disable_ui_element(self.select_mesh_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+            self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
+        elif len(self.selected_prims) == 1 and self.selected_prims[0].IsA(UsdGeom.Mesh):
+            # One mesh is selected. Use it as your perception mesh??
+            self.perception_mesh = self.selected_prims[0]
+            self.perception_mesh_label.text = f"Selected: {self.selected_prims[0].GetName()}"
+            self.enable_ui_element(self.select_mesh_btn, text_color=ui.color("#00FF00"))
+            self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+            self.perception_mesh_label.style = {"color": ui.color("#00FF00")}
+        else:
+            self.perception_mesh_label.text = "(Select one mesh from the stage)"
+            self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
+            self.disable_ui_element(self.select_mesh_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
         
         # Log the selected robots
         self._log_message(self.selected_robot_label.text)
@@ -287,7 +301,7 @@ class GO4RExtension(omni.ext.IExt):
     def _clear_log(self):
         """Clear all log messages"""
         self.log_messages = []
-        self.log_label.text = ""
+        self._update_log_display()
         
     def _log_message(self, message: str):
         """Add a message to the log"""
@@ -306,7 +320,8 @@ class GO4RExtension(omni.ext.IExt):
 
     def _update_log_display(self):
         """Update the log display with current messages"""
-        self.log_label.text = "\n".join(self.log_messages)
+        # Join the log messages with newlines and update the StringField
+        self.log_field.model.set_value("\n".join(self.log_messages))
 
     def _browse_export_path(self):
         """Open a file dialog to select export location"""
@@ -684,7 +699,7 @@ class GO4RExtension(omni.ext.IExt):
         self.robots = []
         
         total_sensors = dict.fromkeys(sensor_types, 0)
-        for bot_prim in self.selected_robot_prims:
+        for bot_prim in self.selected_prims:
             bot = Bot3D(bot_prim.GetName(), path=bot_prim.GetPath())
             self.robots.append(bot)
             # Clear existing sensors before searching again
@@ -821,95 +836,27 @@ class GO4RExtension(omni.ext.IExt):
             return
         else:
             UsdPhysics.CollisionAPI.Apply(self.perception_mesh)
-        
-        # Start the simulation and log the lidar readings
-        self.timeline.play()
-        asyncio.ensure_future(self._get_num_points_raycast(self.robots[0].get_sensors_by_type(Lidar3D)[0], self.perception_mesh.GetPrimPath()))                        # Only ask for data after sweep is complete
-        
-        # Generate sample points once for efficiency
-        sample_points = self._generate_sample_points()
-        if not sample_points:
-            self._log_message("Error: Could not generate sample points. Check perception mesh.")
-            return
-            
-        # Store results for all robots
-        results_data = {}
-        
-        # Track overall results for combined metrics
-        all_cameras_entropy = []
-        all_lidars_entropy = []
-        
-        # Analyze each robot separately
+
+        results_data = {"combined": {"total": 0.0, "cameras": 0.0, "lidars": 0.0}}
+
         for robot in self.robots:
-            robot_name = robot.name
-            robot_results = {'cameras': 0.0, 'lidars': 0.0, 'total': 0.0, 'camera_details': {}, 'lidar_details': {}}
+            for sensor_instance in robot.sensors:
+                points = asyncio.ensure_future(self._get_points_raycast(sensor_instance, self.perception_mesh.GetPrimPath())) 
             
-            # Calculate entropy for cameras
-            cameras = robot.get_sensors_by_type(MonoCamera3D)
-            for pair in robot.get_sensors_by_type(StereoCamera3D):
-                cameras.append([pair.sensor1, pair.sensor2])
-            if cameras:
-                camera_entropies = []
-                for camera in cameras:
-                    # Calculate entropy for this camera
-                    entropy = self._calculate_single_sensor_entropy(camera, sample_points)
-                    camera_entropies.append(entropy)
-                    robot_results['camera_details'][camera.name] = entropy
-                    
-                # Calculate combined camera entropy if we have multiple cameras
-                if camera_entropies:
-                    robot_results['cameras'] = self._apply_early_fusion(camera_entropies)
-                    all_cameras_entropy.extend(camera_entropies)
-            
-            # Calculate entropy for lidars
-            lidars = robot.get_sensors_by_type(Lidar3D)
-            if lidars:
-                lidar_entropies = []
-                for lidar in lidars:
-                    # Calculate entropy for this lidar
-                    entropy = self._calculate_single_sensor_entropy(lidar, sample_points)
-                    lidar_entropies.append(entropy)
-                    robot_results['lidar_details'][lidar.name] = entropy
-                    
-                # Calculate combined lidar entropy
-                if lidar_entropies:
-                    robot_results['lidars'] = self._apply_early_fusion(lidar_entropies)
-                    all_lidars_entropy.extend(lidar_entropies)
-            
-            # Calculate total entropy for this robot using late fusion
-            if robot_results['cameras'] > 0 and robot_results['lidars'] > 0:
-                robot_results['total'] = self._apply_late_fusion([robot_results['cameras'], robot_results['lidars']])
-            elif robot_results['cameras'] > 0:
-                robot_results['total'] = robot_results['cameras']
-            elif robot_results['lidars'] > 0:
-                robot_results['total'] = robot_results['lidars']
-            
-            # Store results for this robot
-            results_data[robot_name] = robot_results
-        
-        # Calculate combined results across all robots
-        combined_results = {
-            'cameras': self._apply_early_fusion(all_cameras_entropy) if all_cameras_entropy else 0.0,
-            'lidars': self._apply_early_fusion(all_lidars_entropy) if all_lidars_entropy else 0.0,
-            'total': 0.0
-        }
-        
-        # Calculate overall total entropy using late fusion
-        if combined_results['cameras'] > 0 and combined_results['lidars'] > 0:
-            combined_results['total'] = self._apply_late_fusion([combined_results['cameras'], combined_results['lidars']])
-        elif combined_results['cameras'] > 0:
-            combined_results['total'] = combined_results['cameras']
-        elif combined_results['lidars'] > 0:
-            combined_results['total'] = combined_results['lidars']
-        
-        # Add combined results to results data
-        results_data['combined'] = combined_results
+                if not points:
+                    self._log_message(f"Error: No points from {sensor_instance.name} hit; check perception mesh.")
+                    continue
+                
+                self._log_message(f"{sensor_instance.name} hit {len(points)} points")
+
+                #TODO: Add the perception entropy calculation here
+                
         
         # Update the results UI
         self._update_results_ui(results_data)
         
         self._log_message("Analysis complete")
-
+        
     def _update_results_ui(self, results_data=None):
         """Update the results UI with entropy results for each robot"""
         # Clear existing results
@@ -972,30 +919,6 @@ class GO4RExtension(omni.ext.IExt):
                                     with ui.VStack(spacing=2):
                                         for lidar_name, lidar_entropy in robot_results.get('lidar_details', {}).items():
                                             ui.Label(f"{lidar_name}: {lidar_entropy:.4f}")
-
-    def _calculate_single_sensor_entropy(self, sensor:Sensor3D, sample_points):
-        """Calculate entropy for a single sensor"""
-        entropy_sum = 0.0
-        total_weight = 0.0
-
-        for point, obj_type, weight in sample_points:
-            # Calculate measurement (pixel count or point count)
-            measurement = self._calculate_pixel_count(sensor, point, obj_type)
-            ap = sensor.calculate_ap(measurement)
-
-            
-            # Convert AP to standard deviation
-            sigma = self._ap_to_sigma(ap)
-            
-            # Calculate entropy
-            point_entropy = self._gaussian_entropy(sigma)
-            entropy_sum += point_entropy * weight
-            total_weight += weight
-        
-        if total_weight > 0:
-            return entropy_sum / total_weight
-        else:
-            return 0.0
 
     def _get_prim_attribute(self, prim, attr_name, default_value=None):
         """Get the value of a prim attribute or return a default value"""
@@ -1139,6 +1062,10 @@ class GO4RExtension(omni.ext.IExt):
                             sample_points.append((point, obj_type, weight))
         
         self._log_message(f"Generated {len(sample_points)} sample points inside bounding box")
+
+        print("Testing ray casting")
+        self._single_ray_cast_all_collisions((0.0,0.0,0.0), (1.0,0.0,0.0), 1000.0)
+
         return sample_points
 
     def _adaptive_sample_mesh(self, min_corner, max_corner, target_samples, depth=0, max_depth=5):
@@ -1240,8 +1167,126 @@ class GO4RExtension(omni.ext.IExt):
             sample_points.extend(self._adaptive_sample_mesh(min_pt, max_pt, octant_target, depth + 1, max_depth))
         
         return sample_points
+    
+    def voxelize_mesh(self, mesh_prim, voxel_size, parent_path):
+        """
+        Split a mesh into voxels of specified size and optionally create primitives for each voxel
+        
+        Args:
+            mesh_prim (Usd.Prim): The source mesh to voxelize
+            voxel_size (float): Size of each voxel in meters
+            create_primitives (bool): If True, creates actual mesh primitives for each voxel
+            parent_path (str): Path where voxel meshes will be created (defaults to mesh's parent)
+            
+        Returns:
+            List of voxel mesh primitives if create_primitives=True, otherwise list of voxel bounds
+        """
+        
+        # Get the mesh geometry
+        mesh_geom = UsdGeom.Mesh(mesh_prim)
+        mesh_name = mesh_prim.GetName()
+        
+        # Get the points and face indices
+        points = mesh_geom.GetPointsAttr().Get()
+        face_vertex_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
+        face_vertex_indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
+        
+        if not points or not face_vertex_counts or not face_vertex_indices:
+            self._log_message(f"Missing mesh data for {mesh_prim.GetPath()}")
+            return []
+        
+        # Get the mesh transform
+        xform = UsdGeom.Xformable(mesh_prim)
+        local_to_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        
+        # Get the mesh bounding box
+        bounds = self._get_mesh_bounds(mesh_prim)
+        if not bounds:
+            self._log_message("Error: Could not determine mesh bounds.")
+            return []
+        
+        min_point, max_point = bounds
+        
+        # Calculate grid dimensions
+        grid_size_x = int((max_point[0] - min_point[0]) / voxel_size)
+        grid_size_y = int((max_point[1] - min_point[1]) / voxel_size)
+        grid_size_z = int((max_point[2] - min_point[2]) / voxel_size)
+        
+        self._log_message(f"Creating voxel grid: {grid_size_x}x{grid_size_y}x{grid_size_z} " + 
+                        f"({grid_size_x * grid_size_y * grid_size_z} potential voxels)")
 
-    def _select_perception_mesh(self):
+        # Create an array to store all voxel centers for later use
+        voxel_centers = []
+
+        # Iterate through the grid to find voxels intersected by triangles
+        for i in range(grid_size_x):
+            for j in range(grid_size_y):
+                for k in range(grid_size_z):
+                    # Calculate voxel center
+                    center_x = min_point[0] + (i + 0.5) * voxel_size
+                    center_y = min_point[1] + (j + 0.5) * voxel_size
+                    center_z = min_point[2] + (k + 0.5) * voxel_size
+                    voxel_center = carb.Float3(center_x, center_y, center_z)
+                    voxel_extent = carb.Float3(voxel_size, voxel_size, voxel_size)
+                    
+                    # Check if the voxel center is inside the mesh
+                    # if _is_point_in_mesh(voxel_center, mesh_prim):
+                    overlap = asyncio.ensure_future(self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath()))
+                    if overlap:
+                        voxel_centers.append(((i,k,j),voxel_center))
+
+        # Convert voxel centers to a Vec3fArray for later use
+        self._log_message(f"Generated {len(voxel_centers)} voxel centers")
+        
+        created_voxels = []
+        stage = get_current_stage()
+        
+        # Create a mesh for each occupied voxel
+        for (i,j,k), p in voxel_centers:
+            # world_p = Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))):
+            # Calculate voxel corners
+            min_x = p[0] - voxel_size / 2
+            min_y = p[1] - voxel_size / 2
+            min_z = p[2] - voxel_size / 2
+            max_x = min_x + voxel_size
+            max_y = min_y + voxel_size
+            max_z = min_z + voxel_size
+            
+            # Define voxel as a cube
+            voxel_points = [
+                Gf.Vec3f(min_x, min_y, min_z),
+                Gf.Vec3f(max_x, min_y, min_z),
+                Gf.Vec3f(max_x, max_y, min_z),
+                Gf.Vec3f(min_x, max_y, min_z),
+                Gf.Vec3f(min_x, min_y, max_z),
+                Gf.Vec3f(max_x, min_y, max_z),
+                Gf.Vec3f(max_x, max_y, max_z),
+                Gf.Vec3f(min_x, max_y, max_z)
+            ]
+            
+            # Define the faces (6 faces, each with 4 vertices)
+            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
+            face_vertex_indices = Vt.IntArray([
+                0, 1, 2, 3,  # bottom
+                4, 5, 6, 7,  # top
+                0, 1, 5, 4,  # front
+                1, 2, 6, 5,  # right
+                2, 3, 7, 6,  # back
+                3, 0, 4, 7   # left
+            ])
+            
+            # Create voxel mesh using USD API directly
+            voxel_path = f"{parent_path}/{mesh_name}_voxel_{i}_{j}_{k}"
+            mesh_def = UsdGeom.Mesh.Define(stage, voxel_path)
+            mesh_def.CreatePointsAttr().Set(voxel_points)
+            mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
+            mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            created_voxels.append(mesh_def.GetPrim())
+        
+        self._log_message(f"Created {len(created_voxels)} voxel meshes")
+        return created_voxels
+
+    def _voxelize_perception_mesh(self):
         """Select a mesh to use as the target perception area"""
         # Get current selection
         selection = self._usd_context.get_selection().get_selected_prim_paths()
@@ -1252,10 +1297,15 @@ class GO4RExtension(omni.ext.IExt):
             self.mesh_bounds_label.text = "Mesh Bounds: Not selected"
             self.perception_mesh = None
             self.perception_mesh_path = None
-            # Disable analyze button when no mesh is selected
-            self.disable_ui_element(self.analyze_btn)
             return
         
+        # Use the Xform object at the top level called "PerceptionVolume" as the parent for all the voxels. If it doesn't exist, create it.
+        stage = get_current_stage()
+        xform_path = "/World/GO4R_PerceptionVolume"
+        xform_prim = stage.GetPrimAtPath(xform_path)
+        if not xform_prim:
+            xform_prim = UsdGeom.Xform.Define(stage, xform_path)
+
         # Use the first selected item
         mesh_path = selection[0]
         stage = get_current_stage()
@@ -1270,22 +1320,19 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Selected prim {mesh_path} is not a mesh or boundable object")
             return
         
-        # Store the mesh prim for later use
-        self.perception_mesh = mesh_prim
-        self.perception_mesh_path = mesh_path
-        self.perception_mesh_label.text = mesh_path.split('/')[-1]
-        
-        # Enable analyze button now that we have a mesh
-        self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+        # Try to apply the collision API to the selected mesh
+        if not UsdPhysics.CollisionAPI.CanApply(mesh_prim):
+            self._log_message(f"Error: Cannot apply CollisionAPI to {mesh_path}")
+            return
         
         # Get and display bounds
         bounds = self._get_mesh_bounds(mesh_prim)
         if bounds:
             min_point, max_point = bounds
             self.mesh_bounds_label.text = (
-                f"Mesh Bounds: X: [{min_point[0]:.2f}, {max_point[0]:.2f}], "
-                f"Y: [{min_point[1]:.2f}, {max_point[1]:.2f}], "
-                f"Z: [{min_point[2]:.2f}, {max_point[2]:.2f}]"
+                f"Mesh Bounds: \n     X: [{min_point[0]:.2f}, {max_point[0]:.2f}], \n"
+                f"     Y: [{min_point[1]:.2f}, {max_point[1]:.2f}], \n"
+                f"     Z: [{min_point[2]:.2f}, {max_point[2]:.2f}]"
             )
             
             # Calculate the largest dimension of the mesh
@@ -1294,13 +1341,13 @@ class GO4RExtension(omni.ext.IExt):
                 max_point[1] - min_point[1],
                 max_point[2] - min_point[2]
             ]
-            largest_dimension = max(dimensions)
-            
-            # Set step size to 1/10th of the largest dimension (with min of 0.1m)
-            new_step_size = max(0.1, largest_dimension / 10.0)
-            self.voxel_size = new_step_size
-            self.voxel_size_field.model.set_value(new_step_size)
-            self._log_message(f"Setting sampling density to {new_step_size:.2f}m (1/10th of largest dimension)")
+
+        voxels = self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=xform_path)
+
+        if voxels:
+            self._log_message(f"Created {len(voxels)} voxel meshes inside {mesh_path}")
+        else:
+            self._log_message(f"No voxels created for {mesh_path}")
         
         self._log_message(f"Selected mesh '{mesh_path}' as perception area")
 
@@ -1315,121 +1362,155 @@ class GO4RExtension(omni.ext.IExt):
                 box = bound.ComputeAlignedBox()
                 min_point = box.GetMin()
                 max_point = box.GetMax()
+                self._log_message(f"Mesh bounds: {min_point} to {max_point}")
                 return (min_point, max_point)
         except Exception as e:
             self._log_message(f"Error getting bounds of mesh: {str(e)}")
         
         return None
+    
+    async def _does_box_overlap_prim(self, origin:carb.Float3, extent:carb.Float3, prim_path):
+        """Check if a box overlaps with a given prim path"""
 
-    def _is_point_in_mesh(self, point, mesh_prim):
-        """
-        Determine if a point is inside the mesh using PhysX scene queries.
+        # Target the prim mash
+        self.target_prim_collision(prim_path)
+
+        rotation = carb.Float4(1.0, 0.0, 0.0, 0.0) # No rotation
+
+        half_extent = carb.Float3(
+            max(0.001, extent[0] / 2.0),
+            max(0.001, extent[1] / 2.0), 
+            max(0.001, extent[2] / 2.0)
+        )
+
+        prim_found = False
+
+        def report_overlap(overlap):
+            print(f"Overlap: {overlap}")
+            nonlocal prim_found
+            if overlap.collision == prim_path:
+                print(f" - Found prim: {overlap.collision}")
+                # Now that we have found our prim, return False to abort further search.voxel_size
+                return False
+            return True
+
+        try:
+            self.timeline.play()
+            await omni.kit.app.get_app().next_update_async()
+            omni.physx.get_physx_scene_query_interface().overlap_box(half_extent, origin, rotation, report_overlap, False)
+            self.timeline.stop()
         
-        This leverages Isaac Sim's built-in physics system for more efficient spatial queries.
+        except Exception as e:
+            self._log_message(f"Error in overlap_box: {str(e)}")
+        
+        if prim_found:
+            self._log_message(f"Box overlaps with prim {prim_path}")
+        # else:
+        #     self._log_message(f"No overlap found with prim {prim_path}")
+    
+        return prim_found
+    
+    def _single_ray_cast_all_collisions(self, 
+                                        origin:Tuple[float, float, float]=(0.0,0.0,0.0), 
+                                        direction:Tuple[float, float, float]=(1.0,0.0,0.0), 
+                                        max_dist: float = 100.0) -> dict:
+        """Projects a raycast forward along x axis with specified offset
+
+        See https://docs.omniverse.nvidia.com/kit/docs/omni_physics/105.1/extensions/runtime/source/omni.physx/docs/index.html#raycast
+
+        Args:
+            position (np.array): origin's position for ray cast
+            orientation (np.array): origin's orientation for ray cast
+            offset (np.array): offset for ray cast
+            max_dist (float, optional): maximum distance to test for collisions in stage units. Defaults to 100.0.
+
+        Returns:
+            typing.Tuple[typing.Union[None, str], float]: path to geometry that was hit and hit distance, returns None, 10000 if no hit occurred
         """
-        # First do a quick bounds check for efficiency
-        if not mesh_prim or not mesh_prim.IsValid():
-            return False
-            
+        # print(f"Raycast origin: {origin}, direction: {ray_dir}, max_dist: {max_dist}")
+
+        def report_raycast(hit):
+            print(f"Hit: {hit}")
+            return hit["hit"]
+
+        hit = omni.physx.get_physx_scene_query_interface().raycast_all(origin, direction, max_dist, report_raycast)
+        print(f"Raycast hit: {hit}")
+        if hit:
+            usdGeom = UsdGeom.Mesh.Get(get_current_stage(), hit["rigidBody"])
+            distance = hit["distance"]
+            print(f"Hit! {usdGeom} at {distance}mm")
+            return hit
+        return None
+        
+
+    def _is_point_in_mesh(self, point:Tuple[float,float,float], mesh_prim:Usd.Prim) -> bool:
+        """
+        Check if a point is inside a mesh using ray casting.
+        This is accurate and works well even for sparse meshes.
+        """
+        self._log_message(f"Checking if point {point} is inside mesh {mesh_prim.GetPath()}")
+
+        # Target the prim mash
+        self.target_prim_collision(prim_utils.get_prim_path(mesh_prim))
+
+        # Quick bounds check first to avoid unnecessary calculations
         bounds = self._get_mesh_bounds(mesh_prim)
         if not bounds:
+            self._log_message(f"Error: Could not determine bounds for mesh {mesh_prim.GetPath()}")
             return False
-            
+
         min_point, max_point = bounds
-        # Quick reject if point is outside bounding box
+
+        # Check if point is outside bounding box
         if (point[0] < min_point[0] or point[0] > max_point[0] or
             point[1] < min_point[1] or point[1] > max_point[1] or
             point[2] < min_point[2] or point[2] > max_point[2]):
+            self._log_message(f"Point {point} is outside the bounding box of the mesh")
             return False
-        
-        # If the mesh is a simple box or plane, just use the bounds check
-        if mesh_prim.GetTypeName() == 'Cube' or mesh_prim.GetTypeName() == 'Plane':
-            return True
-        
-        # For complex meshes, use PhysX overlap test
-        try:
-            # Get the physics scene
-            physics_scene = _physx.get_physics_scene()
-            if not physics_scene:
-                self._log_message("PhysX scene not available, falling back to bounds check")
-                return True
-            
-            # Create a small sphere at the test point (proxy for the point)
-            radius = 0.01  # Small radius
-            # Note: PhysX uses a different coordinate system than USD, so we need to convert
-            physx_point = carb.Float3(point[0], point[1], point[2])
-            
-            # Get the path of the mesh to test against
-            mesh_path = str(mesh_prim.GetPath())
-            
-            # Perform the overlap test
-            overlaps = physics_scene.overlap_sphere(radius, physx_point, mesh_path)
-            
-            # If there are any overlaps, the point is inside or very close to the mesh
-            return len(overlaps) > 0
-            
-        except Exception as e:
-            self._log_message(f"Error in PhysX point-in-mesh test: {str(e)}")
-            
-        # Fall back to bounding box test if any issues occur
-        return True  # If we're inside bounds and PhysX test failed, assume inside
 
-    def _ray_intersects_triangle(self, origin, direction, triangle_vertices):
-        """
-        Check if a ray intersects a triangle.
-        
-        Implementation of Möller–Trumbore ray-triangle intersection algorithm.
-        """
-        # Need at least 3 vertices for a triangle
-        if len(triangle_vertices) < 3:
-            return False
-            
-        # Get the first three vertices to form a triangle
-        v0 = Gf.Vec3d(triangle_vertices[0])
-        v1 = Gf.Vec3d(triangle_vertices[1])
-        v2 = Gf.Vec3d(triangle_vertices[2])
-        
-        # Compute edge vectors
-        e1 = v1 - v0
-        e2 = v2 - v0
-        
-        # Calculate determinant
-        p = Gf.Cross(direction, e2)
-        det = Gf.Dot(e1, p)
-        
-        # If determinant is near zero, ray is parallel to triangle
-        epsilon = 1e-8
-        if abs(det) < epsilon:
-            return False
-        
-        inv_det = 1.0 / det
-        
-        # Calculate barycentric coordinates
-        t = origin - v0
-        u = Gf.Dot(t, p) * inv_det
-        
-        # Check if intersection is outside triangle
-        if u < 0.0 or u > 1.0:
-            return False
-        
-        q = Gf.Cross(t, e1)
-        v = Gf.Dot(direction, q) * inv_det
-        
-        # Check if intersection is outside triangle
-        if v < 0.0 or u + v > 1.0:
-            return False
-        
-        # Calculate distance to intersection
-        distance = Gf.Dot(e2, q) * inv_det
-        
-        # Check if intersection is in positive ray direction
-        return distance >= epsilon
-    
-    def _calculate_pixel_count(self, sensor_instance: Sensor3D_Instance, object_path) -> int:
-        """Calculate the number of rays cast by the sensor instance that hit the object at the given point"""
-        value = collisions_utils.ray_cast(position=sensor_instance.get_position(), orientation=sensor_instance.get_rotation, offset=sensor_instance.sensor.max_range)
-        
-        raise NotImplementedError("Not implemented yet")
+        # Use fixed directions as Gf.Vec3d instead of numpy arrays
+        directions = [
+            (1.0, 0.0, 0.0),  # +X
+            (-1.0, 0.0, 0.0), # -X
+            (0.0, 1.0, 0.0),  # +Y
+            (0.0, -1.0, 0.0), # -Y
+            (0.0, 0.0, 1.0),  # +Z
+            (0.0, 0.0, -1.0)  # -Z
+        ]
+
+        # Set up counters for inside/outside voting
+        inside_votes = 0
+        outside_votes = 0
+
+        # Calculate a ray length that's guaranteed to exit the bounding box
+        ray_length = max(
+            max_point[0] - min_point[0],
+            max_point[1] - min_point[1],
+            max_point[2] - min_point[2]
+        ) *10
+
+        for direction in directions:
+            # Use ray_cast with properly formatted arguments - using Gf.Vec3d directly
+            hit_info = self._single_ray_cast_all_collisions(
+                point,            # Origin point as 3D vector np.array
+                direction,        # Direction as a 3D vector np.array
+                ray_length        # Ray length
+            )
+
+            # Count ray intersections
+            if hit_info is not None:
+                # If we hit something, count as an inside vote
+                self._log_message(f"Hit! On {hit_info['collision']} at {hit_info['distance']}mm")
+
+                inside_votes += 1
+            else:
+                # If no hit, the ray didn't intersect, likely outside
+                outside_votes += 1
+
+        # Use majority voting for robustness
+        inside = inside_votes > outside_votes
+        self._log_message(f"Point {point} was determined to be {'inside' if inside else 'outside'} the mesh. Votes: {inside_votes} inside, {outside_votes} outside")
+        return inside_votes > outside_votes
 
     def _apply_early_fusion(self, entropies: List[float]) -> float:
         """Apply early fusion strategy to combine entropies (average them)"""
@@ -1515,7 +1596,8 @@ class GO4RExtension(omni.ext.IExt):
                         # Get the collision enabled attribute
                         collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
                 else:
-                    self._log_message(f"Prim {p.GetPath()} does not have a CollisionAPI, skipping")
+                    if p == prim:
+                        self._log_message(f"Oh no!! Target Prim {p.GetPath()} does not have a CollisionAPI!!!") # DEBUG
                     continue
 
                 if p != prim:
@@ -1527,10 +1609,10 @@ class GO4RExtension(omni.ext.IExt):
                     # Set the target prim to be collidable
                     collision_enabled_attr.Set(True)
         
-        self._log_message(f"Set {prim.GetPath()} as target for ray cast / lidar sensing")
+        # self._log_message(f"Set {prim.GetPath()} as collision target for ray casting")
 
     def untarget_prim_collision(self, prim_path):
-        """Set the target prim collisions off for ray cast / lidar sensing. Don't change the rest."""
+        """Set the target prim collisions off for ray casting. Don't change the rest."""
         prim = get_current_stage().GetPrimAtPath(prim_path)
 
         if not prim:
@@ -1555,27 +1637,32 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Prim {prim.GetPath()} does not have a CollisionAPI, skipping")
 
     
-    async def _get_num_points_raycast(self, ray_caster_instance:Sensor3D, prim_path:Sdf.Path):
+    async def _get_points_raycast(self, sensor_instance:Sensor3D_Instance, mesh_prim_path:Sdf.Path) -> List[Tuple[Gf.Vec3d, str, float]]:
         """Get the number of points from a raycast that land on the given prim"""
 
-        self.target_prim_collision(prim_path)
-        
-        try:
+        points = []
+
+        for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
+            i = i if len(sensor_instance.ray_casters) != 1 else ""
+            print(f"i = {i}, and the sensor is a {sensor_instance.__getattribute__(f'sensor{i}').__class__}")
+            self.target_prim_collision(mesh_prim_path)
+            
+            self.timeline.play()                                             # Play the simulation to get the ray data
             await omni.kit.app.get_app().next_update_async()                 # wait one frame for data
             self.timeline.pause()                                            # Pause the simulation to populate the LIDAR's depth buffers
-            pathstr = str(ray_caster_instance.path)
+            pathstr = prim_utils.get_prim_path(ray_caster)
 
             #Get the linear depth data from the lidar. If the linear depth of a point != the maximum range, it means that the point hit something
             lin_depth = self.lidarInterface.get_linear_depth_data(pathstr)
-            num_points = np.count_nonzero(lin_depth != ray_caster_instance.sensor.max_range)
-            
-            print(f"Num points hitting {prim_path}: {num_points}")
+            for index in filter(lambda x: lin_depth[x] != self.lidarInterface.get_max_range(), range(len(lin_depth))):
+                # Get the point in world space
+                point = ray_caster.get_point(index)
+                for obj, obj_data in self.target_objects.items():
+                    weight = obj_data["weight"]
+                    points.append((point, obj, weight))
+            print(f"Num points hitting {mesh_prim_path}: {len(points)}")
+            self._log_message(f"Num points hitting {mesh_prim_path}: {len(points)}")
 
-            return num_points
-            
-        except Exception as e:
-            print(f"Error in raycast: {e}")
-            self._log_message(f"Error in raycast: {e}")
-            return None
+        return points
 
         
