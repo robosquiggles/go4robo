@@ -1592,18 +1592,14 @@ class GO4RExtension(omni.ext.IExt):
         for p in stage.Traverse():
             if p.IsA(UsdGeom.Mesh):
                 collision_api = UsdPhysics.CollisionAPI(p)
-                if collision_api:
-                        # Get the collision enabled attribute
-                        collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
-                else:
-                    if p == prim:
-                        self._log_message(f"Oh no!! Target Prim {p.GetPath()} does not have a CollisionAPI!!!") # DEBUG
-                    continue
-
+                if not collision_api:
+                    # Apply the CollisionAPI to the prim
+                    collision_api = UsdPhysics.CollisionAPI.Apply(p)
+                # Get the collision enabled attribute
+                collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                
                 if p != prim:
                     # Set the other prims to be non-collidable
-                        
-                    # Disable collisions
                     collision_enabled_attr.Set(False)
                 else:
                     # Set the target prim to be collidable
