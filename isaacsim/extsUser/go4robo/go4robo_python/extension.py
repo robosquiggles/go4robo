@@ -1191,6 +1191,12 @@ class GO4RExtension(omni.ext.IExt):
         xform_prim = stage.GetPrimAtPath(xform_path)
         if not xform_prim:
             xform_prim = UsdGeom.Xform.Define(stage, xform_path)
+        else:
+            # First clear any previous voxel meshes from "/World/GO4R_PerceptionVolume"
+            for child in xform_prim.GetChildren():
+                if child.IsA(UsdGeom.Mesh):
+                    child.GetStage().RemovePrim(child.GetPath())
+            self._log_message("Cleared previous voxel meshes")
 
         # Use the first selected item
         mesh_path = selection[0]
@@ -1303,16 +1309,13 @@ class GO4RExtension(omni.ext.IExt):
                     voxel_extent = carb.Float3(voxel_size, voxel_size, voxel_size)
                     
                     # Check if the voxel center is inside the mesh
-                    # if _is_point_in_mesh(voxel_center, mesh_prim):
+                    center_inside = self._is_point_in_mesh(voxel_center, mesh_prim)
                     overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath())
-                    if overlap == True:
+                    if center_inside == True:
                         voxel_centers.append(((i,k,j),voxel_center))
 
         # Pause the simulation
         self.timeline.pause()
-
-        # Convert voxel centers to a Vec3fArray for later use
-        self._log_message(f"Generated {len(voxel_centers)} voxel centers")
         
         created_voxels = []
         stage = get_current_stage()
@@ -1359,7 +1362,6 @@ class GO4RExtension(omni.ext.IExt):
             mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
             created_voxels.append(mesh_def.GetPrim())
         
-        self._log_message(f"Created {len(created_voxels)} voxel meshes")
         return created_voxels
 
     def _get_mesh_bounds(self, mesh_prim):
@@ -1373,7 +1375,7 @@ class GO4RExtension(omni.ext.IExt):
                 box = bound.ComputeAlignedBox()
                 min_point = box.GetMin()
                 max_point = box.GetMax()
-                self._log_message(f"Mesh bounds: {min_point} to {max_point}")
+                # self._log_message(f"Mesh bounds: {min_point} to {max_point}")
                 return (min_point, max_point)
         except Exception as e:
             self._log_message(f"Error getting bounds of mesh: {str(e)}")
@@ -1397,13 +1399,9 @@ class GO4RExtension(omni.ext.IExt):
         prim_found = False
 
         def report_overlap(overlap):
-            print(f"Overlap: {overlap}")
             nonlocal prim_found
             if overlap.collision == prim_path:
-                print(f" - Found prim: {overlap.collision}")
                 prim_found = True
-                # Now that we have found our prim, return False to abort further search.voxel_size
-                return False
             return True
 
         try:
@@ -1412,8 +1410,8 @@ class GO4RExtension(omni.ext.IExt):
         except Exception as e:
             self._log_message(f"Error in overlap_box: {str(e)}")
         
-        if prim_found:
-            self._log_message(f"Box overlaps with prim {prim_path}")
+        # if prim_found:
+        #     self._log_message(f"Box overlaps with prim {prim_path}")
         # else:
         #     self._log_message(f"No overlap found with prim {prim_path}")
     
@@ -1440,14 +1438,11 @@ class GO4RExtension(omni.ext.IExt):
 
         def report_raycast(hit):
             print(f"Hit: {hit}")
-            return hit["hit"]
+            return hit
 
-        hit = omni.physx.get_physx_scene_query_interface().raycast_all(origin, direction, max_dist, report_raycast)
+        hit = omni.physx.get_physx_scene_query_interface().raycast_all(origin, direction, max_dist, report_raycast, True)
         print(f"Raycast hit: {hit}")
         if hit:
-            usdGeom = UsdGeom.Mesh.Get(get_current_stage(), hit["rigidBody"])
-            distance = hit["distance"]
-            print(f"Hit! {usdGeom} at {distance}mm")
             return hit
         return None
         
@@ -1477,7 +1472,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Point {point} is outside the bounding box of the mesh")
             return False
 
-        # Use fixed directions as Gf.Vec3d instead of numpy arrays
+        # Directions for ray casting
         directions = [
             (1.0, 0.0, 0.0),  # +X
             (-1.0, 0.0, 0.0), # -X
@@ -1491,35 +1486,26 @@ class GO4RExtension(omni.ext.IExt):
         inside_votes = 0
         outside_votes = 0
 
-        # Calculate a ray length that's guaranteed to exit the bounding box
-        ray_length = max(
-            max_point[0] - min_point[0],
-            max_point[1] - min_point[1],
-            max_point[2] - min_point[2]
-        ) *10
+        # Use twice the hypotenuse to determine the ray length
+        ray_length = math.sqrt(
+            (max_point[0] - min_point[0]) ** 2 +
+            (max_point[1] - min_point[1]) ** 2 +
+            (max_point[2] - min_point[2]) ** 2
+        )
 
         for direction in directions:
-            # Use ray_cast with properly formatted arguments - using Gf.Vec3d directly
-            hit_info = self._single_ray_cast_all_collisions(
+            # Use ray_cast 
+            if not self._single_ray_cast_all_collisions(
                 point,            # Origin point as 3D vector np.array
                 direction,        # Direction as a 3D vector np.array
                 ray_length        # Ray length
-            )
+            ):
+                self._log_message(f"Point {point} was determined to be outside the mesh.")
+                return False
 
-            # Count ray intersections
-            if hit_info is not None:
-                # If we hit something, count as an inside vote
-                self._log_message(f"Hit! On {hit_info['collision']} at {hit_info['distance']}mm")
-
-                inside_votes += 1
-            else:
-                # If no hit, the ray didn't intersect, likely outside
-                outside_votes += 1
-
-        # Use majority voting for robustness
-        inside = inside_votes > outside_votes
-        self._log_message(f"Point {point} was determined to be {'inside' if inside else 'outside'} the mesh. Votes: {inside_votes} inside, {outside_votes} outside")
-        return inside_votes > outside_votes
+        # If we reach here, the point is inside the mesh
+        self._log_message(f"Point {point} was determined to be inside the mesh.")
+        return True
 
     def _apply_early_fusion(self, entropies: List[float]) -> float:
         """Apply early fusion strategy to combine entropies (average them)"""
