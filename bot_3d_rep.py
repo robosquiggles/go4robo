@@ -317,7 +317,7 @@ class Sensor3D_Instance:
         self.tf = tf
         self.ray_casters = []
 
-    def create_ray_casters(self, stage):
+    def create_ray_casters(self, stage, context):
         """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
         import omni.kit.commands
 
@@ -337,12 +337,20 @@ class Sensor3D_Instance:
 
                 # If the ray caster does not exist, create it
                 else:
+                    # First get the path that is currently selected in the stage
+                    # This is the path that the ray caster will be parented to
+
+                    # Then select the prim from the stage
+                    omni.kit.commands.execute('SelectPrims',
+                                              old_selected_paths=[context.get_selection().get_selected_prim_paths()],
+                                              new_selected_paths=[self.get_ancestor_path(1)])
+                    #Then create the ray caster at the selection
                     result, prim = omni.kit.commands.execute('RangeSensorCreateLidar',
                         path=f'/GO4R_RAYCASTER_{sensor.name}',
                         parent=parent_path,
                         min_range=sensor.min_range,
                         max_range=sensor.max_range,
-                        draw_points=False,
+                        draw_points=True,
                         draw_lines=True,
                         horizontal_fov=sensor.h_fov,
                         vertical_fov=sensor.v_fov,
@@ -370,17 +378,12 @@ class Sensor3D_Instance:
 
             sensor_xform = UsdGeom.Xformable(sensor.body)
             sensor_world_transform = sensor_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            # Set the transform of the ray caster to match the sensor
-            # omni.kit.commands.execute('TransformPrim',
+            # omni.kit.commands.execute('TransformPrimCommand',
             #     path=ray_caster.GetPath(),
-            #     new_translations=self.tf[0],
-            #     new_rotation=self.tf[1])
-            omni.kit.commands.execute('TransformPrimCommand',
-                path=ray_caster.GetPath(),
-                old_transform_matrix=rc_world_transform,
-                new_transform_matrix=sensor_world_transform,
-                time_code=Usd.TimeCode(),
-                had_transform_at_key=False)
+            #     old_transform_matrix=rc_world_transform,
+            #     new_transform_matrix=sensor_world_transform,
+            #     time_code=Usd.TimeCode(),
+            #     had_transform_at_key=False)
 
         return self.ray_casters
     

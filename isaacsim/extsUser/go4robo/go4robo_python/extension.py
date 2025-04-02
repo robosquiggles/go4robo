@@ -571,7 +571,7 @@ class GO4RExtension(omni.ext.IExt):
                                         focal_point=(0, 0, 0)
                                         )
                     cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=name, tf=self._get_robot_to_sensor_transform(prim, robot_prim))
-                    cam3d_instance.create_ray_casters(get_current_stage())
+                    cam3d_instance.create_ray_casters(get_current_stage(), self._usd_context)
                     self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
@@ -611,7 +611,7 @@ class GO4RExtension(omni.ext.IExt):
                                     cost=1.0,
                                     )
                     lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_robot_to_sensor_transform(prim, robot_prim))
-                    lidar_instance.create_ray_casters(get_current_stage())
+                    lidar_instance.create_ray_casters(get_current_stage(), self._usd_context)
                     self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
