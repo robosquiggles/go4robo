@@ -152,6 +152,7 @@ class GO4RExtension(omni.ext.IExt):
                                 ui.Label("Perception Mesh:", width=120)
                                 self.perception_mesh_label = ui.Label("(Not selected)", style={"color": ui.color("#FF0000")})
                                 self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._on_voxelize_button_clicked)
+                                self.voxelize_progress_bar = ui.ProgressBar(width=200, height=5, val=0.0, style={"background_color": ui.color("#CCCCCC")})
                             
                             # Show bounds of selected mesh if available
                             self.mesh_bounds_label = ui.Label("Mesh Bounds: Not selected")
@@ -1170,10 +1171,19 @@ class GO4RExtension(omni.ext.IExt):
     
     def _on_voxelize_button_clicked(self):
         """Wrapper for the async function"""
-        asyncio.ensure_future(self._voxelize_perception_mesh())
+        async def _initialize_and_voxelize():
+        # Ensure physics system is ready
+            self.timeline.play()
+            for _ in range(3):  # Wait for a few frames to ensure physics is ready
+                await omni.kit.app.get_app().next_update_async()
+            self.timeline.pause()
+
+            await self._voxelize_perception_mesh()
+        asyncio.ensure_future(_initialize_and_voxelize())
 
     async def _voxelize_perception_mesh(self):
         """Select a mesh to use as the target perception area"""
+        self.voxelize_progress_bar.model.set_value(0.0)  # Reset progress bar
         # Get current selection
         selection = self._usd_context.get_selection().get_selected_prim_paths()
         
@@ -1235,6 +1245,7 @@ class GO4RExtension(omni.ext.IExt):
             ]
 
         voxels = await self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=xform_path)
+        self.voxelize_progress_bar.model.set_value(1.0)  # Set progress bar to complete
 
         if voxels:
             self._log_message(f"Created {len(voxels)} voxel meshes inside {mesh_path}")
@@ -1298,6 +1309,9 @@ class GO4RExtension(omni.ext.IExt):
         await omni.kit.app.get_app().next_update_async()
 
         # Iterate through the grid to find voxels intersected by triangles
+        total_voxels = grid_size_x * grid_size_y * grid_size_z
+        processed_voxels = 0
+
         for i in range(grid_size_x):
             for j in range(grid_size_y):
                 for k in range(grid_size_z):
@@ -1313,12 +1327,16 @@ class GO4RExtension(omni.ext.IExt):
                     center_inside = self._is_point_in_mesh(voxel_center, mesh_prim)
                     if center_inside == True:
                         voxel_centers.append(((i,k,j),voxel_center))
+                    processed_voxels += 1
+                    self.voxelize_progress_bar.model.set_value(processed_voxels / total_voxels /2) # Update progress bar up to 50%
 
         # Pause the simulation
         self.timeline.pause()
         
         created_voxels = []
         stage = get_current_stage()
+
+        self.voxelize_progress_bar.model.set_value(0.5)
         
         # Create a mesh for each occupied voxel
         for (i,j,k), p in voxel_centers:
@@ -1361,6 +1379,7 @@ class GO4RExtension(omni.ext.IExt):
             mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
             mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
             created_voxels.append(mesh_def.GetPrim())
+            self.voxelize_progress_bar.model.set_value(0.5 + processed_voxels / total_voxels / 2) # Update progress bar to 100%
         
         return created_voxels
 
@@ -1666,4 +1685,4 @@ class GO4RExtension(omni.ext.IExt):
 
         return points
 
-        
+
