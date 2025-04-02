@@ -1064,7 +1064,7 @@ class GO4RExtension(omni.ext.IExt):
         self._log_message(f"Generated {len(sample_points)} sample points inside bounding box")
 
         print("Testing ray casting")
-        self._single_ray_cast_all_collisions((0.0,0.0,0.0), (1.0,0.0,0.0), 1000.0)
+        self._single_ray_cast_to_mesh((0.0,0.0,0.0), (1.0,0.0,0.0), 1000.0)
 
         return sample_points
 
@@ -1309,8 +1309,8 @@ class GO4RExtension(omni.ext.IExt):
                     voxel_extent = carb.Float3(voxel_size, voxel_size, voxel_size)
                     
                     # Check if the voxel center is inside the mesh
+                    # overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath()) #This only generates vozels at the edges of the mesh! Use _is_pont_in_mesh instead
                     center_inside = self._is_point_in_mesh(voxel_center, mesh_prim)
-                    overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath())
                     if center_inside == True:
                         voxel_centers.append(((i,k,j),voxel_center))
 
@@ -1417,11 +1417,14 @@ class GO4RExtension(omni.ext.IExt):
     
         return prim_found
     
-    def _single_ray_cast_all_collisions(self, 
-                                        origin:Tuple[float, float, float]=(0.0,0.0,0.0), 
-                                        direction:Tuple[float, float, float]=(1.0,0.0,0.0), 
-                                        max_dist: float = 100.0) -> dict:
-        """Projects a raycast forward along x axis with specified offset
+    def _single_ray_cast_to_mesh(self, 
+                                origin:Tuple[float, float, float]=(0.0,0.0,0.0), 
+                                direction:Tuple[float, float, float]=(1.0,0.0,0.0), 
+                                max_dist: float=100.0,
+                                prim_path: str = None):
+        """Projects a raycast in the given direction and checks for intersection with the target prim.
+        If the ray hits the target prim, it returns the path to the geometry that was hit and the hit distance.
+        If there is no target prim, it checks for intersection with anything with collision enabled in the entire scene annd returns the paths to the geometry that was hit and the hit distances.
 
         See https://docs.omniverse.nvidia.com/kit/docs/omni_physics/105.1/extensions/runtime/source/omni.physx/docs/index.html#raycast
 
@@ -1430,21 +1433,30 @@ class GO4RExtension(omni.ext.IExt):
             orientation (np.array): origin's orientation for ray cast
             offset (np.array): offset for ray cast
             max_dist (float, optional): maximum distance to test for collisions in stage units. Defaults to 100.0.
+            prim_path (str, optional): path to the target prim. If None, will check for intersection with anything with collision enabled in the entire scene. Defaults to None.
 
         Returns:
             typing.Tuple[typing.Union[None, str], float]: path to geometry that was hit and hit distance, returns None, 10000 if no hit occurred
         """
-        # print(f"Raycast origin: {origin}, direction: {ray_dir}, max_dist: {max_dist}")
+        prim_path = str(prim_path)
+        ray_hits = []
 
         def report_raycast(hit):
-            print(f"Hit: {hit}")
-            return hit
+            nonlocal ray_hits
+            if prim_path is None:
+                # Add the hit to the list of hits
+                ray_hits += (hit.collision, hit.distance)
+            elif hit.collision == prim_path:
+                ray_hits = (hit.collision, hit.distance)
+                return True
+            return False
+            
 
-        hit = omni.physx.get_physx_scene_query_interface().raycast_all(origin, direction, max_dist, report_raycast, True)
-        print(f"Raycast hit: {hit}")
-        if hit:
-            return hit
-        return None
+        omni.physx.get_physx_scene_query_interface().raycast_all(origin, direction, max_dist, report_raycast, True)
+        if ray_hits == []:
+            # No hit found
+            return None, max_dist
+        return ray_hits
         
 
     def _is_point_in_mesh(self, point:Tuple[float,float,float], mesh_prim:Usd.Prim) -> bool:
@@ -1452,7 +1464,6 @@ class GO4RExtension(omni.ext.IExt):
         Check if a point is inside a mesh using ray casting.
         This is accurate and works well even for sparse meshes.
         """
-        self._log_message(f"Checking if point {point} is inside mesh {mesh_prim.GetPath()}")
 
         # Target the prim mash
         self.target_prim_collision(prim_utils.get_prim_path(mesh_prim))
@@ -1469,7 +1480,6 @@ class GO4RExtension(omni.ext.IExt):
         if (point[0] < min_point[0] or point[0] > max_point[0] or
             point[1] < min_point[1] or point[1] > max_point[1] or
             point[2] < min_point[2] or point[2] > max_point[2]):
-            self._log_message(f"Point {point} is outside the bounding box of the mesh")
             return False
 
         # Directions for ray casting
@@ -1495,16 +1505,16 @@ class GO4RExtension(omni.ext.IExt):
 
         for direction in directions:
             # Use ray_cast 
-            if not self._single_ray_cast_all_collisions(
-                point,            # Origin point as 3D vector np.array
-                direction,        # Direction as a 3D vector np.array
-                ray_length        # Ray length
-            ):
-                self._log_message(f"Point {point} was determined to be outside the mesh.")
+            hit= self._single_ray_cast_to_mesh(
+                    point,              # Origin point as 3D vector np.array
+                    direction,          # Direction as a 3D vector np.array
+                    ray_length,         # Ray length
+                    mesh_prim.GetPath() # Prim path to check for intersection
+                )
+            if hit[0] is None:
                 return False
 
         # If we reach here, the point is inside the mesh
-        self._log_message(f"Point {point} was determined to be inside the mesh.")
         return True
 
     def _apply_early_fusion(self, entropies: List[float]) -> float:
