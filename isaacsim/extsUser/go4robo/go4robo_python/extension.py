@@ -151,7 +151,7 @@ class GO4RExtension(omni.ext.IExt):
                             with ui.HStack(spacing=5):
                                 ui.Label("Perception Mesh:", width=120)
                                 self.perception_mesh_label = ui.Label("(Not selected)", style={"color": ui.color("#FF0000")})
-                                self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._voxelize_perception_mesh)
+                                self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._on_voxelize_button_clicked)
                             
                             # Show bounds of selected mesh if available
                             self.mesh_bounds_label = ui.Label("Mesh Bounds: Not selected")
@@ -1168,125 +1168,11 @@ class GO4RExtension(omni.ext.IExt):
         
         return sample_points
     
-    def voxelize_mesh(self, mesh_prim, voxel_size, parent_path):
-        """
-        Split a mesh into voxels of specified size and optionally create primitives for each voxel
-        
-        Args:
-            mesh_prim (Usd.Prim): The source mesh to voxelize
-            voxel_size (float): Size of each voxel in meters
-            create_primitives (bool): If True, creates actual mesh primitives for each voxel
-            parent_path (str): Path where voxel meshes will be created (defaults to mesh's parent)
-            
-        Returns:
-            List of voxel mesh primitives if create_primitives=True, otherwise list of voxel bounds
-        """
-        
-        # Get the mesh geometry
-        mesh_geom = UsdGeom.Mesh(mesh_prim)
-        mesh_name = mesh_prim.GetName()
-        
-        # Get the points and face indices
-        points = mesh_geom.GetPointsAttr().Get()
-        face_vertex_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
-        face_vertex_indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
-        
-        if not points or not face_vertex_counts or not face_vertex_indices:
-            self._log_message(f"Missing mesh data for {mesh_prim.GetPath()}")
-            return []
-        
-        # Get the mesh transform
-        xform = UsdGeom.Xformable(mesh_prim)
-        local_to_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-        
-        # Get the mesh bounding box
-        bounds = self._get_mesh_bounds(mesh_prim)
-        if not bounds:
-            self._log_message("Error: Could not determine mesh bounds.")
-            return []
-        
-        min_point, max_point = bounds
-        
-        # Calculate grid dimensions
-        grid_size_x = int((max_point[0] - min_point[0]) / voxel_size)
-        grid_size_y = int((max_point[1] - min_point[1]) / voxel_size)
-        grid_size_z = int((max_point[2] - min_point[2]) / voxel_size)
-        
-        self._log_message(f"Creating voxel grid: {grid_size_x}x{grid_size_y}x{grid_size_z} " + 
-                        f"({grid_size_x * grid_size_y * grid_size_z} potential voxels)")
+    def _on_voxelize_button_clicked(self):
+        """Wrapper for the async function"""
+        asyncio.ensure_future(self._voxelize_perception_mesh())
 
-        # Create an array to store all voxel centers for later use
-        voxel_centers = []
-
-        # Iterate through the grid to find voxels intersected by triangles
-        for i in range(grid_size_x):
-            for j in range(grid_size_y):
-                for k in range(grid_size_z):
-                    # Calculate voxel center
-                    center_x = min_point[0] + (i + 0.5) * voxel_size
-                    center_y = min_point[1] + (j + 0.5) * voxel_size
-                    center_z = min_point[2] + (k + 0.5) * voxel_size
-                    voxel_center = carb.Float3(center_x, center_y, center_z)
-                    voxel_extent = carb.Float3(voxel_size, voxel_size, voxel_size)
-                    
-                    # Check if the voxel center is inside the mesh
-                    # if _is_point_in_mesh(voxel_center, mesh_prim):
-                    overlap = asyncio.ensure_future(self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath()))
-                    if overlap:
-                        voxel_centers.append(((i,k,j),voxel_center))
-
-        # Convert voxel centers to a Vec3fArray for later use
-        self._log_message(f"Generated {len(voxel_centers)} voxel centers")
-        
-        created_voxels = []
-        stage = get_current_stage()
-        
-        # Create a mesh for each occupied voxel
-        for (i,j,k), p in voxel_centers:
-            # world_p = Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))):
-            # Calculate voxel corners
-            min_x = p[0] - voxel_size / 2
-            min_y = p[1] - voxel_size / 2
-            min_z = p[2] - voxel_size / 2
-            max_x = min_x + voxel_size
-            max_y = min_y + voxel_size
-            max_z = min_z + voxel_size
-            
-            # Define voxel as a cube
-            voxel_points = [
-                Gf.Vec3f(min_x, min_y, min_z),
-                Gf.Vec3f(max_x, min_y, min_z),
-                Gf.Vec3f(max_x, max_y, min_z),
-                Gf.Vec3f(min_x, max_y, min_z),
-                Gf.Vec3f(min_x, min_y, max_z),
-                Gf.Vec3f(max_x, min_y, max_z),
-                Gf.Vec3f(max_x, max_y, max_z),
-                Gf.Vec3f(min_x, max_y, max_z)
-            ]
-            
-            # Define the faces (6 faces, each with 4 vertices)
-            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
-            face_vertex_indices = Vt.IntArray([
-                0, 1, 2, 3,  # bottom
-                4, 5, 6, 7,  # top
-                0, 1, 5, 4,  # front
-                1, 2, 6, 5,  # right
-                2, 3, 7, 6,  # back
-                3, 0, 4, 7   # left
-            ])
-            
-            # Create voxel mesh using USD API directly
-            voxel_path = f"{parent_path}/{mesh_name}_voxel_{i}_{j}_{k}"
-            mesh_def = UsdGeom.Mesh.Define(stage, voxel_path)
-            mesh_def.CreatePointsAttr().Set(voxel_points)
-            mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
-            mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
-            created_voxels.append(mesh_def.GetPrim())
-        
-        self._log_message(f"Created {len(created_voxels)} voxel meshes")
-        return created_voxels
-
-    def _voxelize_perception_mesh(self):
+    async def _voxelize_perception_mesh(self):
         """Select a mesh to use as the target perception area"""
         # Get current selection
         selection = self._usd_context.get_selection().get_selected_prim_paths()
@@ -1342,7 +1228,7 @@ class GO4RExtension(omni.ext.IExt):
                 max_point[2] - min_point[2]
             ]
 
-        voxels = self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=xform_path)
+        voxels = await self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=xform_path)
 
         if voxels:
             self._log_message(f"Created {len(voxels)} voxel meshes inside {mesh_path}")
@@ -1350,6 +1236,131 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"No voxels created for {mesh_path}")
         
         self._log_message(f"Selected mesh '{mesh_path}' as perception area")
+
+    async def voxelize_mesh(self, mesh_prim, voxel_size, parent_path):
+        """
+        Split a mesh into voxels of specified size and optionally create primitives for each voxel
+        
+        Args:
+            mesh_prim (Usd.Prim): The source mesh to voxelize
+            voxel_size (float): Size of each voxel in meters
+            create_primitives (bool): If True, creates actual mesh primitives for each voxel
+            parent_path (str): Path where voxel meshes will be created (defaults to mesh's parent)
+            
+        Returns:
+            List of voxel mesh primitives if create_primitives=True, otherwise list of voxel bounds
+        """
+        
+        # Get the mesh geometry
+        mesh_geom = UsdGeom.Mesh(mesh_prim)
+        mesh_name = mesh_prim.GetName()
+        
+        # Get the points and face indices
+        points = mesh_geom.GetPointsAttr().Get()
+        face_vertex_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
+        face_vertex_indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
+        
+        if not points or not face_vertex_counts or not face_vertex_indices:
+            self._log_message(f"Missing mesh data for {mesh_prim.GetPath()}")
+            return []
+        
+        # Get the mesh transform
+        xform = UsdGeom.Xformable(mesh_prim)
+        local_to_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        
+        # Get the mesh bounding box
+        bounds = self._get_mesh_bounds(mesh_prim)
+        if not bounds:
+            self._log_message("Error: Could not determine mesh bounds.")
+            return []
+        
+        min_point, max_point = bounds
+        
+        # Calculate grid dimensions
+        grid_size_x = int((max_point[0] - min_point[0]) / voxel_size)
+        grid_size_y = int((max_point[1] - min_point[1]) / voxel_size)
+        grid_size_z = int((max_point[2] - min_point[2]) / voxel_size)
+        
+        self._log_message(f"Creating voxel grid: {grid_size_x}x{grid_size_y}x{grid_size_z} " + 
+                        f"({grid_size_x * grid_size_y * grid_size_z} potential voxels)")
+
+        # Create an array to store all voxel centers for later use
+        voxel_centers = []
+
+        # Start the simulation so that we can use the collision API
+        self.timeline.play()
+        await omni.kit.app.get_app().next_update_async()
+
+        # Iterate through the grid to find voxels intersected by triangles
+        for i in range(grid_size_x):
+            for j in range(grid_size_y):
+                for k in range(grid_size_z):
+                    # Calculate voxel center
+                    center_x = min_point[0] + (i + 0.5) * voxel_size
+                    center_y = min_point[1] + (j + 0.5) * voxel_size
+                    center_z = min_point[2] + (k + 0.5) * voxel_size
+                    voxel_center = carb.Float3(center_x, center_y, center_z)
+                    voxel_extent = carb.Float3(voxel_size, voxel_size, voxel_size)
+                    
+                    # Check if the voxel center is inside the mesh
+                    # if _is_point_in_mesh(voxel_center, mesh_prim):
+                    overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath())
+                    if overlap == True:
+                        voxel_centers.append(((i,k,j),voxel_center))
+
+        # Pause the simulation
+        self.timeline.pause()
+
+        # Convert voxel centers to a Vec3fArray for later use
+        self._log_message(f"Generated {len(voxel_centers)} voxel centers")
+        
+        created_voxels = []
+        stage = get_current_stage()
+        
+        # Create a mesh for each occupied voxel
+        for (i,j,k), p in voxel_centers:
+            # world_p = Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))):
+            # Calculate voxel corners
+            min_x = p[0] - voxel_size / 2
+            min_y = p[1] - voxel_size / 2
+            min_z = p[2] - voxel_size / 2
+            max_x = min_x + voxel_size
+            max_y = min_y + voxel_size
+            max_z = min_z + voxel_size
+            
+            # Define voxel as a cube
+            voxel_points = [
+                Gf.Vec3f(min_x, min_y, min_z),
+                Gf.Vec3f(max_x, min_y, min_z),
+                Gf.Vec3f(max_x, max_y, min_z),
+                Gf.Vec3f(min_x, max_y, min_z),
+                Gf.Vec3f(min_x, min_y, max_z),
+                Gf.Vec3f(max_x, min_y, max_z),
+                Gf.Vec3f(max_x, max_y, max_z),
+                Gf.Vec3f(min_x, max_y, max_z)
+            ]
+            
+            # Define the faces (6 faces, each with 4 vertices)
+            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
+            face_vertex_indices = Vt.IntArray([
+                0, 1, 2, 3,  # bottom
+                4, 5, 6, 7,  # top
+                0, 1, 5, 4,  # front
+                1, 2, 6, 5,  # right
+                2, 3, 7, 6,  # back
+                3, 0, 4, 7   # left
+            ])
+            
+            # Create voxel mesh using USD API directly
+            voxel_path = f"{parent_path}/{mesh_name}_voxel_{i}_{j}_{k}"
+            mesh_def = UsdGeom.Mesh.Define(stage, voxel_path)
+            mesh_def.CreatePointsAttr().Set(voxel_points)
+            mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
+            mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            created_voxels.append(mesh_def.GetPrim())
+        
+        self._log_message(f"Created {len(created_voxels)} voxel meshes")
+        return created_voxels
 
     def _get_mesh_bounds(self, mesh_prim):
         """Get the bounding box of a mesh prim"""
@@ -1369,7 +1380,7 @@ class GO4RExtension(omni.ext.IExt):
         
         return None
     
-    async def _does_box_overlap_prim(self, origin:carb.Float3, extent:carb.Float3, prim_path):
+    def _does_box_overlap_prim(self, origin:carb.Float3, extent:carb.Float3, prim_path) -> bool:
         """Check if a box overlaps with a given prim path"""
 
         # Target the prim mash
@@ -1390,15 +1401,13 @@ class GO4RExtension(omni.ext.IExt):
             nonlocal prim_found
             if overlap.collision == prim_path:
                 print(f" - Found prim: {overlap.collision}")
+                prim_found = True
                 # Now that we have found our prim, return False to abort further search.voxel_size
                 return False
             return True
 
         try:
-            self.timeline.play()
-            await omni.kit.app.get_app().next_update_async()
             omni.physx.get_physx_scene_query_interface().overlap_box(half_extent, origin, rotation, report_overlap, False)
-            self.timeline.stop()
         
         except Exception as e:
             self._log_message(f"Error in overlap_box: {str(e)}")
