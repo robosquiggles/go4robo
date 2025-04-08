@@ -212,8 +212,6 @@ class MonoCamera3D(Sensor3D):
         self.h_aperture = h_aperture
         self.v_aperture = v_aperture
         self.aspect_ratio = aspect_ratio
-        self.h_res = h_res
-        self.v_res = v_res
         self.body = body
         self.cost = cost
         if isinstance(focal_point, (list, tuple)):
@@ -226,6 +224,9 @@ class MonoCamera3D(Sensor3D):
 
         self.h_fov = np.rad2deg(2 * np.arctan(h_aperture / (2 * focal_length)))
         self.v_fov = np.rad2deg(2 * np.arctan(v_aperture / (2 * focal_length)))
+
+        self.h_res = self.h_fov/h_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
+        self.v_res = self.v_fov/v_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
 
         self.max_range = 100.0 # TODO: This should be clipping distance?
         self.min_range = 0.0 # TODO: This should be clipping distance?
@@ -320,6 +321,7 @@ class Sensor3D_Instance:
     def create_ray_casters(self, stage, context):
         """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
         import omni.kit.commands
+        import isaacsim.core.utils.transformations as transformations_utils
 
         if self.ray_casters == []: # No ray casters are loaded
             if isinstance(self.sensor, StereoCamera3D):
@@ -351,39 +353,35 @@ class Sensor3D_Instance:
                         min_range=sensor.min_range,
                         max_range=sensor.max_range,
                         draw_points=True,
-                        draw_lines=True,
+                        draw_lines=False,
                         horizontal_fov=sensor.h_fov,
                         vertical_fov=sensor.v_fov,
                         horizontal_resolution=sensor.h_res,
                         vertical_resolution=sensor.v_res,
                         rotation_rate=0.0, # Generate all points at once!
-                        high_lod=False,
+                        high_lod=True, # Generate all points at once!
                         yaw_offset=0.0,
                         enable_semantics=False)
+                    
+                    #If the ray caster is a MonoCamera3D, set the transform to match the sensor (which is rotated -90 about x, and +90 about y)
+                    rc_xform = UsdGeom.Xformable(prim)
+                    rc_world_transform = rc_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                    
+                    parent_world_transform = UsdGeom.Xformable(prim_utils.get_prim_at_path(parent_path)).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+
+                    omni.kit.commands.execute('TransformPrimCommand',
+                        path=prim.GetPath(),
+                        old_transform_matrix=rc_world_transform,
+                        new_transform_matrix=sensor_world_transform,
+                        time_code=Usd.TimeCode(),
+                        had_transform_at_key=False)
+
                 if result:
                     self.ray_casters.append(prim)
                 else:
                     print(f"Failed to create ray caster for {sensor.name} at {self.path}. Skipping!")
         else:
             print(f"Ray casters already exist for {self.name}. Skipping creation.")
-        # Set the transform of the ray casters to match the sensor
-        for i, ray_caster in enumerate(self.ray_casters):
-            if isinstance(self.sensor, StereoCamera3D):
-                sensor = self.sensor.__getattribute__('sensor' + str(i+1))
-            else:
-                sensor = self.sensor
-
-            rc_xform = UsdGeom.Xformable(ray_caster)
-            rc_world_transform = rc_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-
-            sensor_xform = UsdGeom.Xformable(sensor.body)
-            sensor_world_transform = sensor_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            # omni.kit.commands.execute('TransformPrimCommand',
-            #     path=ray_caster.GetPath(),
-            #     old_transform_matrix=rc_world_transform,
-            #     new_transform_matrix=sensor_world_transform,
-            #     time_code=Usd.TimeCode(),
-            #     had_transform_at_key=False)
 
         return self.ray_casters
     

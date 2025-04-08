@@ -535,6 +535,17 @@ class GO4RExtension(omni.ext.IExt):
                 # Load the camera information into a MonoCamera3D
                 cam_prim = UsdGeom.Camera(prim)
 
+                # Get the aspect ratio
+                aspect_ratio = self._get_prim_attribute(prim, "aspectRatio", None)
+                if aspect_ratio is None:
+                    v_aperture = cam_prim.GetVerticalApertureAttr().Get()
+                    h_aperture = cam_prim.GetHorizontalApertureAttr().Get()
+                    if v_aperture is not None and h_aperture is not None:
+                        aspect_ratio = h_aperture / v_aperture
+                if aspect_ratio is None:
+                    self._log_message(f"Warning: Could not find aspect ratio for camera {prim.GetName()}, defaulting to 4:3")
+                    aspect_ratio = 4.0/3.0
+
                 # Get resolution more robustly - try different attribute names or patterns
                 resolution = None
                 # Try standard resolution attribute
@@ -554,16 +565,16 @@ class GO4RExtension(omni.ext.IExt):
                 # If resolution still not found, try to infer from other parameters
                 if resolution is None:
                     # Log that we couldn't find resolution directly
-                    self._log_message(f"Warning: Could not find resolution for camera {prim.GetName()}")
+                    self._log_message(f"Warning: Could not find resolution for camera {prim.GetName()}, defaulting to 720p")
                     # Default to HD resolution as fallback
-                    resolution = (1280, 720)
+                    resolution = (720, 720*aspect_ratio)
 
                 try:
                     cam3d = MonoCamera3D(name=name,
                                         focal_length=cam_prim.GetFocalLengthAttr().Get(),
                                         h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
                                         v_aperture=cam_prim.GetVerticalApertureAttr().Get(),
-                                        aspect_ratio=self._get_prim_attribute(prim, "aspectRatio", None),
+                                        aspect_ratio=aspect_ratio,
                                         h_res=resolution[0] if resolution else None,
                                         v_res=resolution[1] if resolution else None,
                                         body=prim,
@@ -1172,7 +1183,12 @@ class GO4RExtension(omni.ext.IExt):
     def _on_voxelize_button_clicked(self):
         """Wrapper for the async function"""
         async def _initialize_and_voxelize():
-        # Ensure physics system is ready
+            # Force a complete physics reset
+            
+            
+            # Wait for stage to stabilize
+            await omni.kit.app.get_app().next_update_async()    
+
             self.timeline.play()
             for _ in range(3):  # Wait for a few frames to ensure physics is ready
                 await omni.kit.app.get_app().next_update_async()
@@ -1464,10 +1480,15 @@ class GO4RExtension(omni.ext.IExt):
             nonlocal ray_hits
             if prim_path is None:
                 # Add the hit to the list of hits
-                ray_hits += (hit.collision, hit.distance)
+                ray_hits.append((hit.collision, hit.distance))
             elif hit.collision == prim_path:
+                # If the hit is the target prim, add it to the list of hits
                 ray_hits = (hit.collision, hit.distance)
                 return True
+            else:
+                self._log_message(f"Hit something other than the target prim {prim_path}: hit {hit.collision} at distance {hit.distance}")
+                # If the hit is not the target prim, ignore it
+                # ray_hits.append((hit.collision, hit.distance))
             return False
             
 
@@ -1684,5 +1705,4 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Num points hitting {mesh_prim_path}: {len(points)}")
 
         return points
-
 
