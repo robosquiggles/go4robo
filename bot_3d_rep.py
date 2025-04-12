@@ -73,6 +73,7 @@ class TF:
             [ 0, 1, 0, 0],
             [-s, 0, c, 0],
             [ 0, 0, 0, 1]
+            
         ])
     
     # Rotation matrix around Z-axis
@@ -86,7 +87,13 @@ class TF:
         ])
     
     def inverse_matrix(tf_matrix):
-        return np.linalg.inv(tf_matrix)
+        """Calculate the inverse of a transformation matrix."""
+        # Cast to a np.ndarray if not already
+        if not isinstance(tf_matrix, np.ndarray):
+            tf_matrix_np = np.array(tf_matrix)
+        else:
+            tf_matrix_np = tf_matrix
+        return np.linalg.inv(tf_matrix_np)
 
 
 class Sensor3D:
@@ -321,13 +328,16 @@ class Sensor3D_Instance:
     def create_ray_casters(self, stage, context):
         """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
         import omni.kit.commands
-        import isaacsim.core.utils.transformations as transformations_utils
+        import isaacsim.core.utils.transformations as tf_utils
+        import isaacsim.core.utils.xforms as xforms_utils
+        
 
         if self.ray_casters == []: # No ray casters are loaded
             if isinstance(self.sensor, StereoCamera3D):
                 sensors = [self.sensor.sensor1, self.sensor.sensor2]
             else:
                 sensors = [self.sensor]
+
             for sensor in sensors:
                 parent_path = self.get_ancestor_path(1)
                 ray_caster_path = parent_path + f'/GO4R_RAYCASTER_{sensor.name}'
@@ -347,13 +357,13 @@ class Sensor3D_Instance:
                                               old_selected_paths=[context.get_selection().get_selected_prim_paths()],
                                               new_selected_paths=[self.get_ancestor_path(1)])
                     #Then create the ray caster at the selection
-                    result, prim = omni.kit.commands.execute('RangeSensorCreateLidar',
+                    result, rc_prim = omni.kit.commands.execute('RangeSensorCreateLidar',
                         path=f'/GO4R_RAYCASTER_{sensor.name}',
                         parent=parent_path,
                         min_range=sensor.min_range,
                         max_range=sensor.max_range,
-                        draw_points=True,
-                        draw_lines=False,
+                        draw_points=False,
+                        draw_lines=True,
                         horizontal_fov=sensor.h_fov,
                         vertical_fov=sensor.v_fov,
                         horizontal_resolution=sensor.h_res,
@@ -363,21 +373,39 @@ class Sensor3D_Instance:
                         yaw_offset=0.0,
                         enable_semantics=False)
                     
-                    #If the ray caster is a MonoCamera3D, set the transform to match the sensor (which is rotated -90 about x, and +90 about y)
-                    rc_xform = UsdGeom.Xformable(prim)
-                    rc_world_transform = rc_xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-                    
-                    parent_world_transform = UsdGeom.Xformable(prim_utils.get_prim_at_path(parent_path)).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+                    #If the ray caster is a MonoCamera3D, set the transform to match the Camera (which is rotated 90 about x, and -90 about y)
+                    if isinstance(sensor, MonoCamera3D):
 
-                    omni.kit.commands.execute('TransformPrimCommand',
-                        path=prim.GetPath(),
-                        old_transform_matrix=rc_world_transform,
-                        new_transform_matrix=sensor_world_transform,
-                        time_code=Usd.TimeCode(),
-                        had_transform_at_key=False)
+                        cam_prim = prim_utils.get_prim_at_path(self.path)
+                        parent_prim = prim_utils.get_prim_at_path(parent_path)
+
+                        # Get the original/current rc local transform
+                        rc_local_transform_orig = Gf.Matrix4d(tf_utils.get_relative_transform(parent_prim, rc_prim))
+
+                        # Get the camera local transform
+                        cam_local_pose = xforms_utils.get_local_pose(str(cam_prim.GetPath()))
+                        cam_local_tf_from_pose = tf_utils.tf_matrix_from_pose(*cam_local_pose)
+
+                        cam_to_rc_tf = TF.rotation_y_matrix(np.pi/2) @ TF.rotation_x_matrix(-np.pi/2)
+                        cam_to_rc_tf = TF.inverse_matrix(np.array([[ 0.0, -1.0,  0.0,  0.0],
+                                                                   [ 0.0,  0.0,  1.0,  0.0],
+                                                                   [-1.0,  0.0,  0.0,  0.0],
+                                                                   [ 0.0,  0.0,  0.0,  1.0]]))
+                        
+
+                        # Get the new ray caster local transform
+                        rc_local_transform = Gf.Matrix4d(cam_to_rc_tf @ cam_local_tf_from_pose.T) #TODO Try to use Torch/Tensors?
+
+                        # Transform the ray caster to the correct camera transform
+                        omni.kit.commands.execute('TransformPrimCommand',
+                            path=rc_prim.GetPath(),
+                            old_transform_matrix=rc_local_transform_orig,
+                            new_transform_matrix=rc_local_transform,
+                            time_code=Usd.TimeCode(),
+                            had_transform_at_key=False)
 
                 if result:
-                    self.ray_casters.append(prim)
+                    self.ray_casters.append(rc_prim)
                 else:
                     print(f"Failed to create ray caster for {sensor.name} at {self.path}. Skipping!")
         else:
