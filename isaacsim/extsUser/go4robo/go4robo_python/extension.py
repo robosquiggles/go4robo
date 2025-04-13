@@ -158,7 +158,7 @@ class GO4RExtension(omni.ext.IExt):
                                         ui.Label("Perception Mesh:", width=120)
                                         self.perception_mesh_label = ui.Label("(Not selected)", style={"color": ui.color("#FF0000")})
                                         self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._on_voxelize_button_clicked)
-                                        self.voxelize_progress_bar = ui.ProgressBar(width=200, height=5, val=0.0, style={"background_color": ui.color("#CCCCCC")})
+                                        self.voxelize_progress_bar = ui.ProgressBar(width=120, height=36, val=0.0)
 
                             # Voxel Groups Section
                             with ui.CollapsableFrame("Voxel Groups", height=0):
@@ -357,7 +357,7 @@ class GO4RExtension(omni.ext.IExt):
         
         # Update the UI
         self._update_voxel_groups_ui()
-        self._log_message(f"Updated {len(self.weighted_voxels)} voxel groups based on stage hierarchy")
+        # self._log_message(f"Updated {len(self.weighted_voxels)} voxel groups based on stage hierarchy")
 
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
@@ -1115,7 +1115,6 @@ class GO4RExtension(omni.ext.IExt):
 
             voxels = await self._voxelize_perception_mesh()
             if voxels:
-                self.weighted_voxels.update = {max(self.weighted_voxels.keys())+1 : (voxels, 1.0)}  # Replace first group with actual voxels
                 self._update_voxel_groups_ui()  # Update UI to show voxels in first group
             return voxels
         
@@ -1140,12 +1139,6 @@ class GO4RExtension(omni.ext.IExt):
         xform_prim = stage.GetPrimAtPath(xform_path)
         if not xform_prim:
             xform_prim = UsdGeom.Xform.Define(stage, xform_path)
-        else:
-            # First clear any previous voxel meshes from "/World/GO4R_PerceptionVolume"
-            for child in xform_prim.GetChildren():
-                if child.IsA(UsdGeom.Mesh):
-                    child.GetStage().RemovePrim(child.GetPath())
-            self._log_message("Cleared previous voxel meshes")
 
         # Use the first selected item
         mesh_path = selection[0]
@@ -1166,7 +1159,16 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Error: Cannot apply CollisionAPI to {mesh_path}")
             return
         
-        voxels = await self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=xform_path)
+        # Create an XFrom with the name of the mesh under the perception volume to add the voxels to
+        mesh_name = mesh_prim.GetName()
+        voxel_grp_xform_path = f"{xform_path}/{mesh_name}"
+        i=0
+        while stage.GetPrimAtPath(voxel_grp_xform_path):
+            voxel_grp_xform_path = f"{xform_path}/{mesh_name}_{i}"
+            i += 1
+        voxel_grp_xform_prim = UsdGeom.Xform.Define(stage, voxel_grp_xform_path)
+        
+        voxels = await self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=voxel_grp_xform_path)
         self.voxelize_progress_bar.model.set_value(1.0)  # Set progress bar to complete
 
         if voxels:
@@ -1254,7 +1256,7 @@ class GO4RExtension(omni.ext.IExt):
                     
                     # Check if the voxel center is inside the mesh
                     # overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath()) #This only generates vozels at the edges of the mesh! Use _is_pont_in_mesh instead
-                    center_inside = self._is_point_in_mesh(voxel_center, mesh_prim)
+                    center_inside = await self._is_point_in_mesh(voxel_center, mesh_prim)
                     if center_inside == True:
                         voxel_centers.append(((i,j,k),voxel_center))
                     processed_voxels += 1
@@ -1413,7 +1415,7 @@ class GO4RExtension(omni.ext.IExt):
         return ray_hits
         
 
-    def _is_point_in_mesh(self, point:Tuple[float,float,float], mesh_prim:Usd.Prim) -> bool:
+    async def _is_point_in_mesh(self, point:Tuple[float,float,float], mesh_prim:Usd.Prim) -> bool:
         """
         Check if a point is inside a mesh using ray casting.
         This is accurate and works well even for sparse meshes.
@@ -1421,6 +1423,8 @@ class GO4RExtension(omni.ext.IExt):
 
         # Target the prim mash
         self.target_prim_collision(prim_utils.get_prim_path(mesh_prim))
+
+        await self._ensure_physics_updated()
 
         # Quick bounds check first to avoid unnecessary calculations
         bounds = self._get_mesh_bounds(mesh_prim)
@@ -1605,6 +1609,20 @@ class GO4RExtension(omni.ext.IExt):
         else:
             self._log_message(f"Prim {prim.GetPath()} does not have a CollisionAPI, skipping")
 
+
+    async def _ensure_physics_updated(self):
+        """Ensures the physics scene is updated by stepping the simulation if paused, or waiting a frame if playing.
+        Call with `await self._ensure_physics_updated()` to ensure the physics scene is updated."""
+        was_playing = self.timeline.is_playing()
+        if not was_playing:
+            # If not playing, play, wait a frame, then pause
+            self.timeline.play()
+            # Wait a frame for physics changes to propagate
+            await omni.kit.app.get_app().next_update_async() 
+            self.timeline.pause()
+        else:
+            # If already playing, just wait a frame
+            await omni.kit.app.get_app().next_update_async()
     
     async def _get_points_raycast(self, sensor_instance:Sensor3D_Instance, mesh_prim_path:Sdf.Path) -> List[Tuple[Gf.Vec3d, str, float]]:
         """Get the number of points from a raycast that land on the given prim"""
