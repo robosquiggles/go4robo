@@ -298,8 +298,9 @@ class GO4RExtension(omni.ext.IExt):
             self.disable_ui_element(self.select_mesh_btn, text_color=ui.color("#FF0000"))
             self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
 
-        # Check if any of the changed objects are under our perception volume
-        self._update_voxel_groups_from_stage()
+        # If /World/GO4R_PerceptionVolume exists, update the voxel groups found there
+        if get_current_stage().GetPrimAtPath("/World/GO4R_PerceptionVolume"):
+            self._update_voxel_groups_from_stage()
 
     def _update_voxel_groups_from_stage(self):
         """Update voxel groups based on XForm hierarchy under GO4R_PerceptionVolume"""
@@ -1173,7 +1174,7 @@ class GO4RExtension(omni.ext.IExt):
 
             omni.kit.commands.execute('ToggleActivePrims',
                 stage_or_context=omni.usd.get_context().get_stage(),
-                prim_paths=[self.perception_mesh_path],
+                prim_paths=[mesh_path],
                 active=False)
 
         else:
@@ -1255,7 +1256,7 @@ class GO4RExtension(omni.ext.IExt):
                     # overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath()) #This only generates vozels at the edges of the mesh! Use _is_pont_in_mesh instead
                     center_inside = self._is_point_in_mesh(voxel_center, mesh_prim)
                     if center_inside == True:
-                        voxel_centers.append(((i,k,j),voxel_center))
+                        voxel_centers.append(((i,j,k),voxel_center))
                     processed_voxels += 1
                     self.voxelize_progress_bar.model.set_value(processed_voxels / total_voxels /2) # Update progress bar up to 50%
 
