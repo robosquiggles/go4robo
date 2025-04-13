@@ -1215,7 +1215,6 @@ class GO4RExtension(omni.ext.IExt):
         
         # Get the mesh transform
         xform = UsdGeom.Xformable(mesh_prim)
-        local_to_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         
         # Get the mesh bounding box
         bounds = self._get_mesh_bounds(mesh_prim)
@@ -1236,9 +1235,9 @@ class GO4RExtension(omni.ext.IExt):
         # Create an array to store all voxel centers for later use
         voxel_centers = []
 
-        # Start the simulation so that we can use the collision API
-        self.timeline.play()
-        await omni.kit.app.get_app().next_update_async()
+        # Target the prim mesh for ray casting
+        self.target_prim_collision(prim_utils.get_prim_path(mesh_prim))
+        await self._ensure_physics_updated(pause=False) # Don't pause the simulation
 
         # Iterate through the grid to find voxels intersected by triangles
         total_voxels = grid_size_x * grid_size_y * grid_size_z
@@ -1256,7 +1255,7 @@ class GO4RExtension(omni.ext.IExt):
                     
                     # Check if the voxel center is inside the mesh
                     # overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath()) #This only generates vozels at the edges of the mesh! Use _is_pont_in_mesh instead
-                    center_inside = await self._is_point_in_mesh(voxel_center, mesh_prim)
+                    center_inside = self._is_point_in_mesh(voxel_center, mesh_prim)
                     if center_inside == True:
                         voxel_centers.append(((i,j,k),voxel_center))
                     processed_voxels += 1
@@ -1415,16 +1414,11 @@ class GO4RExtension(omni.ext.IExt):
         return ray_hits
         
 
-    async def _is_point_in_mesh(self, point:Tuple[float,float,float], mesh_prim:Usd.Prim) -> bool:
+    def _is_point_in_mesh(self, point:Tuple[float,float,float], mesh_prim:Usd.Prim) -> bool:
         """
         Check if a point is inside a mesh using ray casting.
         This is accurate and works well even for sparse meshes.
         """
-
-        # Target the prim mash
-        self.target_prim_collision(prim_utils.get_prim_path(mesh_prim))
-
-        await self._ensure_physics_updated()
 
         # Quick bounds check first to avoid unnecessary calculations
         bounds = self._get_mesh_bounds(mesh_prim)
@@ -1610,7 +1604,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Prim {prim.GetPath()} does not have a CollisionAPI, skipping")
 
 
-    async def _ensure_physics_updated(self):
+    async def _ensure_physics_updated(self, pause=True):
         """Ensures the physics scene is updated by stepping the simulation if paused, or waiting a frame if playing.
         Call with `await self._ensure_physics_updated()` to ensure the physics scene is updated."""
         was_playing = self.timeline.is_playing()
@@ -1619,10 +1613,13 @@ class GO4RExtension(omni.ext.IExt):
             self.timeline.play()
             # Wait a frame for physics changes to propagate
             await omni.kit.app.get_app().next_update_async() 
-            self.timeline.pause()
         else:
             # If already playing, just wait a frame
             await omni.kit.app.get_app().next_update_async()
+        
+        if pause:
+                # Pause the simulation again
+                self.timeline.pause()
     
     async def _get_points_raycast(self, sensor_instance:Sensor3D_Instance, mesh_prim_path:Sdf.Path) -> List[Tuple[Gf.Vec3d, str, float]]:
         """Get the number of points from a raycast that land on the given prim"""

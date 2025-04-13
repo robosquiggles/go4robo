@@ -343,7 +343,7 @@ class Sensor3D_Instance:
                 ray_caster_path = parent_path + f'/GO4R_RAYCASTER_{sensor.name}'
                 # First check the stage for the ray caster
                 if stage.GetPrimAtPath(ray_caster_path).IsValid():
-                    print(f"Ray caster {ray_caster_path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
+                    # print(f"Ray caster {ray_caster_path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
                     self.ray_casters.append(prim_utils.get_prim_at_path(ray_caster_path))
                     continue
 
