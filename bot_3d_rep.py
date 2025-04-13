@@ -497,6 +497,14 @@ class Bot3D:
             if isinstance(sensor_instance.sensor, sensor_type):
                 sensor_instances.append(sensor_instance)
         return sensor_instances
+    
+    def get_ray_casters(self):
+        """Returns a list of all the ray casters in the bot."""
+        ray_casters = []
+        for sensor_instance in self.sensors:
+            if sensor_instance.ray_casters != []:
+                ray_casters.extend(sensor_instance.ray_casters)
+        return ray_casters
 
     def add_sensor_3d(self, sensor:Sensor3D|list[Sensor3D]|None):
         """

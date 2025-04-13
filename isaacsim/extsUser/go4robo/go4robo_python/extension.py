@@ -32,6 +32,8 @@ from bot_3d_rep import *
 
 sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
+
+
 class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
     
@@ -65,28 +67,18 @@ class GO4RExtension(omni.ext.IExt):
 
         self.selected_export_path=None
 
-        # Events
-        events = self._usd_context.get_stage_event_stream()
-        self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
-
         # A place to store the robots
         self.robots = []
 
         # These just help handle the stage selection and structure
         self.previous_selection = []
         
-        # Voxel size for object representation (in meters)
+        # Perception Space Voxels
         self.voxel_size = 0.1
-        
-        # Target object types with their typical dimensions (length, width, height in meters)
-        self.target_objects = {
-            "car": {"dimensions": [4.5, 1.8, 1.5], "weight": 1.0},
-            "pedestrian": {"dimensions": [0.6, 0.6, 1.7], "weight": 1.0},
-            "cyclist": {"dimensions": [1.8, 0.6, 1.7], "weight": 1.0}, 
-            "truck": {"dimensions": [8.0, 2.5, 3.0], "weight": 1.0},
-            "cone": {"dimensions": [0.3, 0.3, 0.5], "weight": 1.0}
-        }
+        self.weighted_voxels = {} # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
+        self.xform_groups = {}  # Maps xform paths to group IDs
 
+        # Logging
         self.log_messages = []
         self.max_log_messages = 100  # Default value
         
@@ -96,6 +88,10 @@ class GO4RExtension(omni.ext.IExt):
         
         self._build_ui()
         self._window.visible = True
+
+        # Events
+        events = self._usd_context.get_stage_event_stream()
+        self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
 
     def _build_ui(self):
         """Build the UI for the extension"""
@@ -132,43 +128,53 @@ class GO4RExtension(omni.ext.IExt):
                     with ui.CollapsableFrame("Perception Entropy", height=0):
                         with ui.VStack(spacing=5, height=0):
 
-                            # Add sampling step size UI
-                            with ui.HStack(spacing=5):
-                                ui.Label("Sampling Density:", width=120)
-                                self.voxel_size_field = ui.FloatField(width=60)
-                                self.voxel_size_field.model.set_value(self.voxel_size)
-                                ui.Label("meters between sample points", width=0)
-                                
-                                def _update_step_size(value:float):
-                                    # Extract the actual float value from the model object
-                                    float_value = value.get_value_as_float()
-                                    self.voxel_size = float_value
-                                    self._log_message(f"Sampling voxel size set to {self.voxel_size} meters")
-                                
-                                self.voxel_size_field.model.add_value_changed_fn(_update_step_size)
-                                
-                            # Add mesh selection UI
-                            with ui.HStack(spacing=5):
-                                ui.Label("Perception Mesh:", width=120)
-                                self.perception_mesh_label = ui.Label("(Not selected)", style={"color": ui.color("#FF0000")})
-                                self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._on_voxelize_button_clicked)
-                                self.voxelize_progress_bar = ui.ProgressBar(width=200, height=5, val=0.0, style={"background_color": ui.color("#CCCCCC")})
-                            
-                            # Show bounds of selected mesh if available
-                            self.mesh_bounds_label = ui.Label("Mesh Bounds: Not selected")
-                        
-                            with ui.CollapsableFrame("Object Types", height=0):
+                            # Add a label with instructions
+                            with ui.CollapsableFrame("Instructions", height=0, collapsed=True):
                                 with ui.VStack(spacing=5, height=0):
-                                    for obj_type in self.target_objects:
-                                        with ui.HStack(spacing=5):
-                                            ui.Label(f"{obj_type.capitalize()}", width=100)
-                                            ui.Label("Weight:", width=50)
-                                            weight_field = ui.FloatField(width=50)
-                                            weight_field.model.set_value(self.target_objects[obj_type]["weight"])
-                                            weight_field.model.add_value_changed_fn(
-                                                lambda w, obj=obj_type: self._update_object_weight(obj, w)
-                                            )
-                    
+                                    ui.Label("The perception Space is a collection of voxels that represent the environment.\nVoxels can be grouped and weighted according to the importance of being able to see in that volume.")
+                                    ui.Label("Select a mesh and then click 'Voxelize' to create a voxel group.")
+                                    ui.Label("Move voxels from one group to another by dragging them in the stage (See 'GO4R_PerceptionSpace).")
+                                    ui.Label("Adjust the importance/weight of each group with the textbox.")
+
+                            # Add sampling step size UI
+                            with ui.CollapsableFrame("Voxelization", height=0):
+                                with ui.VStack(spacing=5, height=0):
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Sampling Density:", width=120)
+                                        self.voxel_size_field = ui.FloatField(width=60)
+                                        self.voxel_size_field.model.set_value(self.voxel_size)
+                                        ui.Label("meters between sample points", width=0)
+                                        
+                                        def _update_step_size(value:float):
+                                            # Extract the actual float value from the model object
+                                            float_value = value.get_value_as_float()
+                                            self.voxel_size = float_value
+                                            self._log_message(f"Sampling voxel size set to {self.voxel_size} meters")
+                                        
+                                        self.voxel_size_field.model.add_value_changed_fn(_update_step_size)
+                                        
+                                    # Add mesh selection UI
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Perception Mesh:", width=120)
+                                        self.perception_mesh_label = ui.Label("(Not selected)", style={"color": ui.color("#FF0000")})
+                                        self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._on_voxelize_button_clicked)
+                                        self.voxelize_progress_bar = ui.ProgressBar(width=200, height=5, val=0.0, style={"background_color": ui.color("#CCCCCC")})
+
+                            # Voxel Groups Section
+                            with ui.CollapsableFrame("Voxel Groups", height=0):
+                                with ui.VStack(spacing=5, height=0):
+
+                                    # Header row
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Group", width=120)
+                                        ui.Label("Weight", width=60)
+                                        ui.Label("Voxel Count", width=120)
+                                        ui.Spacer(width=120)  # Align with first column
+                                        self.add_group_btn = ui.Button("+ New Group", clicked_fn=self._add_voxel_group, height=24, style={"color": ui.color("#00FF00")})
+
+                                    # Container for dynamically added voxel groups
+                                    self.voxel_groups_container = ui.VStack(spacing=5, height=0)
+                        
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
                                 self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropy, height=36)
@@ -291,9 +297,66 @@ class GO4RExtension(omni.ext.IExt):
             self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
             self.disable_ui_element(self.select_mesh_btn, text_color=ui.color("#FF0000"))
             self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+
+        # Check if any of the changed objects are under our perception volume
+        self._update_voxel_groups_from_stage()
+
+    def _update_voxel_groups_from_stage(self):
+        """Update voxel groups based on XForm hierarchy under GO4R_PerceptionVolume"""
+        stage = get_current_stage()
+        parent_path = "/World/GO4R_PerceptionVolume"
+        parent_prim = stage.GetPrimAtPath(parent_path)
         
-        # Log the selected robots
-        self._log_message(self.selected_robot_label.text)
+        if not parent_prim:
+            self._log_message("Error: Perception volume not found in stage")
+            return
+            
+        # Track all meshes found
+        all_found_voxels = set()
+              
+        # Find all XForm children and assign group IDs
+        xform_groups = [child for child in parent_prim.GetChildren() 
+                        if child.IsA(UsdGeom.Xform) and not child.IsA(UsdGeom.Mesh)]
+        
+        # Map existing group IDs to maintain weights where possible
+        new_weighted_voxels = {}
+        
+        # Process XForm groups first
+        for xform in xform_groups:
+            custom_data = xform.GetCustomData()
+            weight = custom_data.get("perception_weight")
+            if weight is None:
+                xform.SetCustomDataByKey("perception_weight", 1.0)
+                weight = 1.0
+            xform_path = str(xform.GetPath())
+            # The group id is the last part of the path
+            group_id = xform_path.split("/")[-1]
+            
+            # Find all mesh children (voxels) under this XForm
+            voxel_meshes = []
+            for child in xform.GetChildren():
+                if child.IsA(UsdGeom.Mesh):
+                    voxel_meshes.append(child)
+                    all_found_voxels.add(str(child.GetPath()))
+                
+            new_weighted_voxels.update({group_id: (voxel_meshes, weight)})
+        
+        # Group ungrouped meshes to show the warning in the UI
+        ungrouped_voxels = []
+        for child in parent_prim.GetChildren():
+            if child.IsA(UsdGeom.Mesh) and str(child.GetPath()) not in all_found_voxels:
+                ungrouped_voxels.append(child)
+                all_found_voxels.add(str(child.GetPath()))
+        
+        if ungrouped_voxels:
+            new_weighted_voxels.update({"UNGROUPED": (ungrouped_voxels, 0.0)})
+        
+        # Update member variables
+        self.weighted_voxels = new_weighted_voxels
+        
+        # Update the UI
+        self._update_voxel_groups_ui()
+        self._log_message(f"Updated {len(self.weighted_voxels)} voxel groups based on stage hierarchy")
 
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
@@ -323,6 +386,70 @@ class GO4RExtension(omni.ext.IExt):
         """Update the log display with current messages"""
         # Join the log messages with newlines and update the StringField
         self.log_field.model.set_value("\n".join(self.log_messages))
+
+    def _update_voxel_groups_ui(self):
+        """Update the UI to show the current voxel groups"""
+        # Clear existing UI
+        self.voxel_groups_container.clear()
+        
+        with self.voxel_groups_container:
+            for group_name, (voxels, weight) in self.weighted_voxels.items():
+                    
+                with ui.HStack(spacing=5):
+
+                    if group_name != "UNGROUPED":
+                        ui.Label(group_name, width=120)
+                    else:
+                        # Special case for ungrouped voxels
+                        ui.Label("UNGROUPED", width=120, style={"color": ui.color("#FF0000")})
+                    
+                    # Weight slider
+                    weight_drag = ui.FloatDrag(width=60)
+                    weight_drag.model.set_value(weight)
+                    
+                    def make_weight_changed_fn(g_id):
+                        def on_weight_changed(value):
+                            # Update the weight for this group
+                            voxels, _ = self.weighted_voxels[g_id]
+                            self.weighted_voxels[g_id] = (voxels, value.get_value_as_float())
+
+                            # Update the custom weight data for the XForm
+                            xform_path = f"/World/GO4R_PerceptionVolume/{g_id}"
+                            xform_prim = get_current_stage().GetPrimAtPath(xform_path)
+                            if xform_prim:
+                                xform_prim.SetCustomDataByKey("perception_weight", value.get_value_as_float())
+                            else:
+                                self._log_message(f"Error: XForm {xform_path} not found in stage")
+
+                            self._log_message(f"Updated {group_name} weight to {value.get_value_as_float()}")
+                        return on_weight_changed
+                    
+                    if group_name != "UNGROUPED":
+                        weight_drag.model.add_value_changed_fn(make_weight_changed_fn(group_name))
+                    else:
+                        # Disable the weight slider for ungrouped voxels
+                        self.disable_ui_element(weight_drag, text_color=ui.color("#FF0000"))
+                    
+                    # Voxel count
+                    
+                    if group_name != "UNGROUPED":
+                        ui.Label(f"{len(voxels)}", width=120)
+                    else:
+                        ui.Label(f"{len(voxels)}", width=120, style={"color": ui.color("#FF0000")})
+
+    def _add_voxel_group(self):
+        """Add a new XForm group for voxels"""
+        # Create a new XForm under the perception volume
+        stage = get_current_stage()
+        parent_path = "/World/GO4R_PerceptionVolume"
+        
+        # Create a new XForm
+        xform_path = f"{parent_path}/VoxelGroup"
+        
+        # Update groups from stage - this will pick up the new XForm
+        self._update_voxel_groups_from_stage()
+        
+        self._log_message(f"Added new voxel group {next_group_id}")
 
     def _browse_export_path(self):
         """Open a file dialog to select export location"""
@@ -501,15 +628,11 @@ class GO4RExtension(omni.ext.IExt):
     
     def _reset_settings(self):
         """Reset all settings to default values"""
-        # Reset object weights
-        for obj_type in self.target_objects:
-            self.target_objects[obj_type]["weight"] = 1.0
         
         # Reset perception mesh settings
         self.perception_mesh = None
         self.perception_mesh_path = None
         self.perception_mesh_label.text = "(Not selected)"
-        self.mesh_bounds_label.text = "Mesh Bounds: Not selected"
         
         # Disable analyze button when mesh is reset
         self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
@@ -828,13 +951,10 @@ class GO4RExtension(omni.ext.IExt):
                                                                 with ui.VStack(spacing=2):
                                                                     self._display_sensor_instance_properties(sensor_instance)
 
-    def _update_object_weight(self, obj_type: str, weight: float):
-        """Update the weight of a specific object type"""
-        self.target_objects[obj_type]["weight"] = weight
-        self._log_message(f"Updated weight for {obj_type} to {weight}")
-
-    def _calc_perception_entropy(self):
-        """Main function to analyze all sensors on the robot"""
+    def _calc_perception_entropies(self):
+        """Main function to analyze all sensors on the robot.
+        
+        Must have a perception mesh voxelized, and at least one robot analyzed"""
         self._log_message("Starting perception entropy analysis...")
         
         # Check if we have robots to analyze
@@ -849,25 +969,26 @@ class GO4RExtension(omni.ext.IExt):
         else:
             UsdPhysics.CollisionAPI.Apply(self.perception_mesh)
 
-        results_data = {"combined": {"total": 0.0, "cameras": 0.0, "lidars": 0.0}}
+        results_data = {}
+        results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
 
         for robot in self.robots:
-            for sensor_instance in robot.sensors:
-                points = asyncio.ensure_future(self._get_points_raycast(sensor_instance, self.perception_mesh.GetPrimPath())) 
-            
-                if not points:
-                    self._log_message(f"Error: No points from {sensor_instance.name} hit; check perception mesh.")
-                    continue
-                
-                self._log_message(f"{sensor_instance.name} hit {len(points)} points")
-
-                #TODO: Add the perception entropy calculation here
+            self._calc_perception_entropy(robot)
                 
         
         # Update the results UI
         self._update_results_ui(results_data)
         
         self._log_message("Analysis complete")
+
+    async def _calc_perception_entropy(self, robot:Bot3D, voxels:List[Usd.Prim]):
+        """ Caluclate the perception entropy for a single robot."""
+
+        self._log_message(f"Calculating perception entropy for robot {robot.name}...")
+
+        for sensor_instance in robot:
+            measurements = await self._get_measurements_raycast(sensor_instance, voxels)
+        
         
     def _update_results_ui(self, results_data=None):
         """Update the results UI with entropy results for each robot"""
@@ -979,213 +1100,10 @@ class GO4RExtension(omni.ext.IExt):
         
         return relative_position, relative_rotation
     
-    def _generate_sample_points(self) -> List[Tuple[Gf.Vec3d, str, float]]:
-        """Generate sample points in the perception space"""
-        sample_points = []
-        
-        # Check if we have a valid mesh
-        if not self.perception_mesh or not self.perception_mesh.IsValid():
-            self._log_message("Error: No valid perception mesh selected. Please select a mesh first.")
-            return []
-        
-        # For more stuff that is not a mesh, use bounding box sampling
-        if not self.perception_mesh.IsA(UsdGeom.Mesh):
-            self._log_message("Warning: Selected prim is not a mesh. Using bounding box sampling instead.")
-            return self._generate_box_sample_points()
-        
-        # Get the mesh geometry
-        mesh_geom = UsdGeom.Mesh(self.perception_mesh)
-        
-        # Get the points and face indices
-        points = mesh_geom.GetPointsAttr().Get()
-        face_vertex_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
-        face_vertex_indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
-        
-        if not points or not face_vertex_counts or not face_vertex_indices:
-            self._log_message(f"Missing mesh data for {self.perception_mesh.GetPath()}. Using bounding box sampling instead.")
-            return self._generate_box_sample_points()
-        
-        # Get the mesh transform
-        xform = UsdGeom.Xformable(self.perception_mesh)
-        local_to_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-        
-        # Convert mesh to world space
-        world_points = [Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))) for p in points]
-        
-        # Get the mesh bounding box for determining sampling density
-        bounds = self._get_mesh_bounds(self.perception_mesh)
-        if not bounds:
-            self._log_message("Error: Could not determine mesh bounds.")
-            return []
-        
-        min_point, max_point = bounds
-        dx = max_point[0] - min_point[0]
-        dy = max_point[1] - min_point[1]
-        dz = max_point[2] - min_point[2]
-        
-        # Estimate total volume and target number of samples
-        volume = dx * dy * dz
-        # Adjust the density factor based on how fine-grained you want the sampling to be
-        density_factor = 1.0 / (self.voxel_size ** 3)
-        target_samples = int(volume * density_factor)
-        
-        self._log_message(f"Generating approximately {target_samples} sample points for mesh")
-        
-        # Calculate centroid of mesh to use as starting point
-        centroid = Gf.Vec3d(0, 0, 0)
-        for p in world_points:
-            centroid += p
-        if len(world_points) > 0:
-            centroid /= len(world_points)
-        
-        # Use an octree-inspired approach for adaptive sampling
-        # Start with the bounding box and recursively subdivide where needed
-        sample_points.extend(self._adaptive_sample_mesh(min_point, max_point, target_samples))
-        
-        self._log_message(f"Generated {len(sample_points)} sample points inside mesh area")
-        return sample_points
-
-    def _generate_box_sample_points(self) -> List[Tuple[Gf.Vec3d, str, float]]:
-        """Generate sample points using the bounding box approach (fallback method)"""
-        sample_points = []
-        
-        bounds = self._get_mesh_bounds(self.perception_mesh)
-        if not bounds:
-            self._log_message("Error: Could not determine mesh bounds.")
-            return []
-        
-        min_point, max_point = bounds
-        
-        # Generate sample points within mesh bounds
-        step = self.voxel_size  # Use the configurable step size
-        
-        # Place samples for each object type
-        for obj_type, obj_data in self.target_objects.items():
-            weight = obj_data["weight"]
-            
-            # Sample the mesh volume with the specified step size
-            for x in np.arange(min_point[0], max_point[0], step):
-                for y in np.arange(min_point[1], max_point[1], step):
-                    for z in np.arange(min_point[2], max_point[2], step):
-                        point = Gf.Vec3d(x, y, z)
-                        
-                        # Check if point is inside the mesh
-                        if self._is_point_in_mesh(point, self.perception_mesh):
-                            sample_points.append((point, obj_type, weight))
-        
-        self._log_message(f"Generated {len(sample_points)} sample points inside bounding box")
-
-        print("Testing ray casting")
-        self._single_ray_cast_to_mesh((0.0,0.0,0.0), (1.0,0.0,0.0), 1000.0)
-
-        return sample_points
-
-    def _adaptive_sample_mesh(self, min_corner, max_corner, target_samples, depth=0, max_depth=5):
-        """Recursively sample a region of space, focusing on areas inside the mesh"""
-        sample_points = []
-        
-        # Stop recursion if we've reached max depth or the region is too small
-        if depth >= max_depth:
-            # At max depth, apply regular grid sampling in this small region
-            step = self.voxel_size
-            
-            # Create a smaller step size for regions we're focusing on
-            adjusted_step = max(step, (max_corner[0] - min_corner[0]) / 3.0)
-            
-            # Place samples for each object type
-            for obj_type, obj_data in self.target_objects.items():
-                weight = obj_data["weight"]
-                
-                # Sample this subregion using a grid
-                for x in np.arange(min_corner[0], max_corner[0], adjusted_step):
-                    for y in np.arange(min_corner[1], max_corner[1], adjusted_step):
-                        for z in np.arange(min_corner[2], max_corner[2], adjusted_step):
-                            point = Gf.Vec3d(x, y, z)
-                            
-                            # Check if point is inside the mesh
-                            if self._is_point_in_mesh(point, self.perception_mesh):
-                                sample_points.append((point, obj_type, weight))
-            return sample_points
-        
-        # Calculate the center of the current region
-        center = (min_corner + max_corner) * 0.5
-        
-        # Probe the center point to see if it's inside the mesh
-        center_inside = self._is_point_in_mesh(center, self.perception_mesh)
-        
-        # Probe the corners to see if they're inside the mesh
-        corners = [
-            Gf.Vec3d(min_corner[0], min_corner[1], min_corner[2]),
-            Gf.Vec3d(max_corner[0], min_corner[1], min_corner[2]),
-            Gf.Vec3d(min_corner[0], max_corner[1], min_corner[2]),
-            Gf.Vec3d(max_corner[0], max_corner[1], min_corner[2]),
-            Gf.Vec3d(min_corner[0], min_corner[1], max_corner[2]),
-            Gf.Vec3d(max_corner[0], min_corner[1], max_corner[2]),
-            Gf.Vec3d(min_corner[0], max_corner[1], max_corner[2]),
-            Gf.Vec3d(max_corner[0], max_corner[1], max_corner[2])
-        ]
-        corners_inside = [self._is_point_in_mesh(c, self.perception_mesh) for c in corners]
-        
-        # If all corners and center are outside, skip this region
-        if not center_inside and not any(corners_inside):
-            return []
-        
-        # If all corners and center are inside, we can be more efficient with sampling
-        if center_inside and all(corners_inside):
-            # This region is fully inside the mesh, sample it with a coarser grid
-            adjusted_step = self.voxel_size * 2  # Coarser sampling for interior regions
-            for obj_type, obj_data in self.target_objects.items():
-                weight = obj_data["weight"]
-                
-                # Determine how many points to sample based on volume
-                dx = max_corner[0] - min_corner[0]
-                dy = max_corner[1] - min_corner[1]
-                dz = max_corner[2] - min_corner[2]
-                volume = dx * dy * dz
-                
-                # Generate a uniform sampling but with larger step size
-                for x in np.arange(min_corner[0], max_corner[0], adjusted_step):
-                    for y in np.arange(min_corner[1], max_corner[1], adjusted_step):
-                        for z in np.arange(min_corner[2], max_corner[2], adjusted_step):
-                            point = Gf.Vec3d(x, y, z)
-                            sample_points.append((point, obj_type, weight))
-            return sample_points
-        
-        # Otherwise, this region intersects the mesh boundary, subdivide it
-        mid_x = (min_corner[0] + max_corner[0]) / 2
-        mid_y = (min_corner[1] + max_corner[1]) / 2
-        mid_z = (min_corner[2] + max_corner[2]) / 2
-        
-        # Generate 8 octants
-        octants = [
-            (Gf.Vec3d(min_corner[0], min_corner[1], min_corner[2]), Gf.Vec3d(mid_x, mid_y, mid_z)),
-            (Gf.Vec3d(mid_x, min_corner[1], min_corner[2]), Gf.Vec3d(max_corner[0], mid_y, mid_z)),
-            (Gf.Vec3d(min_corner[0], mid_y, min_corner[2]), Gf.Vec3d(mid_x, max_corner[1], mid_z)),
-            (Gf.Vec3d(mid_x, mid_y, min_corner[2]), Gf.Vec3d(max_corner[0], max_corner[1], mid_z)),
-            (Gf.Vec3d(min_corner[0], min_corner[1], mid_z), Gf.Vec3d(mid_x, mid_y, max_corner[2])),
-            (Gf.Vec3d(mid_x, min_corner[1], mid_z), Gf.Vec3d(max_corner[0], mid_y, max_corner[2])),
-            (Gf.Vec3d(min_corner[0], mid_y, mid_z), Gf.Vec3d(mid_x, max_corner[1], max_corner[2])),
-            (Gf.Vec3d(mid_x, mid_y, mid_z), Gf.Vec3d(max_corner[0], max_corner[1], max_corner[2]))
-        ]
-        
-        # Recursively sample each octant
-        for min_pt, max_pt in octants:
-            # Adjust target samples based on volume ratio
-            octant_volume = (max_pt[0] - min_pt[0]) * (max_pt[1] - min_pt[1]) * (max_pt[2] - min_pt[2])
-            total_volume = (max_corner[0] - min_corner[0]) * (max_corner[1] - min_corner[1]) * (max_corner[2] - min_corner[2])
-            octant_target = max(1, int(target_samples * (octant_volume / total_volume)))
-            
-            # Recursively sample this octant
-            sample_points.extend(self._adaptive_sample_mesh(min_pt, max_pt, octant_target, depth + 1, max_depth))
-        
-        return sample_points
-    
     def _on_voxelize_button_clicked(self):
         """Wrapper for the async function"""
         async def _initialize_and_voxelize():
-            # Force a complete physics reset
-            
-            
+
             # Wait for stage to stabilize
             await omni.kit.app.get_app().next_update_async()    
 
@@ -1194,7 +1112,12 @@ class GO4RExtension(omni.ext.IExt):
                 await omni.kit.app.get_app().next_update_async()
             self.timeline.pause()
 
-            await self._voxelize_perception_mesh()
+            voxels = await self._voxelize_perception_mesh()
+            if voxels:
+                self.weighted_voxels.update = {max(self.weighted_voxels.keys())+1 : (voxels, 1.0)}  # Replace first group with actual voxels
+                self._update_voxel_groups_ui()  # Update UI to show voxels in first group
+            return voxels
+        
         asyncio.ensure_future(_initialize_and_voxelize())
 
     async def _voxelize_perception_mesh(self):
@@ -1206,7 +1129,6 @@ class GO4RExtension(omni.ext.IExt):
         if not selection:
             self._log_message("No mesh selected. Please select a mesh prim in the stage.")
             self.perception_mesh_label.text = "(Not selected)"
-            self.mesh_bounds_label.text = "Mesh Bounds: Not selected"
             self.perception_mesh = None
             self.perception_mesh_path = None
             return
@@ -1243,32 +1165,23 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Error: Cannot apply CollisionAPI to {mesh_path}")
             return
         
-        # Get and display bounds
-        bounds = self._get_mesh_bounds(mesh_prim)
-        if bounds:
-            min_point, max_point = bounds
-            self.mesh_bounds_label.text = (
-                f"Mesh Bounds: \n     X: [{min_point[0]:.2f}, {max_point[0]:.2f}], \n"
-                f"     Y: [{min_point[1]:.2f}, {max_point[1]:.2f}], \n"
-                f"     Z: [{min_point[2]:.2f}, {max_point[2]:.2f}]"
-            )
-            
-            # Calculate the largest dimension of the mesh
-            dimensions = [
-                max_point[0] - min_point[0],
-                max_point[1] - min_point[1],
-                max_point[2] - min_point[2]
-            ]
-
         voxels = await self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=xform_path)
         self.voxelize_progress_bar.model.set_value(1.0)  # Set progress bar to complete
 
         if voxels:
             self._log_message(f"Created {len(voxels)} voxel meshes inside {mesh_path}")
+
+            omni.kit.commands.execute('ToggleActivePrims',
+                stage_or_context=omni.usd.get_context().get_stage(),
+                prim_paths=[self.perception_mesh_path],
+                active=False)
+
         else:
             self._log_message(f"No voxels created for {mesh_path}")
         
         self._log_message(f"Selected mesh '{mesh_path}' as perception area")
+
+        return voxels
 
     async def voxelize_mesh(self, mesh_prim, voxel_size, parent_path):
         """
@@ -1557,39 +1470,49 @@ class GO4RExtension(omni.ext.IExt):
         # If we reach here, the point is inside the mesh
         return True
 
-    def _apply_early_fusion(self, entropies: List[float]) -> float:
-        """Apply early fusion strategy to combine entropies (average them)"""
-        if not entropies:
-            return 0.0
-        return sum(entropies) / len(entropies)
-    
-    def _apply_late_fusion(self, entropies: List[float]) -> float:
-        """Apply late fusion strategy to combine entropies from different sensor types
+    def _apply_early_fusion(self, measurements: List[float]) -> float:
+        """Apply early fusion strategy to combine measurements of the same sensor per voxel.
+        This is just a sum of the measurements on the voxel.
         
-        Based on the formula: σ_fused = sqrt(1 / Σ(1/σ_i²))
+        Parameters
+        ----------
+        measurements : List[float]
+            List of measurements from sensors on the voxel
+
+        Returns
+        -------
+        float
+            The combined measurement of the voxel
         """
-        if not entropies:
+
+        if not measurements:
+            return 0.0
+        return sum(measurements)
+    
+    def _apply_late_fusion(self, uncertainties: List[float]) -> float:
+        """Apply late fusion strategy to combine uncertainties (σ's)from different sensor types per voxel
+        This is based on the formula from the "Perception Entropy..."
+        
+        σ_fused = sqrt(1 / Σ(1/σ_i²))
+
+        Parameters
+        ----------
+        uncertainties : List[float]
+            List of uncertainties (σ_i's) from sensors on the voxel
+        Returns
+        -------
+        float
+            The combined uncertainy of the voxel
+        """
+        if not uncertainties:
             return 0.0
             
         # Convert entropies back to standard deviations
-        sigmas = []
-        for entropy in entropies:
-            # Reverse the entropy formula to get sigma
-            # H = 2*ln(σ) + 1 + ln(2π)
-            # σ = exp((H - 1 - ln(2π))/2)
-            sigma = math.exp((entropy - 1 - math.log(2 * math.pi)) / 2)
-            sigmas.append(sigma)
-        
-        # Calculate fused sigma using the formula from the paper
-        sum_inverse_sigma_squared = sum(1 / (sigma ** 2) for sigma in sigmas)
-        if sum_inverse_sigma_squared > 0:
-            sigma_fused = math.sqrt(1 / sum_inverse_sigma_squared)
+        sum_inv = sum(1 / (sigma_i ** 2) for sigma_i in uncertainties)
+        sig_fused = math.sqrt(1 / sum_inv)
+
+        return sig_fused
             
-            # Convert back to entropy
-            entropy_fused = 2 * math.log(sigma_fused) + 1 + math.log(2 * math.pi)
-            return entropy_fused
-        else:
-            return 0.0
     
     # def _on_window(self, visible):
     #     if self._window.visible:
@@ -1621,7 +1544,7 @@ class GO4RExtension(omni.ext.IExt):
         self._cleanup_ui()
         gc.collect()
 
-    def target_prim_collision(self, prim_path):
+    def target_prim_collision(self, prim_path, disable_others=True):
         """Set the target prim collisions on for ray cast / lidar sensing, set all the other prims to be non-collidable"""
         stage = get_current_stage()
         prim = stage.GetPrimAtPath(prim_path)
@@ -1644,8 +1567,12 @@ class GO4RExtension(omni.ext.IExt):
                 collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
                 
                 if p != prim:
-                    # Set the other prims to be non-collidable
-                    collision_enabled_attr.Set(False)
+                    if disable_others:
+                        # Set the prim to be non-collidable
+                        # self._log_message(f"Setting {p.GetPath()} as non-collidable")
+                        collision_enabled_attr.Set(False)
+                    # else:
+                    #     self._log_message(f"NOT setting {p.GetPath()} as non-collidable")
                 else:
                     # Set the target prim to be collidable
                     collision_enabled_attr.Set(True)
@@ -1705,4 +1632,38 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Num points hitting {mesh_prim_path}: {len(points)}")
 
         return points
+    
+    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, voxels:List[Usd.Prim]) -> List[Tuple[Gf.Vec3d, str, float]]:
+        """Get the number of points from a raycaster that pass through each of the voxels in the given list"""
+
+        measurements = [0 for i in range(len(voxels))] # This is an ordered list of the number of points that hit each voxel
+
+        # Enable collisions for all the voxels in the perception space, disable collisions on everything else.
+        disable_others = True
+        for i, voxel in enumerate(voxels):
+            self.target_prim_collision(voxel.GetPath(), disable_others=disable_others)
+            if i == 0:
+                disable_others = False
+
+        for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
+            i = i if len(sensor_instance.ray_casters) != 1 else ""
+            print(f"i = {i}, and the sensor is a {sensor_instance.__getattribute__(f'sensor{i}').__class__}")
+            
+            self.timeline.play()                                             # Play the simulation to get the ray data
+            await omni.kit.app.get_app().next_update_async()                 # wait one frame for data
+            self.timeline.pause()                                            # Pause the simulation to populate the LIDAR's depth buffers
+            pathstr = prim_utils.get_prim_path(ray_caster)
+
+            #Get the linear depth data from the lidar. If the linear depth of a point != the maximum range, it means that the point hit something
+            lin_depth = self.lidarInterface.get_linear_depth_data(pathstr)
+            for index in filter(lambda x: lin_depth[x] != self.lidarInterface.get_max_range(), range(len(lin_depth))):
+                # Get the point in world space
+                point = ray_caster.get_point(index)
+                for obj, obj_data in self.target_objects.items():
+                    weight = obj_data["weight"]
+                    points.append((point, obj, weight))
+            print(f"Num points hitting {mesh_prim_path}: {len(points)}")
+            self._log_message(f"Num points hitting {mesh_prim_path}: {len(points)}")
+
+        return measurements
 
