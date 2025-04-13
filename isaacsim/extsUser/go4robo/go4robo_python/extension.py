@@ -177,7 +177,7 @@ class GO4RExtension(omni.ext.IExt):
                         
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
-                                self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropy, height=36)
+                                self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropies, height=36)
                                 # Initially disable the button since no mesh is selected
                                 self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
                                 self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
@@ -437,6 +437,10 @@ class GO4RExtension(omni.ext.IExt):
                         ui.Label(f"{len(voxels)}", width=120)
                     else:
                         ui.Label(f"{len(voxels)}", width=120, style={"color": ui.color("#FF0000")})
+        
+        # Finally, if there are voxel groups (other than the "UNGROUPED" group), enable the analyze button
+        if len(self.weighted_voxels) > 0 and "UNGROUPED" not in self.weighted_voxels:
+            self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
 
     def _add_voxel_group(self):
         """Add a new XForm group for voxels"""
@@ -444,13 +448,22 @@ class GO4RExtension(omni.ext.IExt):
         stage = get_current_stage()
         parent_path = "/World/GO4R_PerceptionVolume"
         
-        # Create a new XForm
+        # Create a new XForm voxel group
         xform_path = f"{parent_path}/VoxelGroup"
+        id = 0
+        while stage.GetPrimAtPath(xform_path):
+            # Increment the group ID until we find a free one
+            xform_path = f"{parent_path}/VoxelGroup_{id}"
+            id += 1
+        
+        # Create the new XForm
+        xform_prim = stage.DefinePrim(xform_path, "Xform")
+        xform_prim.SetCustomDataByKey("perception_weight", 1.0)
         
         # Update groups from stage - this will pick up the new XForm
         self._update_voxel_groups_from_stage()
         
-        self._log_message(f"Added new voxel group {next_group_id}")
+        self._log_message(f"Added new voxel group at {xform_path}")
 
     def _browse_export_path(self):
         """Open a file dialog to select export location"""
@@ -963,12 +976,10 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message("Error: No robots selected for analysis.")
             return
         
-        # Check if we have a perception mesh
-        if not self.perception_mesh:
-            self._log_message("Error: No perception mesh selected.")
+        # Check if we have voxel groups
+        if not self.voxel_groups:
+            self._log_message("Error: No voxel groups found. Please create a perception mesh first.")
             return
-        else:
-            UsdPhysics.CollisionAPI.Apply(self.perception_mesh)
 
         results_data = {}
         results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
@@ -976,7 +987,6 @@ class GO4RExtension(omni.ext.IExt):
         for robot in self.robots:
             self._calc_perception_entropy(robot)
                 
-        
         # Update the results UI
         self._update_results_ui(results_data)
         
@@ -1649,25 +1659,27 @@ class GO4RExtension(omni.ext.IExt):
 
         return points
     
-    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, voxels:List[Usd.Prim]) -> List[Tuple[Gf.Vec3d, str, float]]:
+    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance) -> List[Tuple[Gf.Vec3d, str, float]]:
         """Get the number of points from a raycaster that pass through each of the voxels in the given list"""
 
-        measurements = [0 for i in range(len(voxels))] # This is an ordered list of the number of points that hit each voxel
-
-        # Enable collisions for all the voxels in the perception space, disable collisions on everything else.
-        disable_others = True
-        for i, voxel in enumerate(voxels):
-            self.target_prim_collision(voxel.GetPath(), disable_others=disable_others)
-            if i == 0:
-                disable_others = False
-
         for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
-            i = i if len(sensor_instance.ray_casters) != 1 else ""
-            print(f"i = {i}, and the sensor is a {sensor_instance.__getattribute__(f'sensor{i}').__class__}")
+            # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
+            # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
+            measurements = {} 
+            for gp_name, (voxels, weight) in self.weighted_voxels.items():
+                measurements.update({gp_name: ([], weight)})
+
+            # Enable collisions for all the voxels, disable collisions on everything else.
+            all_voxels_list = []
+            for voxel_group in self.weighted_voxels.values():
+                all_voxels_list.extend(voxel_group[1])
+            disable_others = True
+            for i, voxel in enumerate(all_voxels_list):
+                self.target_prim_collision(voxel.GetPath(), disable_others=disable_others)
+                if i == 0:
+                    disable_others = False
+            await self._ensure_physics_updated(pause=True)
             
-            self.timeline.play()                                             # Play the simulation to get the ray data
-            await omni.kit.app.get_app().next_update_async()                 # wait one frame for data
-            self.timeline.pause()                                            # Pause the simulation to populate the LIDAR's depth buffers
             pathstr = prim_utils.get_prim_path(ray_caster)
 
             #Get the linear depth data from the lidar. If the linear depth of a point != the maximum range, it means that the point hit something
