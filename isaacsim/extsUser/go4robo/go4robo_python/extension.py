@@ -8,7 +8,7 @@ from omni.isaac.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, Semantics
 import omni.isaac.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
 from isaacsim.sensors.physx import _range_sensor
@@ -21,6 +21,8 @@ from typing import List, Dict, Tuple, Optional, Union
 import carb
 import time
 
+import re
+
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
 import os, sys
@@ -32,7 +34,20 @@ from bot_3d_rep import *
 
 sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
-
+default_sensor_aps = {
+    "Lidar3D": {
+        "a": 0.152,
+        "b": 0.659,
+    },
+    "MonoCamera3D": {
+        "a": 0.055,
+        "b": 0.155,
+    },
+    "StereoCamera3D": {
+        "a": 0.055,
+        "b": 0.155,
+    }
+}
 
 class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
@@ -177,10 +192,11 @@ class GO4RExtension(omni.ext.IExt):
                         
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
-                                self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropies, height=36)
+                                self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropies, width=120, height=36)
                                 # Initially disable the button since no mesh is selected
                                 self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
-                                self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
+                                self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
+                            self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
                     
                     ui.Spacer(height=10)
                     
@@ -340,7 +356,7 @@ class GO4RExtension(omni.ext.IExt):
                     voxel_meshes.append(child)
                     all_found_voxels.add(str(child.GetPath()))
                 
-            new_weighted_voxels.update({group_id: (voxel_meshes, weight)})
+            new_weighted_voxels.update({group_id: (np.array(voxel_meshes), weight)})
         
         # Group ungrouped meshes to show the warning in the UI
         ungrouped_voxels = []
@@ -438,8 +454,8 @@ class GO4RExtension(omni.ext.IExt):
                     else:
                         ui.Label(f"{len(voxels)}", width=120, style={"color": ui.color("#FF0000")})
         
-        # Finally, if there are voxel groups (other than the "UNGROUPED" group), enable the analyze button
-        if len(self.weighted_voxels) > 0 and "UNGROUPED" not in self.weighted_voxels:
+        # Finally, if there are voxel groups, and robots to analyze, enable the analyze perception button
+        if len(self.weighted_voxels) > 0 and "UNGROUPED" not in self.weighted_voxels and len(self.robots) > 0:
             self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
 
     def _add_voxel_group(self):
@@ -660,6 +676,10 @@ class GO4RExtension(omni.ext.IExt):
     def _refresh_sensor_list(self):
         """Refresh the list of detected sensors without analysis"""
 
+        def _remove_trailing_digits(name):
+            """Remove trailing underscore+digits from a name, if they are present, using re"""
+            return re.sub(r'(_\d+)?$', '', name)
+
         def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find cameras that are descendants of the selected robot"""
 
@@ -707,7 +727,7 @@ class GO4RExtension(omni.ext.IExt):
                     resolution = (720, 720*aspect_ratio)
 
                 try:
-                    cam3d = MonoCamera3D(name=name,
+                    cam3d = MonoCamera3D(name=_remove_trailing_digits(name),
                                         focal_length=cam_prim.GetFocalLengthAttr().Get(),
                                         h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
                                         v_aperture=cam_prim.GetVerticalApertureAttr().Get(),
@@ -718,7 +738,7 @@ class GO4RExtension(omni.ext.IExt):
                                         cost=1.0,
                                         focal_point=(0, 0, 0)
                                         )
-                    cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=name, tf=self._get_robot_to_sensor_transform(prim, robot_prim))
+                    cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
                     cam3d_instance.create_ray_casters(get_current_stage(), self._usd_context)
                     self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
@@ -748,7 +768,7 @@ class GO4RExtension(omni.ext.IExt):
                     name = prim.GetParent().GetName()
                 # Direct LiDAR prim - extract properties
                 try:
-                    lidar = Lidar3D(name=name,
+                    lidar = Lidar3D(name=_remove_trailing_digits(name),
                                     h_fov=self._get_prim_attribute(prim, "horizontalFov"),
                                     v_fov=self._get_prim_attribute(prim, "verticalFov"),
                                     h_res=self._get_prim_attribute(prim, "horizontalResolution"),
@@ -758,7 +778,7 @@ class GO4RExtension(omni.ext.IExt):
                                     body=prim,
                                     cost=1.0,
                                     )
-                    lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_robot_to_sensor_transform(prim, robot_prim))
+                    lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
                     lidar_instance.create_ray_casters(get_current_stage(), self._usd_context)
                     self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
@@ -813,10 +833,14 @@ class GO4RExtension(omni.ext.IExt):
                                         common_parent_name=this_cam_name.replace(this_cam_role, "")
                                     else:
                                         common_parent_name = common_parent_prim.GetName()
+                                    
+                                    # Remove any training '_XX' suffix (where XX is two+ digits) from the common parent name
+                                    if common_parent_name.endswith("_XX"):
+                                        common_parent_name = common_parent_name[:-3]
 
 
                                     stereo_cam = StereoCamera3D(
-                                        name=common_parent_name,
+                                        name=_remove_trailing_digits(common_parent_name),
                                         sensor1=sensor_instance.sensor if this_cam_role == "left" else camera.sensor,
                                         sensor2=sensor_instance.sensor if this_cam_role == "right" else camera.sensor,
                                         tf_sensor1=sensor_instance.tf if this_cam_role == "left" else camera.tf,
@@ -824,9 +848,11 @@ class GO4RExtension(omni.ext.IExt):
                                         cost=sensor_instance.sensor.cost + camera.sensor.cost,
                                         body=prim
                                     )
-                                    stereo_instance = Sensor3D_Instance(stereo_cam, path= common_parent_path, 
-                                                                    name=common_parent_name, 
+                                    stereo_instance = Sensor3D_Instance(stereo_cam, path=common_parent_path, 
+                                                                    name=_remove_trailing_digits(common_parent_name), 
                                                                     tf=camera.tf)
+                                    # Move the ray casters from the MonoCamera3D instance to the StereoCamera3D instance
+                                    stereo_instance.ray_casters = sensor_instance.ray_casters + camera.ray_casters
                                     bot.sensors[i] = stereo_instance  # Replace the mono camera with stereo
                                     found_stereo_pair = True
                                     break
@@ -871,8 +897,9 @@ class GO4RExtension(omni.ext.IExt):
             
         self._log_message(f"Total sensors found: " + ', '.join([f"{total_sensors[type]} {type.__name__}(s)" for type in sensor_types]))
         
-        # Update the sensor list UI
+        # Update the UI
         self._update_sensor_list_ui()
+        self._update_voxel_groups_ui()
 
 
     def _display_sensor_instance_properties(self, sensor_instance:Sensor3D_Instance):
@@ -886,24 +913,8 @@ class GO4RExtension(omni.ext.IExt):
                     with ui.VStack(spacing=2):
                         ui.Label(f"position: {value[0]}")
                         ui.Label(f"rotation: {value[1]}")
-            elif "ap_constants" in attr:
-                self._log_message(f"Average Precision Constants for {sensor_instance.name}: {value}")
-                with ui.CollapsableFrame("Average Precision Parameters", height=0, collapsed=True):
-                    with ui.VStack(spacing=2):
-                        ui.Label("AP = a ln(m) + b, values depend on the detection algorithm.")
-                        ui.Label("Default values are from \"Perception Entropy [...]\" Ma et al. 2021.")
-                        for const, val in value.items():
-                            with ui.HStack(spacing=5):
-                                ui.Label(f"{const}:", width=120)
-                                ap_field = ui.FloatField(width=80)
-                                ap_field.model.set_value(val)
-                                
-                                # Update the sensor instance's average_precision constant when changed
-                                def on_param_changed(new_value):
-                                    sensor_instance.ap_constants[const] = max(0.0, min(1.0, new_value.get_value_as_float()))
-                                    self._log_message(f"Set {sensor_instance.name} {attr} to {val:.2f}")
-                                    
-                                ap_field.model.add_value_changed_fn(on_param_changed)
+            elif "a_ap" in attr or "b_ap" in attr:
+                continue # Skip average precision attributes
             elif "ray_casters" in attr:
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
                     with ui.VStack(spacing=2):
@@ -941,24 +952,36 @@ class GO4RExtension(omni.ext.IExt):
                                             with ui.VStack(spacing=5):
                                                 for idx, sensor_instance in enumerate(sensors):
                                                     # Set default average precision if not set
-                                                    # if not hasattr(sensor_instance, 'average_precision') or sensor_instance.average_precision is None:
-                                                    #     sensor_instance.average_precision = 0.9
+                                                    if not hasattr(sensor_instance, 'a_ap') or sensor_instance.a_ap is None:
+                                                        sensor_instance.a_ap = default_sensor_aps[sensor_instance.sensor.__class__.__name__]["a"]
+                                                    if not hasattr(sensor_instance, 'b_ap') or sensor_instance.b_ap is None:
+                                                        sensor_instance.b_ap = default_sensor_aps[sensor_instance.sensor.__class__.__name__]["b"]
                                                         
                                                     with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
-                                                        # with ui.VStack(spacing=2):
-                                                        #     # Add average precision input directly at the top level
-                                                        #     with ui.HStack(spacing=5):
-                                                        #         ui.Label("Average Precision:", width=120)
-                                                        #         ap_field = ui.FloatField(width=80)
-                                                        #         ap_field.model.set_value(sensor_instance.average_precision)
+                                                        with ui.VStack(spacing=2):
+                                                            # Add average precision input directly at the top level
+                                                            with ui.HStack(spacing=5):
+                                                                ui.Label("Average Precision:   a:", width=120)
+                                                                a_field = ui.FloatField(width=80)
+                                                                a_field.model.set_value(sensor_instance.a_ap)
                                                                 
-                                                        #         # Update the sensor instance's average_precision when changed
-                                                        #         def on_ap_changed(new_value, sensor=sensor_instance):
-                                                        #             ap = max(0.0, min(1.0, new_value.get_value_as_float()))
-                                                        #             sensor.average_precision = ap
-                                                        #             self._log_message(f"Set {sensor.name} average precision to {ap:.2f}")
+                                                                def on_a_val_changed(new_value, sensor=sensor_instance):
+                                                                    a = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                                    sensor.a_ap = a
+                                                                    self._log_message(f"Set {sensor.name} average precision to {a:.2f}")
                                                                 
-                                                        #         ap_field.model.add_value_changed_fn(on_ap_changed)
+                                                                a_field.model.add_value_changed_fn(on_a_val_changed)
+
+                                                                ui.Label("   b:", width=0)
+                                                                b_field = ui.FloatField(width=80)
+                                                                b_field.model.set_value(sensor_instance.b_ap)
+
+                                                                def on_b_val_changed(new_value, sensor=sensor_instance):
+                                                                    b = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                                    sensor.b_ap = b
+                                                                    self._log_message(f"Set {sensor.name} average precision to {b:.2f}")
+                                                                
+                                                                b_field.model.add_value_changed_fn(on_b_val_changed)
                                                             
                                                             # Show other properties in collapsible section
                                                             with ui.CollapsableFrame("Properties", height=0, collapsed=True):
@@ -971,34 +994,54 @@ class GO4RExtension(omni.ext.IExt):
         Must have a perception mesh voxelized, and at least one robot analyzed"""
         self._log_message("Starting perception entropy analysis...")
         
-        # Check if we have robots to analyze
+        # Check if we have robots to analyze, throw an error if not
         if not self.robots:
             self._log_message("Error: No robots selected for analysis.")
             return
         
-        # Check if we have voxel groups
-        if not self.voxel_groups:
+        # Check if we have voxel groups, throw an error if not
+        if not self.weighted_voxels:
             self._log_message("Error: No voxel groups found. Please create a perception mesh first.")
             return
+        
+        # Check if there are ungrouped voxels, warn the user
+        if "UNGROUPED" in self.weighted_voxels:
+            self._log_message("Warning: There are ungrouped voxels that will not be considered!")
 
         results_data = {}
         results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
 
         for robot in self.robots:
-            self._calc_perception_entropy(robot)
+            asyncio.ensure_future(self._calc_perception_entropy(robot))
                 
         # Update the results UI
-        self._update_results_ui(results_data)
+        # self._update_results_ui(results_data)
         
-        self._log_message("Analysis complete")
+        # self._log_message("Analysis complete")
 
-    async def _calc_perception_entropy(self, robot:Bot3D, voxels:List[Usd.Prim]):
+    async def _calc_perception_entropy(self, robot:Bot3D):
         """ Caluclate the perception entropy for a single robot."""
 
         self._log_message(f"Calculating perception entropy for robot {robot.name}...")
 
-        for sensor_instance in robot:
-            measurements = await self._get_measurements_raycast(sensor_instance, voxels)
+        sensor_m = dict.fromkeys([s.name for s in robot.sensors], None)
+        sensor_ap = dict.fromkeys([s.name for s in robot.sensors], None)
+
+        for sensor_instance in robot.sensors:
+            sensor_m[sensor_instance.name] = await self._get_measurements_raycast(sensor_instance)
+        
+        m_early_fusion_per_type = {}
+        # Get the names of all the unique sensor in the robot (robot.sensors[i].sensor)
+        unique_sensor_names = set([sensor.name for sensor in robot.sensors])
+        for name in unique_sensor_names:
+            measurements_for_sensor = {name: sensor_m[name] for name in unique_sensor_names if name in sensor_m and sensor_m[name] is not None}
+            if measurements_for_sensor: # Check if dict is not empty
+                m_early_fusion_per_type.update({name: self._apply_early_fusion(measurements_for_sensor)})
+
+        # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
+        self._calc_voxel_ap(m_early_fusion_per_type)
+
+        
         
         
     def _update_results_ui(self, results_data=None):
@@ -1246,7 +1289,7 @@ class GO4RExtension(omni.ext.IExt):
         voxel_centers = []
 
         # Target the prim mesh for ray casting
-        self.target_prim_collision(prim_utils.get_prim_path(mesh_prim))
+        self.target_prims_collision(prim_utils.get_prim_path(mesh_prim))
         await self._ensure_physics_updated(pause=False) # Don't pause the simulation
 
         # Iterate through the grid to find voxels intersected by triangles
@@ -1319,6 +1362,14 @@ class GO4RExtension(omni.ext.IExt):
             mesh_def.CreatePointsAttr().Set(voxel_points)
             mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
             mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            
+            # # Assign a unique semantic label to the voxel
+            # sem = Semantics.SemanticsAPI.Apply(mesh_def.GetPrim(), "Semantics")
+            # sem.CreateSemanticTypeAttr()
+            # sem.CreateSemanticDataAttr()
+            # sem.GetSemanticTypeAttr().Set("voxel")
+            # sem.GetSemanticDataAttr().Set(f"{mesh_name}_voxel_{i}_{j}_{k}")
+
             created_voxels.append(mesh_def.GetPrim())
             self.voxelize_progress_bar.model.set_value(0.5 + processed_voxels / total_voxels / 2) # Update progress bar to 100%
         
@@ -1346,7 +1397,7 @@ class GO4RExtension(omni.ext.IExt):
         """Check if a box overlaps with a given prim path"""
 
         # Target the prim mash
-        self.target_prim_collision(prim_path)
+        self.target_prims_collision(prim_path)
 
         rotation = carb.Float4(1.0, 0.0, 0.0, 0.0) # No rotation
 
@@ -1479,24 +1530,36 @@ class GO4RExtension(omni.ext.IExt):
         # If we reach here, the point is inside the mesh
         return True
 
-    def _apply_early_fusion(self, measurements: List[float]) -> float:
+    def _apply_early_fusion(self, sensor_measurements: dict[str,dict[str,Tuple[np.ndarray[int],float]]]) -> dict[str,Tuple[List[int],float]]:
         """Apply early fusion strategy to combine measurements of the same sensor per voxel.
         This is just a sum of the measurements on the voxel.
         
         Parameters
         ----------
-        measurements : List[float]
-            List of measurements from sensors on the voxel
+        measurements : dict[str,dict[str,Tuple[np.ndarray[int],float]]]
+            Dictionary of measurements for each sensor type, where each value is a tuple of the measurements and the weight.
+            The structure is {sensor_name: {group: ([measurements], weight)}}
 
         Returns
         -------
-        float
-            The combined measurement of the voxel
+        dict[str,Tuple[np.ndarray[int],float]]
+            Dictionary of combined measurements for each sensor type, where each value is a tuple of the combined measurements and the weight.
+            The structure is {group: ([measurements], weight)}
         """
 
-        if not measurements:
-            return 0.0
-        return sum(measurements)
+        # Initialize a dictionary to hold the combined measurements
+        combined_measurements = {}
+
+        # Iterate through each sensor type and its measurements
+        for sensor_name, measurements in sensor_measurements.items(): #TODO ERROR HERE
+            for group, (measurements_list, weight) in measurements.items():
+                if group not in combined_measurements:
+                    combined_measurements[group] = measurements_list
+
+                # Assume that the measurements are in the same order for each sensor type
+                combined_measurements[group] += measurements_list
+        
+        return combined_measurements
     
     def _apply_late_fusion(self, uncertainties: List[float]) -> float:
         """Apply late fusion strategy to combine uncertainties (σ's)from different sensor types per voxel
@@ -1553,19 +1616,19 @@ class GO4RExtension(omni.ext.IExt):
         self._cleanup_ui()
         gc.collect()
 
-    def target_prim_collision(self, prim_path, disable_others=True):
+    def target_prims_collision(self, prim_paths:str|Sdf.Path|List[Sdf.Path|str], disable_others:bool=True):
         """Set the target prim collisions on for ray cast / lidar sensing, set all the other prims to be non-collidable"""
         stage = get_current_stage()
-        prim = stage.GetPrimAtPath(prim_path)
+        if not isinstance(prim_paths, list): # Means that there is only one prim path
+            prim_paths = [prim_paths]
+        else:
+            prim_paths = [str(p) for p in prim_paths] # this creates a copy
+
+        num_prims = len(prim_paths)
         
-        if not prim:
-            return
-        if not prim.IsValid():
-            return
-        if not prim.IsA(UsdGeom.Mesh):
-            return
-        
-        # Search through all the prims in the stage and set them to be non-collidable
+        # Search through all the prims in the stage. 
+        # If the prim is in the list, set it to be collidable. 
+        # If not, set it to be non-collidable (only if disable_others=True).
         for p in stage.Traverse():
             if p.IsA(UsdGeom.Mesh):
                 collision_api = UsdPhysics.CollisionAPI(p)
@@ -1575,7 +1638,7 @@ class GO4RExtension(omni.ext.IExt):
                 # Get the collision enabled attribute
                 collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
                 
-                if p != prim:
+                if p.GetPath() not in prim_paths:
                     if disable_others:
                         # Set the prim to be non-collidable
                         # self._log_message(f"Setting {p.GetPath()} as non-collidable")
@@ -1585,38 +1648,57 @@ class GO4RExtension(omni.ext.IExt):
                 else:
                     # Set the target prim to be collidable
                     collision_enabled_attr.Set(True)
+                    # Remove the prim from the list of target prims
+                    prim_paths.remove(p.GetPath())
         
-        # self._log_message(f"Set {prim.GetPath()} as collision target for ray casting")
-
-    def untarget_prim_collision(self, prim_path):
-        """Set the target prim collisions off for ray casting. Don't change the rest."""
-        prim = get_current_stage().GetPrimAtPath(prim_path)
-
-        if not prim:
-            return
-        if not prim.IsValid():
-            return
-        if not prim.IsA(UsdGeom.Mesh):
-            return
+        if len(prim_paths) != 0:
+            self._log_message(f"Warning: {len(prim_paths)} out of {num_prims} not found in the stage when setting collision targets!!")
+        # else:
+        #     self._log_message(f"Set {num_prims} prims as target for ray cast / lidar sensing")
         
-        # Set the target prim to be non-collidable
-        collision_api = UsdPhysics.CollisionAPI(prim)
 
-        # Check if it has the API
-        if collision_api:
-            # Get the collision enabled attribute
-            collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
-            
-            # Disable collisions
-            collision_enabled_attr.Set(False)
-            self._log_message(f"Unset {prim.GetPath()} as target for ray cast / lidar sensing")
+    def untarget_prims_collision(self, prim_paths:str|Sdf.Path|List[Sdf.Path|str]):
+        """Set the target prim collisions off for ray cast / lidar sensing"""
+        stage = get_current_stage()
+        if not isinstance(prim_paths, list): # Means that there is only one prim path
+            prim_paths = [prim_paths]
         else:
-            self._log_message(f"Prim {prim.GetPath()} does not have a CollisionAPI, skipping")
+            prim_paths = [str(p) for p in prim_paths] # this creates a copy
+
+        # Search through all the prims in the stage.
+        # If the prim is in the list, set it to be non-collidable.
+        for p in stage.Traverse():
+            if p.IsA(UsdGeom.Mesh):
+                collision_api = UsdPhysics.CollisionAPI(p)
+                if not collision_api:
+                    # Apply the CollisionAPI to the prim
+                    collision_api = UsdPhysics.CollisionAPI.Apply(p)
+                # Get the collision enabled attribute
+                collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                
+                if p.GetPath() in prim_paths:
+                    # Set the target prim to be non-collidable
+                    collision_enabled_attr.Set(False)
+                    # Remove the prim from the list of target prims
+                    prim_paths.remove(p.GetPath())
+        if len(prim_paths) != 0:
+            self._log_message(f"Warning: {len(prim_paths)} out of {len(prim_paths)} not found in the stage when un-setting collision targets!!")
+        # else:
+        #     self._log_message(f"Set {len(prim_paths)} prims as non-collidable for ray cast / lidar sensing")
 
 
     async def _ensure_physics_updated(self, pause=True):
         """Ensures the physics scene is updated by stepping the simulation if paused, or waiting a frame if playing.
         Call with `await self._ensure_physics_updated()` to ensure the physics scene is updated."""
+        if not hasattr(self, 'timeline') or self.timeline is None:
+            self._log_message("Warning: Timeline interface not found, attempting to re-acquire.")
+            try:
+                self.timeline = omni.timeline.get_timeline_interface()
+            except Exception as e:
+                self._log_message(f"Error: Failed to acquire timeline interface: {e}")
+                # Cannot proceed without timeline, maybe raise an error or return
+                raise AttributeError("Timeline interface could not be acquired.")
+        
         was_playing = self.timeline.is_playing()
         if not was_playing:
             # If not playing, play, wait a frame, then pause
@@ -1639,7 +1721,7 @@ class GO4RExtension(omni.ext.IExt):
         for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
             i = i if len(sensor_instance.ray_casters) != 1 else ""
             print(f"i = {i}, and the sensor is a {sensor_instance.__getattribute__(f'sensor{i}').__class__}")
-            self.target_prim_collision(mesh_prim_path)
+            self.target_prims_collision(mesh_prim_path)
             
             self.timeline.play()                                             # Play the simulation to get the ray data
             await omni.kit.app.get_app().next_update_async()                 # wait one frame for data
@@ -1659,39 +1741,59 @@ class GO4RExtension(omni.ext.IExt):
 
         return points
     
-    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance) -> List[Tuple[Gf.Vec3d, str, float]]:
+    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance) -> dict[str,Tuple[np.ndarray[int],float]]:
         """Get the number of points from a raycaster that pass through each of the voxels in the given list"""
+        
+        # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
+        # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
+        measurements = {} 
+        for gp_name, (voxels, weight) in self.weighted_voxels.items():
+            measurements.update({gp_name: (np.full(len(voxels),0,int), weight)})
+
+        # For each ray caster, get the number of points that hit each voxel
+        # For stereo cameras, we simply add the number of points from each camera (apply early fusion)
 
         for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
-            # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
-            # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
-            measurements = {} 
-            for gp_name, (voxels, weight) in self.weighted_voxels.items():
-                measurements.update({gp_name: ([], weight)})
+
+            self._log_message(f"Generating measurements for {sensor_instance.name} ray caster {i} of {len(sensor_instance.ray_casters)}")
 
             # Enable collisions for all the voxels, disable collisions on everything else.
-            all_voxels_list = []
+            all_voxel_paths = []
             for voxel_group in self.weighted_voxels.values():
-                all_voxels_list.extend(voxel_group[1])
-            disable_others = True
-            for i, voxel in enumerate(all_voxels_list):
-                self.target_prim_collision(voxel.GetPath(), disable_others=disable_others)
-                if i == 0:
-                    disable_others = False
-            await self._ensure_physics_updated(pause=True)
-            
-            pathstr = prim_utils.get_prim_path(ray_caster)
+                all_voxel_paths.extend([str(v.GetPath()) for v in voxel_group[0]])
+            self.target_prims_collision(all_voxel_paths, disable_others=True)
 
-            #Get the linear depth data from the lidar. If the linear depth of a point != the maximum range, it means that the point hit something
-            lin_depth = self.lidarInterface.get_linear_depth_data(pathstr)
-            for index in filter(lambda x: lin_depth[x] != self.lidarInterface.get_max_range(), range(len(lin_depth))):
-                # Get the point in world space
-                point = ray_caster.get_point(index)
-                for obj, obj_data in self.target_objects.items():
-                    weight = obj_data["weight"]
-                    points.append((point, obj, weight))
-            print(f"Num points hitting {mesh_prim_path}: {len(points)}")
-            self._log_message(f"Num points hitting {mesh_prim_path}: {len(points)}")
+            # Now, while there are still enabled voxels, cast, add the points to the measurements, then un-target any voxels that were hit
+            hit_paths = [0] # put something here so we enter the loop
+            iterations = 0
+            while len(all_voxel_paths) > 0:
+                await self._ensure_physics_updated(pause=True)
+                rc_pathstr = str(prim_utils.get_prim_path(ray_caster))
+                hit_paths = self.lidarInterface.get_prim_data(rc_pathstr)
+                # Remove empty hits
+                hit_paths = [path for path in hit_paths if path != ""]
+                # If there are no hits, break out of the loop
+                if len(hit_paths) == 0:
+                    break
+
+                # Count the number of hits on each voxel, and load that into the measurements dictionary
+                for voxel_group_name, (voxels, weight) in self.weighted_voxels.items():
+                    for i, voxel in enumerate(voxels):
+                        voxel_path = str(voxel.GetPath())
+                        # Check if the voxel is in the hit_paths
+                        if voxel_path in hit_paths:
+                            # Add the number of points to the measurement of that voxel
+                            measurements[voxel_group_name][0][i] += hit_paths.count(voxel_path)
+
+                # Untarget the hit paths from collisions, and remove them the list of all voxel paths
+                unique_hit_paths = list(set(hit_paths))
+                self.untarget_prims_collision(unique_hit_paths)
+                await self._ensure_physics_updated(pause=True)
+
+                all_voxel_paths = [path for path in all_voxel_paths if path not in unique_hit_paths]
+
+                self._log_message(f"  Iteration {iterations}: Hit {len(unique_hit_paths)} voxels. {len(all_voxel_paths)} voxels remaining.")
+                iterations += 1
 
         return measurements
 

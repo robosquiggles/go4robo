@@ -362,8 +362,8 @@ class Sensor3D_Instance:
                         parent=parent_path,
                         min_range=sensor.min_range,
                         max_range=sensor.max_range,
-                        draw_points=False,
-                        draw_lines=True,
+                        draw_points=False, # Turn this off for simulation performance
+                        draw_lines=False, # Turn this off for simulation performance
                         horizontal_fov=sensor.h_fov,
                         vertical_fov=sensor.v_fov,
                         horizontal_resolution=sensor.h_res,
