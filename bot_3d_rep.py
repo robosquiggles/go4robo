@@ -371,7 +371,7 @@ class Sensor3D_Instance:
                         rotation_rate=0.0, # Generate all points at once!
                         high_lod=True, # Generate all points at once!
                         yaw_offset=0.0,
-                        enable_semantics=False)
+                        enable_semantics=True)
                     
                     #If the ray caster is a MonoCamera3D, set the transform to match the Camera (which is rotated 90 about x, and -90 about y)
                     if isinstance(sensor, MonoCamera3D):

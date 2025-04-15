@@ -1040,8 +1040,6 @@ class GO4RExtension(omni.ext.IExt):
 
         # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
         self._calc_voxel_ap(m_early_fusion_per_type)
-
-        
         
         
     def _update_results_ui(self, results_data=None):
@@ -1653,8 +1651,8 @@ class GO4RExtension(omni.ext.IExt):
         
         if len(prim_paths) != 0:
             self._log_message(f"Warning: {len(prim_paths)} out of {num_prims} not found in the stage when setting collision targets!!")
-        # else:
-        #     self._log_message(f"Set {num_prims} prims as target for ray cast / lidar sensing")
+        else:
+            self._log_message(f"Set {num_prims} prims as target for ray cast / lidar sensing")
         
 
     def untarget_prims_collision(self, prim_paths:str|Sdf.Path|List[Sdf.Path|str]):
@@ -1785,10 +1783,9 @@ class GO4RExtension(omni.ext.IExt):
                             # Add the number of points to the measurement of that voxel
                             measurements[voxel_group_name][0][i] += hit_paths.count(voxel_path)
 
-                # Untarget the hit paths from collisions, and remove them the list of all voxel paths
+                # Untarget the hit paths from collisions, and remove them from the list of all voxel paths
                 unique_hit_paths = list(set(hit_paths))
                 self.untarget_prims_collision(unique_hit_paths)
-                await self._ensure_physics_updated(pause=True)
 
                 all_voxel_paths = [path for path in all_voxel_paths if path not in unique_hit_paths]
 
