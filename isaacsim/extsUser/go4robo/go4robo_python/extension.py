@@ -989,8 +989,8 @@ class GO4RExtension(omni.ext.IExt):
                                                                 with ui.VStack(spacing=2):
                                                                     self._display_sensor_instance_properties(sensor_instance)
 
-    def _calc_perception_entropies(self):
-        """Main function to analyze all sensors on the robot.
+    def _calc_perception_entropies(self, disable_raycasters=True):
+        """Main function to analyze all sensors on all the robots.
         
         Must have a perception mesh voxelized, and at least one robot analyzed"""
         self._log_message("Starting perception entropy analysis...")
@@ -1012,15 +1012,25 @@ class GO4RExtension(omni.ext.IExt):
         results_data = {}
         results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
 
+        if disable_raycasters:
+            for robot in self.robots:
+                for sensor in robot.sensors:
+                    if isinstance(sensor.sensor, Sensor3D):
+                        omni.kit.commands.execute('ToggleActivePrims',
+                                prim_paths=[prim_utils.get_prim_path(rc) for rc in sensor.ray_casters],
+                                active=False,
+                                stage_or_context=self._usd_context)
+                        self._log_message(f"Disabled raycaster(s) for sensor {sensor.name}")
+
         for robot in self.robots:
-            asyncio.ensure_future(self._calc_perception_entropy(robot))
-                
+            asyncio.ensure_future(self._calc_perception_entropy(robot, disable_raycasters=disable_raycasters))
+        
         # Update the results UI
         # self._update_results_ui(results_data)
         
         # self._log_message("Analysis complete")
 
-    async def _calc_perception_entropy(self, robot:Bot3D):
+    async def _calc_perception_entropy(self, robot:Bot3D, disable_raycasters=True):
         """ Caluclate the perception entropy for a single robot."""
 
         self._log_message(f"Calculating perception entropy for robot {robot.name}...")
@@ -1029,7 +1039,7 @@ class GO4RExtension(omni.ext.IExt):
         sensor_ap = dict.fromkeys([s.name for s in robot.sensors], None)
 
         for sensor_instance in robot.sensors:
-            sensor_m[sensor_instance.name] = await self._get_measurements_raycast(sensor_instance)
+            sensor_m[sensor_instance.name] = await self._get_measurements_raycast(sensor_instance, disable_raycaster=disable_raycasters)
         
         m_early_fusion_per_type = {}
         # Get the names of all the unique sensor in the robot (robot.sensors[i].sensor)
@@ -1659,31 +1669,34 @@ class GO4RExtension(omni.ext.IExt):
     def untarget_prims_collision(self, prim_paths:str|Sdf.Path|List[Sdf.Path|str]):
         """Set the target prim collisions off for ray cast / lidar sensing"""
         stage = get_current_stage()
-        if not isinstance(prim_paths, list): # Means that there is only one prim path
-            prim_paths = [prim_paths]
-        else:
-            prim_paths = [str(p) for p in prim_paths] # this creates a copy
-
-        # Search through all the prims in the stage.
-        # If the prim is in the list, set it to be non-collidable.
-        for p in stage.Traverse():
-            if p.IsA(UsdGeom.Mesh):
+        processed_count = 0
+        original_count = len(prim_paths)
+        for path_str in prim_paths:
+            p = stage.GetPrimAtPath(path_str)
+            # Check if prim exists and is a mesh before attempting to modify
+            if p and p.IsA(UsdGeom.Mesh):
                 collision_api = UsdPhysics.CollisionAPI(p)
                 if not collision_api:
-                    # Apply the CollisionAPI to the prim
-                    collision_api = UsdPhysics.CollisionAPI.Apply(p)
-                # Get the collision enabled attribute
-                collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
-                
-                if p.GetPath() in prim_paths:
-                    # Set the target prim to be non-collidable
-                    collision_enabled_attr.Set(False)
-                    # Remove the prim from the list of target prims
-                    prim_paths.remove(p.GetPath())
-        if len(prim_paths) != 0:
-            self._log_message(f"Warning: {len(prim_paths)} out of {len(prim_paths)} not found in the stage when un-setting collision targets!!")
-        # else:
-        #     self._log_message(f"Set {len(prim_paths)} prims as non-collidable for ray cast / lidar sensing")
+                    # This prim should already have had CollisionAPI applied by target_prims_collision
+                    # If not, log a warning, but applying it here might be slow.
+                    # Consider ensuring it's applied robustly in target_prims_collision or voxel creation.
+                    self._log_message(f"Warning: CollisionAPI missing on {path_str} during untargeting.")
+                    collision_api = UsdPhysics.CollisionAPI.Apply(p) # Apply if missing, might impact perf
+
+                if collision_api:
+                    collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                    if collision_enabled_attr: # Check if attribute exists
+                         collision_enabled_attr.Set(False)
+                         processed_count += 1
+                    else:
+                         self._log_message(f"Warning: CollisionEnabled attribute missing on {path_str}.")
+            # else:
+            #     # DEBUG: Log if a path didn't correspond to a valid mesh prim
+            #     self._log_message(f"Info: Path {path_str} not found or not a mesh during untargeting.")
+
+        # # DEBUG: Log discrepancies if needed
+        # if processed_count != original_count:
+        #     self._log_message(f"Info: Untargeted {processed_count} out of {original_count} requested prims.")
 
 
     async def _ensure_physics_updated(self, pause=True, steps=1):
@@ -1750,7 +1763,7 @@ class GO4RExtension(omni.ext.IExt):
 
         return points
     
-    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance) -> dict[str,Tuple[np.ndarray[int],float]]:
+    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, disable_raycaster=False) -> dict[str,Tuple[np.ndarray[int],float]]:
         """Get the number of points from a raycaster that pass through each of the voxels in the given list"""
 
         # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
@@ -1766,6 +1779,13 @@ class GO4RExtension(omni.ext.IExt):
         # For stereo cameras, we simply add the number of points from each camera (apply early fusion)
 
         for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
+
+            # Enable the ray caster in case it is disabled
+            omni.kit.commands.execute('ToggleActivePrims',
+                                    prim_paths=[prim_utils.get_prim_path(ray_caster)],
+                                    active=True,
+                                    stage_or_context=self._usd_context)
+            await self._ensure_physics_updated(pause=False, steps=1)
 
             self._log_message(f"Generating measurements for {sensor_instance.name} ray caster {i} of {len(sensor_instance.ray_casters)}")
 
@@ -1841,9 +1861,15 @@ class GO4RExtension(omni.ext.IExt):
                 if iterations > 1000: # Adjust limit as needed
                     self._log_message("Warning: Exceeded maximum iterations. Breaking loop.")
                     break
-
+            
+            # Disable the ray caster
+            # Enable the ray caster in case it is disabled
+            if disable_raycaster:
+                omni.kit.commands.execute('ToggleActivePrims',
+                                    prim_paths=[prim_utils.get_prim_path(ray_caster)],
+                                    active=False,
+                                    stage_or_context=self._usd_context)
         self._log_message(f"Finished generating measurements for {sensor_instance.name}")
         await self._ensure_physics_updated(pause=True, steps=1)
-        print(measurements)
         return measurements
 

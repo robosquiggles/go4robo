@@ -325,7 +325,7 @@ class Sensor3D_Instance:
         self.tf = tf
         self.ray_casters = []
 
-    def create_ray_casters(self, stage, context):
+    def create_ray_casters(self, stage, context, disable=False):
         """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
         import omni.kit.commands
         import isaacsim.core.utils.transformations as tf_utils
@@ -362,7 +362,7 @@ class Sensor3D_Instance:
                         parent=parent_path,
                         min_range=sensor.min_range,
                         max_range=sensor.max_range,
-                        draw_points=False, # Turn this off for simulation performance
+                        draw_points=True, # Turn this off for simulation performance
                         draw_lines=False, # Turn this off for simulation performance
                         horizontal_fov=sensor.h_fov,
                         vertical_fov=sensor.v_fov,
@@ -372,6 +372,12 @@ class Sensor3D_Instance:
                         high_lod=True, # Generate all points at once!
                         yaw_offset=0.0,
                         enable_semantics=True)
+                    
+                    if disable:
+                        omni.kit.commands.execute('ToggleActivePrims',
+                                    prim_paths=[ray_caster_path],
+                                    active=False,
+                                    stage_or_context=self._usd_context)
                     
                     #If the ray caster is a MonoCamera3D, set the transform to match the Camera (which is rotated 90 about x, and -90 about y)
                     if isinstance(sensor, MonoCamera3D):
