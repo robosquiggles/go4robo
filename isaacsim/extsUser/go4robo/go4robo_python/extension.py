@@ -1765,7 +1765,8 @@ class GO4RExtension(omni.ext.IExt):
     
     async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, disable_raycaster=False) -> dict[str,Tuple[np.ndarray[int],float]]:
         """Get the number of points from a raycaster that pass through each of the voxels in the given list"""
-
+        # Set the time for calculating how long it takes to get the measurements
+        start_time = time.time()
         # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
         # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
         measurements = {}
@@ -1820,7 +1821,6 @@ class GO4RExtension(omni.ext.IExt):
 
                 # If there are no hits, break out of the loop
                 if not hit_counts:
-                    self._log_message(f"  Iteration {iterations}: No hits detected. Breaking.")
                     break
 
                 # Get the set of unique prims that were hit in this iteration
@@ -1869,7 +1869,10 @@ class GO4RExtension(omni.ext.IExt):
                                     prim_paths=[prim_utils.get_prim_path(ray_caster)],
                                     active=False,
                                     stage_or_context=self._usd_context)
-        self._log_message(f"Finished generating measurements for {sensor_instance.name}")
         await self._ensure_physics_updated(pause=True, steps=1)
+        self._log_message(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
         return measurements
 
+
+    def _calc_voxel_ap():
+        raise NotImplementedError("Voxel AP calculation not implemented yet.")
