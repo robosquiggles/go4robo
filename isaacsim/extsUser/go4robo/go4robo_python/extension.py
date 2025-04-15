@@ -15,6 +15,7 @@ from isaacsim.sensors.physx import _range_sensor
 
 import asyncio # Used to run sample asynchronously to not block rendering thread
 
+from collections import Counter
 import numpy as np
 import math
 from typing import List, Dict, Tuple, Optional, Union
@@ -1751,11 +1752,14 @@ class GO4RExtension(omni.ext.IExt):
     
     async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance) -> dict[str,Tuple[np.ndarray[int],float]]:
         """Get the number of points from a raycaster that pass through each of the voxels in the given list"""
-        
+
         # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
         # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
-        measurements = {} 
+        measurements = {}
         for gp_name, (voxels, weight) in self.weighted_voxels.items():
+            # Ensure UNGROUPED voxels are skipped if present
+            if gp_name == "UNGROUPED":
+                continue
             measurements.update({gp_name: (np.full(len(voxels),0,int), weight)})
 
         # For each ray caster, get the number of points that hit each voxel
@@ -1767,44 +1771,76 @@ class GO4RExtension(omni.ext.IExt):
 
             # Enable collisions for all the voxels, disable collisions on everything else.
             all_voxel_paths = []
-            for voxel_group in self.weighted_voxels.values():
+            for group_name, voxel_group in self.weighted_voxels.items():
+                 # Ensure UNGROUPED voxels are skipped if present
+                if group_name == "UNGROUPED":
+                    continue
                 all_voxel_paths.extend([str(v.GetPath()) for v in voxel_group[0]])
+
+            if not all_voxel_paths:
+                self._log_message("Warning: No valid voxels found to target for raycasting.")
+                continue # Skip this ray_caster if no voxels
+
             self.target_prims_collision(all_voxel_paths, disable_others=True)
 
+            # Convert to a set for efficient removal later
+            remaining_voxel_paths_set = set(all_voxel_paths)
+
             # Now, while there are still enabled voxels, cast, add the points to the measurements, then un-target any voxels that were hit
-            hit_paths = [0] # put something here so we enter the loop
             iterations = 0
             print(f"Iteration\tHit paths\tVoxels hit\tRemaining")
             print("---------\t---------\t----------\t---------")
-            while len(all_voxel_paths) > 0:
-                await self._ensure_physics_updated(pause=False, steps=3)
+            while len(remaining_voxel_paths_set) > 0:
+                # Try reducing steps, e.g., to 1 or 2, if 3 is too slow/unnecessary
+                await self._ensure_physics_updated(pause=False, steps=1) # Reduced steps
                 rc_pathstr = str(prim_utils.get_prim_path(ray_caster))
-                hit_paths = self.lidarInterface.get_prim_data(rc_pathstr)
-                # Remove empty hits
-                hit_paths = [path for path in hit_paths if path != ""]
+                hit_paths_raw = self.lidarInterface.get_prim_data(rc_pathstr)
+                # Remove empty hits and count occurrences efficiently
+                hit_counts = Counter(path for path in hit_paths_raw if path != "")
+
                 # If there are no hits, break out of the loop
-                if len(hit_paths) == 0:
+                if not hit_counts:
+                    self._log_message(f"  Iteration {iterations}: No hits detected. Breaking.")
                     break
 
-                # Count the number of hits on each voxel, and load that into the measurements dictionary
-                for voxel_group_name, (voxels, weight) in self.weighted_voxels.items():
-                    for i, voxel in enumerate(voxels):
+                # Get the set of unique prims that were hit in this iteration
+                unique_hit_paths_set = set(hit_counts.keys())
+
+                # Filter this set to only include paths that are still in our remaining voxels
+                # This prevents trying to process/disable things that aren't voxels or were already disabled
+                actual_voxel_hits_set = unique_hit_paths_set.intersection(remaining_voxel_paths_set)
+
+                if not actual_voxel_hits_set:
+                     self._log_message(f"  Iteration {iterations}: Hits detected, but not on remaining target voxels. Breaking.")
+                     break # No relevant hits
+
+                # Count the number of hits on each voxel using the pre-calculated counts
+                total_hits_this_iter = 0
+                for voxel_group_name, (voxels, weight) in self.weighted_voxels.items(): # Use measurements dict which excludes UNGROUPED
+                    for idx, voxel in enumerate(voxels):
                         voxel_path = str(voxel.GetPath())
-                        # Check if the voxel is in the hit_paths
-                        if voxel_path in hit_paths:
-                            # Add the number of points to the measurement of that voxel
-                            measurements[voxel_group_name][0][i] += hit_paths.count(voxel_path)
+                        # Check if the voxel was hit in this iteration using the efficient set
+                        if voxel_path in actual_voxel_hits_set:
+                            # Add the pre-calculated count
+                            count = hit_counts[voxel_path]
+                            measurements[voxel_group_name][0][idx] += count
+                            total_hits_this_iter += count
 
-                # Untarget the hit paths from collisions, and remove them from the list of all voxel paths
-                unique_hit_paths = list(set(hit_paths))
-                self.untarget_prims_collision(unique_hit_paths)
 
-                all_voxel_paths = [path for path in all_voxel_paths if path not in unique_hit_paths]
+                # Untarget the hit paths from collisions more efficiently
+                # Pass the set directly if untarget_prims_collision is updated, otherwise convert back to list
+                self.untarget_prims_collision(list(actual_voxel_hits_set))
 
-                print(f"  {iterations}\t\t  {len(hit_paths)}\t  {len(unique_hit_paths)}\t\t  {len(all_voxel_paths)}")
+                # Remove the hit voxels from the set of remaining voxels
+                remaining_voxel_paths_set -= actual_voxel_hits_set
 
-                # self._log_message(f"  Iteration {iterations}: Hit {len(unique_hit_paths)} voxels. {len(all_voxel_paths)} voxels remaining.")
+                print(f"  {iterations}\t\t  {total_hits_this_iter}\t\t  {len(actual_voxel_hits_set)}\t\t  {len(remaining_voxel_paths_set)}")
+
                 iterations += 1
+                # Add a safety break condition
+                if iterations > 1000: # Adjust limit as needed
+                    self._log_message("Warning: Exceeded maximum iterations. Breaking loop.")
+                    break
 
         self._log_message(f"Finished generating measurements for {sensor_instance.name}")
         await self._ensure_physics_updated(pause=True, steps=1)
