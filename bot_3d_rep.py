@@ -250,6 +250,10 @@ class StereoCamera3D(Sensor3D):
                  tf_sensor2:tuple[Gf.Vec3d, Gf.Matrix3d],
                  cost:float=None,
                  body:UsdGeom.Mesh=None,
+                 ap_constants:dict = {
+                        "a": 0.055,  # coefficient from the paper for camera
+                        "b": 0.155   # coefficient from the paper for camera
+                    }
                  ):
         """
         Initialize a new instance of the class.
@@ -276,7 +280,8 @@ class StereoCamera3D(Sensor3D):
         self.h_res = sensor1.h_res
         self.v_res = sensor1.v_res
         self.max_range = sensor1.max_range
-        self.min_range = sensor1.min_range        
+        self.min_range = sensor1.min_range
+        self.ap_constants = ap_constants
 
 
 class Lidar3D(Sensor3D):
@@ -501,6 +506,13 @@ class Bot3D:
         sensor_instances = []
         for sensor_instance in self.sensors:
             if isinstance(sensor_instance.sensor, sensor_type):
+                sensor_instances.append(sensor_instance)
+        return sensor_instances
+    
+    def get_sensors_by_name(self, name:str) -> list[Sensor3D_Instance]:
+        sensor_instances = []
+        for sensor_instance in self.sensors:
+            if sensor_instance.sensor.name == name:
                 sensor_instances.append(sensor_instance)
         return sensor_instances
     

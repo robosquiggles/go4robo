@@ -914,7 +914,7 @@ class GO4RExtension(omni.ext.IExt):
                     with ui.VStack(spacing=2):
                         ui.Label(f"position: {value[0]}")
                         ui.Label(f"rotation: {value[1]}")
-            elif "a_ap" in attr or "b_ap" in attr:
+            elif "ap_constants" in attr:
                 continue # Skip average precision attributes
             elif "ray_casters" in attr:
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
@@ -953,10 +953,10 @@ class GO4RExtension(omni.ext.IExt):
                                             with ui.VStack(spacing=5):
                                                 for idx, sensor_instance in enumerate(sensors):
                                                     # Set default average precision if not set
-                                                    if not hasattr(sensor_instance, 'a_ap') or sensor_instance.a_ap is None:
-                                                        sensor_instance.a_ap = default_sensor_aps[sensor_instance.sensor.__class__.__name__]["a"]
-                                                    if not hasattr(sensor_instance, 'b_ap') or sensor_instance.b_ap is None:
-                                                        sensor_instance.b_ap = default_sensor_aps[sensor_instance.sensor.__class__.__name__]["b"]
+                                                    if not hasattr(sensor_instance.sensor, 'ap_constants') or sensor_instance.sensor.ap_constants is None:
+                                                        ap_constants = {'a': default_sensor_aps[sensor_instance.sensor.__class__.__name__]["a"],
+                                                                        'b': default_sensor_aps[sensor_instance.sensor.__class__.__name__]["b"]}
+                                                        sensor_instance.sensor.ap_constants = ap_constants
                                                         
                                                     with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                         with ui.VStack(spacing=2):
@@ -964,22 +964,22 @@ class GO4RExtension(omni.ext.IExt):
                                                             with ui.HStack(spacing=5):
                                                                 ui.Label("Average Precision:   a:", width=120)
                                                                 a_field = ui.FloatField(width=80)
-                                                                a_field.model.set_value(sensor_instance.a_ap)
+                                                                a_field.model.set_value(sensor_instance.sensor.ap_constants['a'])
                                                                 
                                                                 def on_a_val_changed(new_value, sensor=sensor_instance):
                                                                     a = max(0.0, min(1.0, new_value.get_value_as_float()))
-                                                                    sensor.a_ap = a
+                                                                    sensor.sensor.ap_constants['a'] = a
                                                                     self._log_message(f"Set {sensor.name} average precision to {a:.2f}")
                                                                 
                                                                 a_field.model.add_value_changed_fn(on_a_val_changed)
 
                                                                 ui.Label("   b:", width=0)
                                                                 b_field = ui.FloatField(width=80)
-                                                                b_field.model.set_value(sensor_instance.b_ap)
+                                                                b_field.model.set_value(sensor_instance.sensor.ap_constants['b'])
 
                                                                 def on_b_val_changed(new_value, sensor=sensor_instance):
                                                                     b = max(0.0, min(1.0, new_value.get_value_as_float()))
-                                                                    sensor.b_ap = b
+                                                                    sensor.sensor.ap_constants['b'] = b
                                                                     self._log_message(f"Set {sensor.name} average precision to {b:.2f}")
                                                                 
                                                                 b_field.model.add_value_changed_fn(on_b_val_changed)
@@ -1035,23 +1035,59 @@ class GO4RExtension(omni.ext.IExt):
 
         self._log_message(f"Calculating perception entropy for robot {robot.name}...")
 
-        sensor_m = dict.fromkeys([s.name for s in robot.sensors], None)
-        sensor_ap = dict.fromkeys([s.name for s in robot.sensors], None)
+        sensor_voxel_m = dict.fromkeys([s.name for s in robot.sensors], None)
 
         for sensor_instance in robot.sensors:
-            sensor_m[sensor_instance.name] = await self._get_measurements_raycast(sensor_instance, disable_raycaster=disable_raycasters)
+            sensor_voxel_m[sensor_instance.name] = await self._get_measurements_raycast(sensor_instance, disable_raycaster=disable_raycasters)
         
         m_early_fusion_per_type = {}
-        # Get the names of all the unique sensor in the robot (robot.sensors[i].sensor)
+        # Get the measurements for each sensor type on each voxel and apply early fusion
         unique_sensor_names = set([sensor.name for sensor in robot.sensors])
         for name in unique_sensor_names:
-            measurements_for_sensor = {name: sensor_m[name] for name in unique_sensor_names if name in sensor_m and sensor_m[name] is not None}
+            measurements_for_sensor = {name: sensor_voxel_m[name] for name in unique_sensor_names if name in sensor_voxel_m and sensor_voxel_m[name] is not None}
             if measurements_for_sensor: # Check if dict is not empty
                 m_early_fusion_per_type.update({name: self._apply_early_fusion(measurements_for_sensor)})
-
-        # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
-        self._calc_voxel_ap(m_early_fusion_per_type)
         
+        sum_normalized_perception_entropy = 0.0
+        for voxel_group, voxels in self.weighted_voxels.items():
+            if voxel_group == "UNGROUPED":
+                self._log_message(f"Warning: Skipping {voxel_group} voxels")
+                continue
+            vg_measurements = m_early_fusion_per_type[sensor_instance.sensor.name][voxel_group]
+            
+            vg_sensor_voxel_ap = dict.fromkeys(unique_sensor_names, None)
+            vg_sensor_voxel_uncertainty = dict.fromkeys(unique_sensor_names, None)
+            for sensor_name in unique_sensor_names:
+                sensor_instances = robot.get_sensors_by_name(sensor_name)
+                if len(sensor_instances) == 0:
+                    self._log_message(f"Warning: No sensors found with name {sensor_name}")
+                    continue
+                elif len(sensor_instances) > 1:
+                    self._log_message(f"Warning: Multiple sensors found with name {sensor_name}, using the first one")
+                sensor_instance = sensor_instances[0]
+                # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
+                a = sensor_instance.sensor.ap_constants['a']
+                b = sensor_instance.sensor.ap_constants['b']
+                vg_sensor_voxel_ap[sensor_instance.sensor.name] = a * np.log(vg_measurements) + b
+
+                # Calculate the sensor uncertainty for each voxel, where σ = 1/AP - 1
+                vg_sensor_voxel_uncertainty[sensor_instance.sensor.name] = 1.0 / vg_sensor_voxel_ap[sensor_instance.sensor.name] - 1.0
+        
+            # Apply late fusion to get the total entropy where σ_fused = sqrt(1 / Σ(1/σ_i²))
+            total_voxel_uncertainty_late_fusion = self._apply_late_fusion(vg_sensor_voxel_uncertainty)
+            
+            # Calculate the per-voxel entropy H(S|m,q) = 2ln(σ) + 1 + ln(pi)
+            total_voxel_entropy = 2 * np.log(total_voxel_uncertainty_late_fusion) + 1 + np.log(np.pi)
+
+            # Calculate the total perception entropy, which is simply the weighted average of the voxel entropies
+            normalized_weight = self.weighted_voxels[voxel_group][1]/sum([w for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
+            sum_normalized_perception_entropy += normalized_weight * total_voxel_entropy
+        
+        total_perception_entropy = sum_normalized_perception_entropy / sum([len(v) for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
+        
+        self._log_message(f"Total perception entropy for robot {robot.name}: {total_perception_entropy:.4f}")
+        return total_perception_entropy
+
         
     def _update_results_ui(self, results_data=None):
         """Update the results UI with entropy results for each robot"""
@@ -1570,7 +1606,7 @@ class GO4RExtension(omni.ext.IExt):
         
         return combined_measurements
     
-    def _apply_late_fusion(self, uncertainties: List[float]) -> float:
+    def _apply_late_fusion(self, uncertainties:dict[str, np.ndarray[float]]) -> float:
         """Apply late fusion strategy to combine uncertainties (σ's)from different sensor types per voxel
         This is based on the formula from the "Perception Entropy..."
         
@@ -1578,19 +1614,30 @@ class GO4RExtension(omni.ext.IExt):
 
         Parameters
         ----------
-        uncertainties : List[float]
-            List of uncertainties (σ_i's) from sensors on the voxel
+        uncertainties : dict[str, list[float]]
+            Dictionary of uncertainties (σ_i's) for each sensor type, where each value is a list of uncertainties.
+            The structure is {group: [uncertainties]}
+        
         Returns
         -------
         float
-            The combined uncertainy of the voxel
+            The combined uncertainty (σ_fused) for the voxel.
         """
         if not uncertainties:
             return 0.0
             
-        # Convert entropies back to standard deviations
-        sum_inv = sum(1 / (sigma_i ** 2) for sigma_i in uncertainties)
-        sig_fused = math.sqrt(1 / sum_inv)
+        uncertainties_array = np.array(list(uncertainties.values()))
+        # Calculate the sum of the inverse squares of the uncertainties
+        sum_inverse_squares = np.sum(1 / (uncertainties_array ** 2))
+        # Calculate the fused uncertainty
+        if sum_inverse_squares == 0:
+            return 0.0
+        sig_fused = np.sqrt(1 / sum_inverse_squares)
+        # Normalize the uncertainty
+        sig_fused = sig_fused / np.max(sig_fused)
+        # Normalize the uncertainty to be between 0 and 1
+        sig_fused = np.clip(sig_fused, 0.0, 1.0)
+        # self._log_message(f"Fused uncertainty: {sig_fused}")
 
         return sig_fused
             
@@ -1872,7 +1919,3 @@ class GO4RExtension(omni.ext.IExt):
         await self._ensure_physics_updated(pause=True, steps=1)
         self._log_message(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
         return measurements
-
-
-    def _calc_voxel_ap():
-        raise NotImplementedError("Voxel AP calculation not implemented yet.")
