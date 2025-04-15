@@ -403,7 +403,10 @@ class GO4RExtension(omni.ext.IExt):
     def _update_log_display(self):
         """Update the log display with current messages"""
         # Join the log messages with newlines and update the StringField
-        self.log_field.model.set_value("\n".join(self.log_messages))
+        # Ensure UI update happens on the main thread if called from async context
+        async def update_ui():
+            self.log_field.model.set_value("\n".join(self.log_messages))
+        asyncio.ensure_future(update_ui())
 
     def _update_voxel_groups_ui(self):
         """Update the UI to show the current voxel groups"""
@@ -994,15 +997,18 @@ class GO4RExtension(omni.ext.IExt):
         
         Must have a perception mesh voxelized, and at least one robot analyzed"""
         self._log_message("Starting perception entropy analysis...")
-        
+        self.analysis_progress_bar.model.set_value(0.0) # Reset progress bar
+
         # Check if we have robots to analyze, throw an error if not
         if not self.robots:
             self._log_message("Error: No robots selected for analysis.")
+            self.analysis_progress_bar.model.set_value(0.0)
             return
         
         # Check if we have voxel groups, throw an error if not
         if not self.weighted_voxels:
             self._log_message("Error: No voxel groups found. Please create a perception mesh first.")
+            self.analysis_progress_bar.model.set_value(0.0)
             return
         
         # Check if there are ungrouped voxels, warn the user
@@ -1012,25 +1018,57 @@ class GO4RExtension(omni.ext.IExt):
         results_data = {}
         results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
 
+        # Calculate total number of sensors for progress tracking
+        total_sensors_to_process = sum(len(robot.sensors) for robot in self.robots)
+        if total_sensors_to_process == 0:
+            self._log_message("Warning: No sensors found on selected robots.")
+            self.analysis_progress_bar.model.set_value(1.0) # Indicate completion (of nothing)
+            return
+            
+        self.processed_sensors_count = 0
+
+        async def update_progress():
+            self.processed_sensors_count += 1
+            progress = self.processed_sensors_count / total_sensors_to_process
+            self.analysis_progress_bar.model.set_value(progress)
+            # Force UI update
+            await omni.kit.app.get_app().next_update_async()
+
         if disable_raycasters:
             for robot in self.robots:
                 for sensor in robot.sensors:
-                    if isinstance(sensor.sensor, Sensor3D):
-                        omni.kit.commands.execute('ToggleActivePrims',
-                                prim_paths=[prim_utils.get_prim_path(rc) for rc in sensor.ray_casters],
-                                active=False,
-                                stage_or_context=self._usd_context)
-                        self._log_message(f"Disabled raycaster(s) for sensor {sensor.name}")
+                    if isinstance(sensor.sensor, Sensor3D) and hasattr(sensor, 'ray_casters') and sensor.ray_casters:
+                        try:
+                            omni.kit.commands.execute('ToggleActivePrims',
+                                    prim_paths=[prim_utils.get_prim_path(rc) for rc in sensor.ray_casters if rc], # Check if rc is valid
+                                    active=False,
+                                    stage_or_context=self._usd_context)
+                            self._log_message(f"Disabled raycaster(s) for sensor {sensor.name}")
+                        except Exception as e:
+                             self._log_message(f"Warning: Could not disable raycaster for {sensor.name}: {e}")
 
-        for robot in self.robots:
-            asyncio.ensure_future(self._calc_perception_entropy(robot, disable_raycasters=disable_raycasters))
-        
-        # Update the results UI
-        # self._update_results_ui(results_data)
-        
-        # self._log_message("Analysis complete")
 
-    async def _calc_perception_entropy(self, robot:Bot3D, disable_raycasters=True):
+        async def run_all_analyses():
+            tasks = []
+            for robot in self.robots:
+                # Pass the update_progress async function as a callback
+                tasks.append(self._calc_perception_entropy(robot, update_progress_callback=update_progress, disable_raycasters=disable_raycasters))
+            
+            # Wait for all robot analyses to complete
+            await asyncio.gather(*tasks)
+            
+            # Ensure progress bar reaches 100% at the end
+            self.analysis_progress_bar.model.set_value(1.0)
+            self._log_message("Analysis complete")
+            # Update the results UI (consider making this async too if needed)
+            # self._update_results_ui(results_data) # Assuming results_data is populated elsewhere or passed back
+
+        # Run the analyses asynchronously
+        asyncio.ensure_future(run_all_analyses())
+        
+        # Note: Results UI update might need adjustment depending on how results_data is populated by the async tasks.
+
+    async def _calc_perception_entropy(self, robot:Bot3D, update_progress_callback=None, disable_raycasters=True):
         """ Caluclate the perception entropy for a single robot."""
 
         self._log_message(f"Calculating perception entropy for robot {robot.name}...")
@@ -1038,7 +1076,11 @@ class GO4RExtension(omni.ext.IExt):
         sensor_voxel_m = dict.fromkeys([s.name for s in robot.sensors], None)
 
         for sensor_instance in robot.sensors:
+            # Pass the progress bar update callback to the measurement function
             sensor_voxel_m[sensor_instance.name] = await self._get_measurements_raycast(sensor_instance, disable_raycaster=disable_raycasters)
+            # Call the progress update callback after measurements for this sensor are done
+            if update_progress_callback:
+                await update_progress_callback()
         
         m_early_fusion_per_type = {}
         # Get the measurements for each sensor type on each voxel and apply early fusion
@@ -1417,9 +1459,7 @@ class GO4RExtension(omni.ext.IExt):
                 shader = UsdShade.Shader.Define(stage, shader_path)
                 shader.CreateIdAttr("UsdPreviewSurface")
                 shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.1, 0.1, 0.8)) # Bluish tint
-                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.2) # Set transparency
-                shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
-                shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.1)
+                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.5) # Set transparency
                 mat_prim.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
 
             # Bind the material to the voxel mesh
@@ -1833,17 +1873,30 @@ class GO4RExtension(omni.ext.IExt):
                 continue
             measurements.update({gp_name: (np.full(len(voxels),0,int), weight)})
 
+        # Check if the sensor instance has ray casters
+        if not hasattr(sensor_instance, 'ray_casters') or not sensor_instance.ray_casters:
+             self._log_message(f"Warning: Sensor {sensor_instance.name} has no ray casters. Skipping measurements.")
+             return measurements # Return empty measurements
+
         # For each ray caster, get the number of points that hit each voxel
         # For stereo cameras, we simply add the number of points from each camera (apply early fusion)
 
         for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
+            if not ray_caster: # Skip if ray_caster prim is invalid/deleted
+                self._log_message(f"Warning: Invalid ray_caster found for sensor {sensor_instance.name}. Skipping.")
+                continue
 
             # Enable the ray caster in case it is disabled
-            omni.kit.commands.execute('ToggleActivePrims',
-                                    prim_paths=[prim_utils.get_prim_path(ray_caster)],
-                                    active=True,
-                                    stage_or_context=self._usd_context)
-            await self._ensure_physics_updated(pause=False, steps=1)
+            try:
+                omni.kit.commands.execute('ToggleActivePrims',
+                                        prim_paths=[prim_utils.get_prim_path(ray_caster)],
+                                        active=True,
+                                        stage_or_context=self._usd_context)
+                await self._ensure_physics_updated(pause=False, steps=1)
+            except Exception as e:
+                self._log_message(f"Warning: Failed to enable raycaster {prim_utils.get_prim_path(ray_caster)}: {e}. Skipping.")
+                continue
+
 
             self._log_message(f"Generating measurements for {sensor_instance.name} ray caster {i} of {len(sensor_instance.ray_casters)}")
 
