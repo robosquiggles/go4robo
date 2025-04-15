@@ -8,7 +8,7 @@ from omni.isaac.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, Semantics
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, Semantics, UsdShade
 import omni.isaac.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
 from isaacsim.sensors.physx import _range_sensor
@@ -1408,12 +1408,22 @@ class GO4RExtension(omni.ext.IExt):
             mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
             mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
             
-            # # Assign a unique semantic label to the voxel
-            # sem = Semantics.SemanticsAPI.Apply(mesh_def.GetPrim(), "Semantics")
-            # sem.CreateSemanticTypeAttr()
-            # sem.CreateSemanticDataAttr()
-            # sem.GetSemanticTypeAttr().Set("voxel")
-            # sem.GetSemanticDataAttr().Set(f"{mesh_name}_voxel_{i}_{j}_{k}")
+            # Define or get the transparent material
+            mat_path = Sdf.Path("/World/Looks/TransparentVoxelMaterial")
+            mat_prim = stage.GetPrimAtPath(mat_path)
+            if not mat_prim:
+                mat_prim = UsdShade.Material.Define(stage, mat_path)
+                shader_path = mat_path.AppendPath("Shader")
+                shader = UsdShade.Shader.Define(stage, shader_path)
+                shader.CreateIdAttr("UsdPreviewSurface")
+                shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.1, 0.1, 0.8)) # Bluish tint
+                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.2) # Set transparency
+                shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.5)
+                shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.1)
+                mat_prim.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+
+            # Bind the material to the voxel mesh
+            UsdShade.MaterialBindingAPI(mesh_def.GetPrim()).Bind(UsdShade.Material(mat_prim))
 
             created_voxels.append(mesh_def.GetPrim())
             self.voxelize_progress_bar.model.set_value(0.5 + processed_voxels / total_voxels / 2) # Update progress bar to 100%
