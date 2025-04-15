@@ -1685,9 +1685,14 @@ class GO4RExtension(omni.ext.IExt):
         #     self._log_message(f"Set {len(prim_paths)} prims as non-collidable for ray cast / lidar sensing")
 
 
-    async def _ensure_physics_updated(self, pause=True):
-        """Ensures the physics scene is updated by stepping the simulation if paused, or waiting a frame if playing.
-        Call with `await self._ensure_physics_updated()` to ensure the physics scene is updated."""
+    async def _ensure_physics_updated(self, pause=True, steps=1):
+        """Ensures the physics scene is updated by stepping the simulation if paused, or waiting frames if playing.
+        Call with `await self._ensure_physics_updated()` to ensure the physics scene is updated.
+
+        Args:
+            pause (bool, optional): Whether to pause the simulation after stepping. Defaults to True.
+            steps (int, optional): The number of physics steps/frames to advance. Defaults to 1.
+        """
         if not hasattr(self, 'timeline') or self.timeline is None:
             self._log_message("Warning: Timeline interface not found, attempting to re-acquire.")
             try:
@@ -1699,17 +1704,22 @@ class GO4RExtension(omni.ext.IExt):
         
         was_playing = self.timeline.is_playing()
         if not was_playing:
-            # If not playing, play, wait a frame, then pause
+            # If not playing, play before stepping
             self.timeline.play()
-            # Wait a frame for physics changes to propagate
-            await omni.kit.app.get_app().next_update_async() 
-        else:
-            # If already playing, just wait a frame
+            # Wait for play command to take effect
             await omni.kit.app.get_app().next_update_async()
-        
-        if pause:
-                # Pause the simulation again
-                self.timeline.pause()
+
+        # Advance the simulation by the specified number of steps
+        for _ in range(steps):
+            await omni.kit.app.get_app().next_update_async()
+
+        if pause and not was_playing:
+            # If it wasn't playing originally, pause it again
+            self.timeline.pause()
+        elif not pause and was_playing:
+            # If it was playing originally and pause is False, ensure it continues playing
+            # (This might be redundant if play() keeps it playing, but ensures state)
+            self.timeline.play()
     
     async def _get_points_raycast(self, sensor_instance:Sensor3D_Instance, mesh_prim_path:Sdf.Path) -> List[Tuple[Gf.Vec3d, str, float]]:
         """Get the number of points from a raycast that land on the given prim"""
@@ -1764,8 +1774,10 @@ class GO4RExtension(omni.ext.IExt):
             # Now, while there are still enabled voxels, cast, add the points to the measurements, then un-target any voxels that were hit
             hit_paths = [0] # put something here so we enter the loop
             iterations = 0
+            print(f"Iteration\tHit paths\tVoxels hit\tRemaining")
+            print("---------\t---------\t----------\t---------")
             while len(all_voxel_paths) > 0:
-                await self._ensure_physics_updated(pause=True)
+                await self._ensure_physics_updated(pause=False, steps=3)
                 rc_pathstr = str(prim_utils.get_prim_path(ray_caster))
                 hit_paths = self.lidarInterface.get_prim_data(rc_pathstr)
                 # Remove empty hits
@@ -1789,8 +1801,13 @@ class GO4RExtension(omni.ext.IExt):
 
                 all_voxel_paths = [path for path in all_voxel_paths if path not in unique_hit_paths]
 
-                self._log_message(f"  Iteration {iterations}: Hit {len(unique_hit_paths)} voxels. {len(all_voxel_paths)} voxels remaining.")
+                print(f"  {iterations}\t\t  {len(hit_paths)}\t  {len(unique_hit_paths)}\t\t  {len(all_voxel_paths)}")
+
+                # self._log_message(f"  Iteration {iterations}: Hit {len(unique_hit_paths)} voxels. {len(all_voxel_paths)} voxels remaining.")
                 iterations += 1
 
+        self._log_message(f"Finished generating measurements for {sensor_instance.name}")
+        await self._ensure_physics_updated(pause=True, steps=1)
+        print(measurements)
         return measurements
 
