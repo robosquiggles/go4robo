@@ -1460,7 +1460,7 @@ class GO4RExtension(omni.ext.IExt):
             mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
             
             # Define or get the transparent material
-            mat_path = Sdf.Path("/World/Looks/TransparentVoxelMaterial")
+            mat_path = Sdf.Path(f"/World/GO4R_PerceptionVolume/Looks/{mesh_name}_material")
             mat_prim = stage.GetPrimAtPath(mat_path)
             if not mat_prim:
                 mat_prim = UsdShade.Material.Define(stage, mat_path)
