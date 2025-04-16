@@ -4,20 +4,25 @@ import omni.ext
 import omni.ui as ui
 import omni.kit.commands
 import omni.physx as _physx
-from omni.isaac.core.utils.stage import get_current_stage
+from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd
-import omni.isaac.core.utils.prims as prim_utils
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade
+import isaacsim.core.utils.prims as prim_utils
+import isaacsim.core.utils.collisions as collisions_utils
+from isaacsim.sensors.physx import _range_sensor
 
-import omni.isaac.sensor as sensor
+import asyncio # Used to run sample asynchronously to not block rendering thread
 
+from collections import Counter
 import numpy as np
 import math
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Union
 import carb
 import time
+
+import re
 
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
@@ -30,6 +35,21 @@ from bot_3d_rep import *
 
 sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
+default_sensor_aps = {
+    "Lidar3D": {
+        "a": 0.152,
+        "b": 0.659,
+    },
+    "MonoCamera3D": {
+        "a": 0.055,
+        "b": 0.155,
+    },
+    "StereoCamera3D": {
+        "a": 0.055,
+        "b": 0.155,
+    }
+}
+
 class GO4RExtension(omni.ext.IExt):
     """Extension that calculates perception entropy for cameras and LiDARs in Isaac Sim"""
     
@@ -38,6 +58,10 @@ class GO4RExtension(omni.ext.IExt):
 
         self.ext_id = ext_id
         self._usd_context = omni.usd.get_context()
+
+        self.stage = omni.usd.get_context().get_stage()                      # Used to access Geometry
+        self.timeline = omni.timeline.get_timeline_interface()               # Used to interact with simulation
+        self.lidarInterface = _range_sensor.acquire_lidar_sensor_interface() # Used to interact with the LIDAR
 
         self._window = ScrollingWindow(title=EXTENSION_TITLE, width=600, height=700)
         # self._window.set_visibility_changed_fn(self._on_window)
@@ -59,57 +83,31 @@ class GO4RExtension(omni.ext.IExt):
 
         self.selected_export_path=None
 
-        # Events
-        self._usd_context = omni.usd.get_context()
-        events = self._usd_context.get_stage_event_stream()
-        self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
-
         # A place to store the robots
-        self.selected_robots = []
+        self.robots = []
 
         # These just help handle the stage selection and structure
         self.previous_selection = []
-        self.processed_lidar_paths = set()
         
-        # Constants for calculation based on the paper
-        # TODO: Make this based on mesh/objects in the scene
-        self.perception_space = {
-            "x_range": [-80.0, 80.0],  # meters
-            "y_range": [-40.0, 40.0],  # meters
-            "z_range": [0.0, 5.0]      # meters
-        }
-        
-        # Constants for camera AP calculation
-        self.camera_ap_constants = {
-            "a": 0.055,  # coefficient from the paper
-            "b": 0.155   # coefficient from the paper
-        }
-        
-        # Constants for LiDAR AP calculation
-        self.lidar_ap_constants = {
-            "a": 0.152,  # coefficient from the paper
-            "b": 0.659   # coefficient from the paper
-        }
-        
-        # Voxel size for object representation (in meters)
-        # TODO: Make this adjustable in the UI
+        # Perception Space Voxels
         self.voxel_size = 0.1
-        
-        # Target object types with their typical dimensions (length, width, height in meters)
-        # TODO: Make this based on objects in the scene?
-        self.target_objects = {
-            "car": {"dimensions": [4.5, 1.8, 1.5], "weight": 1.0},
-            "pedestrian": {"dimensions": [0.6, 0.6, 1.7], "weight": 1.0},
-            "cyclist": {"dimensions": [1.8, 0.6, 1.7], "weight": 1.0}, 
-            "truck": {"dimensions": [8.0, 2.5, 3.0], "weight": 1.0},
-            "cone": {"dimensions": [0.3, 0.3, 0.5], "weight": 1.0}
-        }
+        self.weighted_voxels = {} # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
+        self.xform_groups = {}  # Maps xform paths to group IDs
 
+        # Logging
         self.log_messages = []
         self.max_log_messages = 100  # Default value
+        
+        # Add a property to track the selected perception area mesh
+        self.perception_mesh = None
+        self.perception_mesh_path = None
+        
         self._build_ui()
         self._window.visible = True
-        
+
+        # Events
+        events = self._usd_context.get_stage_event_stream()
+        self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
 
     def _build_ui(self):
         """Build the UI for the extension"""
@@ -124,11 +122,9 @@ class GO4RExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5, height=0):
                             with ui.HStack(spacing=5):
                                 self.selected_robot_label = ui.Label("(Select one or more robot from the stage)", style = {"color": ui.color("#FF0000")})
-                                self.refresh_sensors_btn = ui.Button("Refresh Sensor List", clicked_fn=self._refresh_sensor_list, height=36, width=0)
+                                self.refresh_sensors_btn = ui.Button("Refresh Robots & Sensors", clicked_fn=self._refresh_sensor_list, height=36, width=0)
                                 self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
-                            self.sensor_list = ui.ScrollingFrame(
-                                height=500,
-                            )
+                            self.sensor_list = ui.ScrollingFrame(height=300)
                             with ui.CollapsableFrame("Data Export", height=0, collapsed=True):
                                 with ui.VStack(spacing=5, height=0):
                                     with ui.HStack(spacing=5):
@@ -145,62 +141,74 @@ class GO4RExtension(omni.ext.IExt):
 
                     ui.Spacer(height=10)
                     
-                    with ui.CollapsableFrame("Settings", height=0):
+                    with ui.CollapsableFrame("Perception Entropy", height=0):
                         with ui.VStack(spacing=5, height=0):
-                            ui.Label("Perception Space (meters)")
-                            
-                            with ui.HStack(spacing=5):
-                                ui.Label("X Range:", width=70)
-                                self.x_min_field = ui.FloatField(width=50)
-                                self.x_min_field.model.set_value(self.perception_space["x_range"][0])
-                                ui.Label("to", width=20)
-                                self.x_max_field = ui.FloatField(width=50)
-                                self.x_max_field.model.set_value(self.perception_space["x_range"][1])
-                            
-                            with ui.HStack(spacing=5):
-                                ui.Label("Y Range:", width=70)
-                                self.y_min_field = ui.FloatField(width=50)
-                                self.y_min_field.model.set_value(self.perception_space["y_range"][0])
-                                ui.Label("to", width=20)
-                                self.y_max_field = ui.FloatField(width=50)
-                                self.y_max_field.model.set_value(self.perception_space["y_range"][1])
-                            
-                            with ui.HStack(spacing=5):
-                                ui.Label("Z Range:", width=70)
-                                self.z_min_field = ui.FloatField(width=50)
-                                self.z_min_field.model.set_value(self.perception_space["z_range"][0])
-                                ui.Label("to", width=20)
-                                self.z_max_field = ui.FloatField(width=50)
-                                self.z_max_field.model.set_value(self.perception_space["z_range"][1])
-                    
-                    with ui.CollapsableFrame("Object Types", height=0):
-                        with ui.VStack(spacing=5, height=0):
-                            for obj_type in self.target_objects:
-                                with ui.HStack(spacing=5):
-                                    ui.Label(f"{obj_type.capitalize()}", width=100)
-                                    ui.Label("Weight:", width=50)
-                                    weight_field = ui.FloatField(width=50)
-                                    weight_field.model.set_value(self.target_objects[obj_type]["weight"])
-                                    weight_field.model.add_value_changed_fn(
-                                        lambda w, obj=obj_type: self._update_object_weight(obj, w)
-                                    )
-                    
-                    ui.Spacer(height=10)
-                    
-                    # Buttons for operations
-                    with ui.HStack(spacing=5, height=0):
-                        self.analyze_btn = ui.Button("Analyze Robot Sensors", clicked_fn=self._analyze_sensors, height=36)
-                        self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
+
+                            # Add a label with instructions
+                            with ui.CollapsableFrame("Instructions", height=0, collapsed=True):
+                                with ui.VStack(spacing=5, height=0):
+                                    ui.Label("The perception Space is a collection of voxels that represent the environment.\nVoxels can be grouped and weighted according to the importance of being able to see in that volume.")
+                                    ui.Label("Select a mesh and then click 'Voxelize' to create a voxel group.")
+                                    ui.Label("Move voxels from one group to another by dragging them in the stage (See 'GO4R_PerceptionSpace).")
+                                    ui.Label("Adjust the importance/weight of each group with the textbox.")
+
+                            # Add sampling step size UI
+                            with ui.CollapsableFrame("Voxelization", height=0):
+                                with ui.VStack(spacing=5, height=0):
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Sampling Density:", width=120)
+                                        self.voxel_size_field = ui.FloatField(width=60)
+                                        self.voxel_size_field.model.set_value(self.voxel_size)
+                                        ui.Label("meters between sample points", width=0)
+                                        
+                                        def _update_step_size(value:float):
+                                            # Extract the actual float value from the model object
+                                            float_value = value.get_value_as_float()
+                                            self.voxel_size = float_value
+                                            self._log_message(f"Sampling voxel size set to {self.voxel_size} meters")
+                                        
+                                        self.voxel_size_field.model.add_value_changed_fn(_update_step_size)
+                                        
+                                    # Add mesh selection UI
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Perception Mesh:", width=120)
+                                        self.perception_mesh_label = ui.Label("(Not selected)", style={"color": ui.color("#FF0000")})
+                                        self.select_mesh_btn = ui.Button("Voxelize", width=80, height=36, clicked_fn=self._on_voxelize_button_clicked)
+                                        self.voxelize_progress_bar = ui.ProgressBar(width=120, height=36, val=0.0)
+
+                            # Voxel Groups Section
+                            with ui.CollapsableFrame("Voxel Groups", height=0):
+                                with ui.VStack(spacing=5, height=0):
+
+                                    # Header row
+                                    with ui.HStack(spacing=5):
+                                        ui.Label("Group", width=120)
+                                        ui.Label("Weight", width=60)
+                                        ui.Label("Voxel Count", width=120)
+                                        ui.Spacer(width=120)  # Align with first column
+                                        self.add_group_btn = ui.Button("+ New Group", clicked_fn=self._add_voxel_group, height=24, style={"color": ui.color("#00FF00")})
+
+                                    # Container for dynamically added voxel groups
+                                    self.voxel_groups_container = ui.VStack(spacing=5, height=0)
+                        
+                            # Buttons for operations
+                            with ui.HStack(spacing=5, height=0):
+                                self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropies, width=120, height=36)
+                                # Initially disable the button since no mesh is selected
+                                self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+                                self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
+                            self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
                     
                     ui.Spacer(height=10)
                     
                     # Results section
-                    with ui.CollapsableFrame("Results", height=0):
+                    with ui.CollapsableFrame("Results", height=0, collapsed=True):
                         with ui.VStack(spacing=5):
-                            self.camera_label = ui.Label("Cameras: Not analyzed")
-                            self.lidar_label = ui.Label("LiDARs: Not analyzed")
-                            self.total_label = ui.Label("Total Perception Entropy: N/A")
-                            
+                            self.results_list = ui.ScrollingFrame(height=250)
+                            # Initialize with empty results
+                            with self.results_list:
+                                ui.Label("Run analysis to see results")
+                    
                     ui.Spacer(height=20)
                     
                     # Log section for detailed information
@@ -213,19 +221,15 @@ class GO4RExtension(omni.ext.IExt):
                                 self.max_messages_field.model.add_value_changed_fn(self._update_max_log_messages)
                                 self.clear_log_btn = ui.Button("Clear Log", width=80, clicked_fn=self._clear_log, height=18)
 
-                            self.log_text = ui.ScrollingFrame(
-                                height=250, 
+                            self.log_field = ui.StringField(
+                                read_only=True,  # Make it read-only so users can't edit the log
+                                multiline=True,  # Enable multi-line text
+                                height=250,
                                 style={
-                                    "border_width": 1, 
-                                    "border_color": 0xFF0000FF, 
-                                    "border_radius": 3,
-                                    "alignment": ui.Alignment.TOP,
-                                    "margin": 4
-                                },
-                                scroll_to_bottom_on_change=True
+                                    "font_size": 14,
+                                    "border_width": 0,  # No border for the field itself
+                                }
                             )
-                            with self.log_text:
-                                self.log_label = ui.Label("")
         
         except Exception as e:
             print(f"Error building UI: {str(e)}")
@@ -263,6 +267,7 @@ class GO4RExtension(omni.ext.IExt):
         self._window.visible = not self._window.visible
 
     def _on_stage_event(self, event):
+
         selection = self._usd_context.get_selection().get_selected_prim_paths()
 
         # Only process if selection has actually changed
@@ -272,35 +277,113 @@ class GO4RExtension(omni.ext.IExt):
         # Store current selection for future comparison
         self.previous_selection = selection.copy()
 
-        self.selected_robots = []
+        self.selected_prims = []
 
         if not selection:
             self.selected_robot_label.text = "(Select one or more robot from the stage)"
             self.selected_robot_label.style = {"color": ui.color("#FF0000")}
             self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+
+            self.perception_mesh_label.text = "(Select one mesh from the stage)"
+            self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
+            self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
             return
         
         for robot_path in selection:
-            bot = Bot3D(path=robot_path,
-                        name=robot_path.split('/')[-1]
-            )
-            self.selected_robots.append(bot)
-        self.selected_robot_label.text = f"Selected robots: {', '.join([bot.name for bot in self.selected_robots])}"
+            bot_prim = get_current_stage().GetPrimAtPath(robot_path)
+            self.selected_prims.append(bot_prim)
+
+        self.selected_robot_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_prims])}"
         self.enable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#00FF00"))
         self.selected_robot_label.style = {"color": ui.color("#00FF00")}
+
+        if len(self.selected_prims) > 1:
+            self.perception_mesh_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_prims])}"
+            self.disable_ui_element(self.select_mesh_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+            self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
+        elif len(self.selected_prims) == 1 and self.selected_prims[0].IsA(UsdGeom.Mesh):
+            # One mesh is selected. Use it as your perception mesh??
+            self.perception_mesh = self.selected_prims[0]
+            self.perception_mesh_label.text = f"Selected: {self.selected_prims[0].GetName()}"
+            self.enable_ui_element(self.select_mesh_btn, text_color=ui.color("#00FF00"))
+            self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+            self.perception_mesh_label.style = {"color": ui.color("#00FF00")}
+        else:
+            self.perception_mesh_label.text = "(Select one mesh from the stage)"
+            self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
+            self.disable_ui_element(self.select_mesh_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+
+        # If /World/GO4R_PerceptionVolume exists, update the voxel groups found there
+        if get_current_stage().GetPrimAtPath("/World/GO4R_PerceptionVolume"):
+            self._update_voxel_groups_from_stage()
+
+    def _update_voxel_groups_from_stage(self):
+        """Update voxel groups based on XForm hierarchy under GO4R_PerceptionVolume"""
+        stage = get_current_stage()
+        parent_path = "/World/GO4R_PerceptionVolume"
+        parent_prim = stage.GetPrimAtPath(parent_path)
         
-        # Log the selected robots
-        self._log_message(self.selected_robot_label.text)
+        if not parent_prim:
+            self._log_message("Error: Perception volume not found in stage")
+            return
+            
+        # Track all meshes found
+        all_found_voxels = set()
+              
+        # Find all XForm children and assign group IDs
+        xform_groups = [child for child in parent_prim.GetChildren() 
+                        if child.IsA(UsdGeom.Xform) and not child.IsA(UsdGeom.Mesh)]
+        
+        # Map existing group IDs to maintain weights where possible
+        new_weighted_voxels = {}
+        
+        # Process XForm groups first
+        for xform in xform_groups:
+            custom_data = xform.GetCustomData()
+            weight = custom_data.get("perception_weight")
+            if weight is None:
+                xform.SetCustomDataByKey("perception_weight", 1.0)
+                weight = 1.0
+            xform_path = str(xform.GetPath())
+            # The group id is the last part of the path
+            group_id = xform_path.split("/")[-1]
+            
+            # Find all mesh children (voxels) under this XForm
+            voxel_meshes = []
+            for child in xform.GetChildren():
+                if child.IsA(UsdGeom.Mesh):
+                    voxel_meshes.append(child)
+                    all_found_voxels.add(str(child.GetPath()))
+                
+            new_weighted_voxels.update({group_id: (np.array(voxel_meshes), weight)})
+        
+        # Group ungrouped meshes to show the warning in the UI
+        ungrouped_voxels = []
+        for child in parent_prim.GetChildren():
+            if child.IsA(UsdGeom.Mesh) and str(child.GetPath()) not in all_found_voxels:
+                ungrouped_voxels.append(child)
+                all_found_voxels.add(str(child.GetPath()))
+        
+        if ungrouped_voxels:
+            new_weighted_voxels.update({"UNGROUPED": (ungrouped_voxels, 0.0)})
+        
+        # Update member variables
+        self.weighted_voxels = new_weighted_voxels
+        
+        # Update the UI
+        self._update_voxel_groups_ui()
+        # self._log_message(f"Updated {len(self.weighted_voxels)} voxel groups based on stage hierarchy")
 
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
         self.max_log_messages = max(1, int(value))
-        self._update_log_display()  # Refresh display with new limit
         
     def _clear_log(self):
         """Clear all log messages"""
         self.log_messages = []
-        self.log_label.text = ""
+        self._update_log_display()
         
     def _log_message(self, message: str):
         """Add a message to the log"""
@@ -314,15 +397,93 @@ class GO4RExtension(omni.ext.IExt):
         if len(self.log_messages) > self.max_log_messages:
             self.log_messages = self.log_messages[-self.max_log_messages:]
         
-        # Update display
+        # Update the log display with the new messages - this line is missing
         self._update_log_display()
-        
+
     def _update_log_display(self):
         """Update the log display with current messages"""
-        self.log_label.text = "\n".join(self.log_messages)
+        # Join the log messages with newlines and update the StringField
+        # Ensure UI update happens on the main thread if called from async context
+        async def update_ui():
+            self.log_field.model.set_value("\n".join(self.log_messages))
+        asyncio.ensure_future(update_ui())
+
+    def _update_voxel_groups_ui(self):
+        """Update the UI to show the current voxel groups"""
+        # Clear existing UI
+        self.voxel_groups_container.clear()
         
-        # Auto-scroll to bottom - this is handled by ScrollingFrame automatically
-        # when content changes, but we could add explicit scrolling if needed
+        with self.voxel_groups_container:
+            for group_name, (voxels, weight) in self.weighted_voxels.items():
+                    
+                with ui.HStack(spacing=5):
+
+                    if group_name != "UNGROUPED":
+                        ui.Label(group_name, width=120)
+                    else:
+                        # Special case for ungrouped voxels
+                        ui.Label("UNGROUPED", width=120, style={"color": ui.color("#FF0000")})
+                    
+                    # Weight slider
+                    weight_drag = ui.FloatDrag(width=60)
+                    weight_drag.model.set_value(weight)
+                    
+                    def make_weight_changed_fn(g_id):
+                        def on_weight_changed(value):
+                            # Update the weight for this group
+                            voxels, _ = self.weighted_voxels[g_id]
+                            self.weighted_voxels[g_id] = (voxels, value.get_value_as_float())
+
+                            # Update the custom weight data for the XForm
+                            xform_path = f"/World/GO4R_PerceptionVolume/{g_id}"
+                            xform_prim = get_current_stage().GetPrimAtPath(xform_path)
+                            if xform_prim:
+                                xform_prim.SetCustomDataByKey("perception_weight", value.get_value_as_float())
+                            else:
+                                self._log_message(f"Error: XForm {xform_path} not found in stage")
+
+                            self._log_message(f"Updated {group_name} weight to {value.get_value_as_float()}")
+                        return on_weight_changed
+                    
+                    if group_name != "UNGROUPED":
+                        weight_drag.model.add_value_changed_fn(make_weight_changed_fn(group_name))
+                    else:
+                        # Disable the weight slider for ungrouped voxels
+                        self.disable_ui_element(weight_drag, text_color=ui.color("#FF0000"))
+                    
+                    # Voxel count
+                    
+                    if group_name != "UNGROUPED":
+                        ui.Label(f"{len(voxels)}", width=120)
+                    else:
+                        ui.Label(f"{len(voxels)}", width=120, style={"color": ui.color("#FF0000")})
+        
+        # Finally, if there are voxel groups, and robots to analyze, enable the analyze perception button
+        if len(self.weighted_voxels) > 0 and "UNGROUPED" not in self.weighted_voxels and len(self.robots) > 0:
+            self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+
+    def _add_voxel_group(self):
+        """Add a new XForm group for voxels"""
+        # Create a new XForm under the perception volume
+        stage = get_current_stage()
+        parent_path = "/World/GO4R_PerceptionVolume"
+        
+        # Create a new XForm voxel group
+        xform_path = f"{parent_path}/VoxelGroup"
+        id = 0
+        while stage.GetPrimAtPath(xform_path):
+            # Increment the group ID until we find a free one
+            xform_path = f"{parent_path}/VoxelGroup_{id}"
+            id += 1
+        
+        # Create the new XForm
+        xform_prim = stage.DefinePrim(xform_path, "Xform")
+        xform_prim.SetCustomDataByKey("perception_weight", 1.0)
+        
+        # Update groups from stage - this will pick up the new XForm
+        self._update_voxel_groups_from_stage()
+        
+        self._log_message(f"Added new voxel group at {xform_path}")
 
     def _browse_export_path(self):
         """Open a file dialog to select export location"""
@@ -501,38 +662,225 @@ class GO4RExtension(omni.ext.IExt):
     
     def _reset_settings(self):
         """Reset all settings to default values"""
-        self.perception_space = {
-            "x_range": [-80.0, 80.0],
-            "y_range": [-40.0, 40.0],
-            "z_range": [0.0, 5.0]
-        }
         
-        # Update UI fields
-        self.x_min_field.model.set_value(self.perception_space["x_range"][0])
-        self.x_max_field.model.set_value(self.perception_space["x_range"][1])
-        self.y_min_field.model.set_value(self.perception_space["y_range"][0])
-        self.y_max_field.model.set_value(self.perception_space["y_range"][1])
-        self.z_min_field.model.set_value(self.perception_space["z_range"][0])
-        self.z_max_field.model.set_value(self.perception_space["z_range"][1])
+        # Reset perception mesh settings
+        self.perception_mesh = None
+        self.perception_mesh_path = None
+        self.perception_mesh_label.text = "(Not selected)"
         
-        # Reset object weights
-        for obj_type in self.target_objects:
-            self.target_objects[obj_type]["weight"] = 1.0
-            
+        # Disable analyze button when mesh is reset
+        self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+        
+        # Reset sampling step size
+        self.voxel_size = 5.0
+        self.voxel_size_field.model.set_value(self.voxel_size)
+        
         self._log_message("Settings reset to default values")
     
     def _refresh_sensor_list(self):
         """Refresh the list of detected sensors without analysis"""
-        self._log_message("Refreshing sensor list...")
+
+        def _remove_trailing_digits(name):
+            """Remove trailing underscore+digits from a name, if they are present, using re"""
+            return re.sub(r'(_\d+)?$', '', name)
+
+        def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
+            """Find cameras that are descendants of the selected robot"""
+
+            # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
+
+            if prim.IsA(UsdGeom.Camera):
+                # Skip editor cameras if a specific robot is selected
+                name = prim.GetName()
+                
+                # Load the camera information into a MonoCamera3D
+                cam_prim = UsdGeom.Camera(prim)
+
+                # Get the aspect ratio
+                aspect_ratio = self._get_prim_attribute(prim, "aspectRatio", None)
+                if aspect_ratio is None:
+                    v_aperture = cam_prim.GetVerticalApertureAttr().Get()
+                    h_aperture = cam_prim.GetHorizontalApertureAttr().Get()
+                    if v_aperture is not None and h_aperture is not None:
+                        aspect_ratio = h_aperture / v_aperture
+                if aspect_ratio is None:
+                    self._log_message(f"Warning: Could not find aspect ratio for camera {prim.GetName()}, defaulting to 4:3")
+                    aspect_ratio = 4.0/3.0
+
+                # Get resolution more robustly - try different attribute names or patterns
+                resolution = None
+                # Try standard resolution attribute
+                if prim.HasAttribute("resolution"):
+                    resolution = prim.GetAttribute("resolution").Get()
+                # Try common alternatives
+                elif prim.HasAttribute("horizontalImageSize") and prim.HasAttribute("verticalImageSize"):
+                    h_size = prim.GetAttribute("horizontalImageSize").Get()
+                    v_size = prim.GetAttribute("verticalImageSize").Get()
+                    if h_size is not None and v_size is not None:
+                        resolution = (h_size, v_size)
+                # Try isaac-specific attributes
+                elif prim.HasAttribute("sensorWidth") and prim.HasAttribute("sensorHeight"):
+                    resolution = (prim.GetAttribute("sensorWidth").Get(), 
+                                prim.GetAttribute("sensorHeight").Get())
+                
+                # If resolution still not found, try to infer from other parameters
+                if resolution is None:
+                    # Log that we couldn't find resolution directly
+                    self._log_message(f"Warning: Could not find resolution for camera {prim.GetName()}, defaulting to 720p")
+                    # Default to HD resolution as fallback
+                    resolution = (720, 720*aspect_ratio)
+
+                try:
+                    cam3d = MonoCamera3D(name=_remove_trailing_digits(name),
+                                        focal_length=cam_prim.GetFocalLengthAttr().Get(),
+                                        h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
+                                        v_aperture=cam_prim.GetVerticalApertureAttr().Get(),
+                                        aspect_ratio=aspect_ratio,
+                                        h_res=resolution[0] if resolution else None,
+                                        v_res=resolution[1] if resolution else None,
+                                        body=prim,
+                                        cost=1.0,
+                                        focal_point=(0, 0, 0)
+                                        )
+                    cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
+                    cam3d_instance.create_ray_casters(get_current_stage(), self._usd_context)
+                    self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
+                except Exception as e:
+                    self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
+                    raise e
+                    
+                return cam3d_instance
+            
+            else:
+                return None
+
+        def _find_lidar(prim:Usd.Prim) -> Dict:
+            """Find LiDARs that are descendants of the selected robot"""
+
+            # self._log_message(f"DEBUG: Checking for LiDAR prim {prim.GetName()} of type {prim.GetTypeName()}")
+
+            type_name = str(prim.GetTypeName()).lower()
+            lidar_instance = None
+            
+            if "lidar" in type_name or "range" in type_name:
+                name = prim.GetName()
+                if "go4r_raycaster" in name.lower():
+                    # Skip if this is a raycaster created by the extension
+                    return None
+                if name.lower() == "lidar":
+                    # Get the name from the parent
+                    name = prim.GetParent().GetName()
+                # Direct LiDAR prim - extract properties
+                try:
+                    lidar = Lidar3D(name=_remove_trailing_digits(name),
+                                    h_fov=self._get_prim_attribute(prim, "horizontalFov"),
+                                    v_fov=self._get_prim_attribute(prim, "verticalFov"),
+                                    h_res=self._get_prim_attribute(prim, "horizontalResolution"),
+                                    v_res=self._get_prim_attribute(prim, "verticalResolution"),
+                                    max_range=self._get_prim_attribute(prim, "maxRange"),
+                                    min_range=self._get_prim_attribute(prim, "minRange"),
+                                    body=prim,
+                                    cost=1.0,
+                                    )
+                    lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
+                    lidar_instance.create_ray_casters(get_current_stage(), self._usd_context)
+                    self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
+                except Exception as e:
+                    self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
+            
+            return lidar_instance
+
+
+        def _assign_sensors_to_robot(prim, bot, processed_camera_paths=None):
+            """Search a level for sensors and add them to the specified robot"""
+            # Check if this node contains a sensor, regardless of whether it's a leaf
+            # This allows finding sensors at any level of the hierarchy
+            
+            # Check for LiDAR first
+            lidar = _find_lidar(prim)
+            if lidar is not None:
+                self._log_message(f"Adding LiDAR: {lidar.name} to robot {bot.name}")
+                bot.sensors.append(lidar)
+                # Don't return, continue searching in case there are other sensors
+
+            # Check for camera
+            camera = _find_camera(prim)
+            if camera is not None:
+                self._log_message(f"Found camera at path: {prim.GetPath()}")
+                
+                # Handle stereo camera pairing
+                found_stereo_pair = False
+                for role in ["left", "right"]:
+                    if (role in camera.name.lower() or 
+                        (prim.HasAttribute("stereoRole") and prim.GetAttribute("stereoRole").Get() == role)):
+                        this_cam_role = role
+                        this_cam_name = camera.name
+                        this_cam_path_str = prim.GetPath().pathString
+                        other_cam_role = "left" if role == "right" else "right"
+                        other_cam_name = camera.name.replace(role, other_cam_role)
+                        other_cam_path_str = str(this_cam_path_str).replace(role, other_cam_role)
+
+                        # Check if the other camera is already in the sensors list
+                        for i, sensor_instance in enumerate(bot.sensors):
+                            if isinstance(sensor_instance.sensor, MonoCamera3D):
+                                if sensor_instance.name == other_cam_name:
+                                    # Found the other camera, create a stereo camera
+                                    self._log_message(f"Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
+                                    self._log_message(f"  Path 1: {this_cam_path_str}")
+                                    self._log_message(f"  Path 2: {sensor_instance.path.pathString}")
+                                    # Find the common parent of the two cameras based on the paths
+                                    common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path.pathString])
+                                    self._log_message(f"  Common: {common_parent_path}")
+                                    common_parent_prim = get_current_stage().GetPrimAtPath(common_parent_path)
+                                    if not common_parent_prim:
+                                        self._log_message(f"Error: Could not find common parent prim at path {common_parent_path}")
+                                        common_parent_name=this_cam_name.replace(this_cam_role, "")
+                                    else:
+                                        common_parent_name = common_parent_prim.GetName()
+                                    
+                                    # Remove any training '_XX' suffix (where XX is two+ digits) from the common parent name
+                                    if common_parent_name.endswith("_XX"):
+                                        common_parent_name = common_parent_name[:-3]
+
+
+                                    stereo_cam = StereoCamera3D(
+                                        name=_remove_trailing_digits(common_parent_name),
+                                        sensor1=sensor_instance.sensor if this_cam_role == "left" else camera.sensor,
+                                        sensor2=sensor_instance.sensor if this_cam_role == "right" else camera.sensor,
+                                        tf_sensor1=sensor_instance.tf if this_cam_role == "left" else camera.tf,
+                                        tf_sensor2=sensor_instance.tf if this_cam_role == "right" else camera.tf,
+                                        cost=sensor_instance.sensor.cost + camera.sensor.cost,
+                                        body=prim
+                                    )
+                                    stereo_instance = Sensor3D_Instance(stereo_cam, path=common_parent_path, 
+                                                                    name=_remove_trailing_digits(common_parent_name), 
+                                                                    tf=camera.tf)
+                                    # Move the ray casters from the MonoCamera3D instance to the StereoCamera3D instance
+                                    stereo_instance.ray_casters = sensor_instance.ray_casters + camera.ray_casters
+                                    bot.sensors[i] = stereo_instance  # Replace the mono camera with stereo
+                                    found_stereo_pair = True
+                                    break
+                        break  # Found a role, no need to check other roles
+                        
+                # Add camera only if it wasn't part of a stereo pair
+                if not found_stereo_pair:
+                    self._log_message(f"Adding camera: {camera.name} to robot {bot.name}")
+                    bot.sensors.append(camera)
+            
+            # Always continue recursively even if sensors were found at this level
+            for child in prim.GetChildren():
+                _assign_sensors_to_robot(child, bot, processed_camera_paths)
+
+        self._log_message("Refreshing robots & sensors list...")
 
         stage = get_current_stage()
-        
-        # Reset processed lidar paths
-        self.processed_lidar_paths = set()
 
+        self.robots = []
         
         total_sensors = dict.fromkeys(sensor_types, 0)
-        for bot in self.selected_robots:
+        for bot_prim in self.selected_prims:
+            bot = Bot3D(bot_prim.GetName(), path=bot_prim.GetPath())
+            self.robots.append(bot)
             # Clear existing sensors before searching again
             bot.sensors = []
             
@@ -543,7 +891,7 @@ class GO4RExtension(omni.ext.IExt):
                 continue
                 
             # Search for sensors in this robot (with a new empty processed_camera_paths set)
-            self._assign_sensors_to_robot(robot_prim, bot)
+            _assign_sensors_to_robot(robot_prim, bot)
             
             found_sensors = {}
             for type in sensor_types:
@@ -553,175 +901,12 @@ class GO4RExtension(omni.ext.IExt):
             
         self._log_message(f"Total sensors found: " + ', '.join([f"{total_sensors[type]} {type.__name__}(s)" for type in sensor_types]))
         
-        # Update the sensor list UI
+        # Update the UI
         self._update_sensor_list_ui()
-
-    def _find_camera(self, prim) -> Sensor3D_Instance:
-        """Find cameras that are descendants of the selected robot"""
-
-        # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
-
-        if prim.IsA(UsdGeom.Camera):
-            # Skip editor cameras if a specific robot is selected
-            name = prim.GetName()
-            
-            # Load the camera information into a MonoCamera3D
-            cam_prim = UsdGeom.Camera(prim)
-
-            # Get resolution more robustly - try different attribute names or patterns
-            resolution = None
-            # Try standard resolution attribute
-            if prim.HasAttribute("resolution"):
-                resolution = prim.GetAttribute("resolution").Get()
-            # Try common alternatives
-            elif prim.HasAttribute("horizontalImageSize") and prim.HasAttribute("verticalImageSize"):
-                h_size = prim.GetAttribute("horizontalImageSize").Get()
-                v_size = prim.GetAttribute("verticalImageSize").Get()
-                if h_size is not None and v_size is not None:
-                    resolution = (h_size, v_size)
-            # Try isaac-specific attributes
-            elif prim.HasAttribute("sensorWidth") and prim.HasAttribute("sensorHeight"):
-                resolution = (prim.GetAttribute("sensorWidth").Get(), 
-                             prim.GetAttribute("sensorHeight").Get())
-            
-            # If resolution still not found, try to infer from other parameters
-            if resolution is None:
-                # Log that we couldn't find resolution directly
-                self._log_message(f"Warning: Could not find resolution for camera {prim.GetName()}")
-                # Default to HD resolution as fallback
-                # resolution = (1280, 720)
-
-            try:
-                cam3d = MonoCamera3D(name=name,
-                                    focal_length=cam_prim.GetFocalLengthAttr().Get(),
-                                    h_aperture=cam_prim.GetHorizontalApertureAttr().Get(),
-                                    v_aperture=cam_prim.GetVerticalApertureAttr().Get(),
-                                    aspect_ratio=self._get_prim_attribute(prim, "aspectRatio", None),
-                                    h_res=resolution[0] if resolution else None,
-                                    v_res=resolution[1] if resolution else None,
-                                    body=prim,
-                                    cost=1.0,
-                                    focal_point=(0, 0, 0)
-                                    )
-                cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
-                self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
-            except Exception as e:
-                self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
-                
-            return cam3d_instance
-        
-        else:
-            return None
-
-    def _find_lidar(self, prim:Usd.Prim) -> Dict:
-        """Find LiDARs that are descendants of the selected robot"""
-
-        # self._log_message(f"DEBUG: Checking for LiDAR prim {prim.GetName()} of type {prim.GetTypeName()}")
-
-        type_name = str(prim.GetTypeName()).lower()
-        lidar_instance = None
-        
-        if "lidar" in type_name or "range" in type_name:
-            name = prim.GetName()
-            if name.lower() != "lidar":
-                # Get the name from the parent
-                name = prim.GetParent().GetName()
-            # Direct LiDAR prim - extract properties
-            try:
-                lidar = Lidar3D(name=name,
-                                h_fov=self._get_prim_attribute(prim, "horizontalFov"),
-                                v_fov=self._get_prim_attribute(prim, "verticalFov"),
-                                h_res=self._get_prim_attribute(prim, "horizontalResolution"),
-                                v_res=self._get_prim_attribute(prim, "verticalResolution"),
-                                max_range=self._get_prim_attribute(prim, "maxRange"),
-                                min_range=self._get_prim_attribute(prim, "minRange"),
-                                body=prim,
-                                cost=1.0,
-                                )
-                lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=name, tf=self._get_world_transform(prim))
-                self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
-            except Exception as e:
-                self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
-        
-        return lidar_instance
+        self._update_voxel_groups_ui()
 
 
-    def _assign_sensors_to_robot(self, prim, bot, processed_camera_paths=None):
-        """Search a level for sensors and add them to the specified robot"""
-        # Check if this node contains a sensor, regardless of whether it's a leaf
-        # This allows finding sensors at any level of the hierarchy
-        
-        # Check for LiDAR first
-        lidar = self._find_lidar(prim)
-        if lidar is not None:
-            self._log_message(f"Adding LiDAR: {lidar.name} to robot {bot.name}")
-            bot.sensors.append(lidar)
-            # Don't return, continue searching in case there are other sensors
-
-        # Check for camera
-        camera = self._find_camera(prim)
-        if camera is not None:
-            self._log_message(f"Found camera at path: {prim.GetPath()}")
-            
-            # Handle stereo camera pairing
-            found_stereo_pair = False
-            for role in ["left", "right"]:
-                if (role in camera.name.lower() or 
-                    (prim.HasAttribute("stereoRole") and prim.GetAttribute("stereoRole").Get() == role)):
-                    this_cam_role = role
-                    this_cam_name = camera.name
-                    this_cam_path_str = prim.GetPath().pathString
-                    other_cam_role = "left" if role == "right" else "right"
-                    other_cam_name = camera.name.replace(role, other_cam_role)
-                    other_cam_path_str = str(this_cam_path_str).replace(role, other_cam_role)
-
-                    # Check if the other camera is already in the sensors list
-                    for i, sensor_instance in enumerate(bot.sensors):
-                        if isinstance(sensor_instance.sensor, MonoCamera3D):
-                            if sensor_instance.name == other_cam_name:
-                                # Found the other camera, create a stereo camera
-                                self._log_message(f"Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
-                                self._log_message(f"  Path 1: {this_cam_path_str}")
-                                self._log_message(f"  Path 2: {sensor_instance.path.pathString}")
-                                # Find the common parent of the two cameras based on the paths
-                                common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path.pathString])
-                                self._log_message(f"  Common: {common_parent_path}")
-                                common_parent_prim = get_current_stage().GetPrimAtPath(common_parent_path)
-                                if not common_parent_prim:
-                                    self._log_message(f"Error: Could not find common parent prim at path {common_parent_path}")
-                                    common_parent_name=this_cam_name.replace(this_cam_role, "")
-                                else:
-                                    common_parent_name = common_parent_prim.GetName()
-
-
-                                stereo_cam = StereoCamera3D(
-                                    name=common_parent_name,
-                                    sensor1=sensor_instance.sensor if this_cam_role == "left" else camera.sensor,
-                                    sensor2=sensor_instance.sensor if this_cam_role == "right" else camera.sensor,
-                                    tf_sensor1=sensor_instance.tf if this_cam_role == "left" else camera.tf,
-                                    tf_sensor2=sensor_instance.tf if this_cam_role == "right" else camera.tf,
-                                    cost=sensor_instance.sensor.cost + camera.sensor.cost,
-                                    body=prim
-                                )
-                                stereo_instance = Sensor3D_Instance(stereo_cam, path= common_parent_path, 
-                                                                 name=common_parent_name, 
-                                                                 tf=camera.tf)
-                                bot.sensors[i] = stereo_instance  # Replace the mono camera with stereo
-                                found_stereo_pair = True
-                                break
-                    break  # Found a role, no need to check other roles
-                    
-            # Add camera only if it wasn't part of a stereo pair
-            if not found_stereo_pair:
-                self._log_message(f"Adding camera: {camera.name} to robot {bot.name}")
-                bot.sensors.append(camera)
-        
-        # Always continue recursively even if sensors were found at this level
-        for child in prim.GetChildren():
-            self._assign_sensors_to_robot(child, bot, processed_camera_paths)
-
-
-    def _display_sensor_instance_properties(self, sensor_instance):
+    def _display_sensor_instance_properties(self, sensor_instance:Sensor3D_Instance):
         for attr, value in sensor_instance.__dict__.items():
             if "sensor" in attr:
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
@@ -732,6 +917,13 @@ class GO4RExtension(omni.ext.IExt):
                     with ui.VStack(spacing=2):
                         ui.Label(f"position: {value[0]}")
                         ui.Label(f"rotation: {value[1]}")
+            elif "ap_constants" in attr:
+                continue # Skip average precision attributes
+            elif "ray_casters" in attr:
+                with ui.CollapsableFrame(attr, height=0, collapsed=True):
+                    with ui.VStack(spacing=2):
+                        for i, rc in enumerate(value):
+                            ui.Label(f"rc{i+1} at {prim_utils.get_prim_path(rc)}")
             else:
                 ui.Label(f"{attr}: {value}")
 
@@ -743,11 +935,11 @@ class GO4RExtension(omni.ext.IExt):
         
         with self.sensor_list:
             with ui.VStack(spacing=5):
-                if not self.selected_robots:
+                if not self.robots:
                     ui.Label("No robots selected")
                 else:
                     # For each robot, create a collapsible frame
-                    for robot in self.selected_robots:
+                    for robot in self.robots:
                             
                         # Create collapsible frame for this robot with blue border
                         with ui.CollapsableFrame(
@@ -763,57 +955,253 @@ class GO4RExtension(omni.ext.IExt):
                                         with ui.CollapsableFrame(f"{sensor_type.__name__}s: {len(sensors)}", height=0, style={"border_color": ui.color("#00c3ff")}, collapsed=False):
                                             with ui.VStack(spacing=5):
                                                 for idx, sensor_instance in enumerate(sensors):
+                                                    # Set default average precision if not set
+                                                    if not hasattr(sensor_instance.sensor, 'ap_constants') or sensor_instance.sensor.ap_constants is None:
+                                                        ap_constants = {'a': default_sensor_aps[sensor_instance.sensor.__class__.__name__]["a"],
+                                                                        'b': default_sensor_aps[sensor_instance.sensor.__class__.__name__]["b"]}
+                                                        sensor_instance.sensor.ap_constants = ap_constants
+                                                        
                                                     with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
                                                         with ui.VStack(spacing=2):
-                                                            self._display_sensor_instance_properties(sensor_instance)
-                                
+                                                            # Add average precision input directly at the top level
+                                                            with ui.HStack(spacing=5):
+                                                                ui.Label("Average Precision:   a:", width=120)
+                                                                a_field = ui.FloatField(width=80)
+                                                                a_field.model.set_value(sensor_instance.sensor.ap_constants['a'])
+                                                                
+                                                                def on_a_val_changed(new_value, sensor=sensor_instance):
+                                                                    a = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                                    sensor.sensor.ap_constants['a'] = a
+                                                                    self._log_message(f"Set {sensor.name} average precision to {a:.2f}")
+                                                                
+                                                                a_field.model.add_value_changed_fn(on_a_val_changed)
 
-    def _update_object_weight(self, obj_type: str, weight: float):
-        """Update the weight of a specific object type"""
-        self.target_objects[obj_type]["weight"] = weight
-        self._log_message(f"Updated weight for {obj_type} to {weight}")
+                                                                ui.Label("   b:", width=0)
+                                                                b_field = ui.FloatField(width=80)
+                                                                b_field.model.set_value(sensor_instance.sensor.ap_constants['b'])
 
-    def _analyze_sensors(self):
-        """Main function to analyze all sensors on the robot"""
-        self._log_message("Starting sensor analysis...")
+                                                                def on_b_val_changed(new_value, sensor=sensor_instance):
+                                                                    b = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                                    sensor.sensor.ap_constants['b'] = b
+                                                                    self._log_message(f"Set {sensor.name} average precision to {b:.2f}")
+                                                                
+                                                                b_field.model.add_value_changed_fn(on_b_val_changed)
+                                                            
+                                                            # Show other properties in collapsible section
+                                                            with ui.CollapsableFrame("Properties", height=0, collapsed=True):
+                                                                with ui.VStack(spacing=2):
+                                                                    self._display_sensor_instance_properties(sensor_instance)
+
+    def _calc_perception_entropies(self, disable_raycasters=True):
+        """Main function to analyze all sensors on all the robots.
         
-        # Update perception space from UI fields
-        self.perception_space["x_range"] = [self.x_min_field.model.get_value_as_float(), 
-                                           self.x_max_field.model.get_value_as_float()]
-        self.perception_space["y_range"] = [self.y_min_field.model.get_value_as_float(), 
-                                           self.y_max_field.model.get_value_as_float()]
-        self.perception_space["z_range"] = [self.z_min_field.model.get_value_as_float(), 
-                                           self.z_max_field.model.get_value_as_float()]
+        Must have a perception mesh voxelized, and at least one robot analyzed"""
+        self._log_message("Starting perception entropy analysis...")
+        self.analysis_progress_bar.model.set_value(0.0) # Reset progress bar
+
+        # Check if we have robots to analyze, throw an error if not
+        if not self.robots:
+            self._log_message("Error: No robots selected for analysis.")
+            self.analysis_progress_bar.model.set_value(0.0)
+            return
         
-        # Refresh sensor list
-        self._refresh_sensor_list()
+        # Check if we have voxel groups, throw an error if not
+        if not self.weighted_voxels:
+            self._log_message("Error: No voxel groups found. Please create a perception mesh first.")
+            self.analysis_progress_bar.model.set_value(0.0)
+            return
         
-        # Use the detected sensors for analysis
-        cameras = self.detected_cameras
-        lidars = self.detected_lidars
-        
-        # Calculate perception entropy for cameras
-        camera_entropy = self._calculate_camera_entropy(cameras)
-        self.camera_label.text = f"Cameras: {camera_entropy:.4f}"
-        
-        # Calculate perception entropy for LiDARs
-        lidar_entropy = self._calculate_lidar_entropy(lidars)
-        self.lidar_label.text = f"LiDARs: {lidar_entropy:.4f}"
-        
-        # Calculate total perception entropy (late fusion of sensors)
-        if cameras and lidars:
-            # Using late fusion strategy from the paper
-            total_entropy = self._apply_late_fusion([camera_entropy, lidar_entropy])
-            self.total_label.text = f"Total Perception Entropy: {total_entropy:.4f}"
-        elif cameras:
-            self.total_label.text = f"Total Perception Entropy: {camera_entropy:.4f}"
-        elif lidars:
-            self.total_label.text = f"Total Perception Entropy: {lidar_entropy:.4f}"
-        else:
-            self.total_label.text = "Total Perception Entropy: N/A"
-            self._log_message("No sensors found for analysis")
+        # Check if there are ungrouped voxels, warn the user
+        if "UNGROUPED" in self.weighted_voxels:
+            self._log_message("Warning: There are ungrouped voxels that will not be considered!")
+
+        results_data = {}
+        results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
+
+        # Calculate total number of sensors for progress tracking
+        total_sensors_to_process = sum(len(robot.sensors) for robot in self.robots)
+        if total_sensors_to_process == 0:
+            self._log_message("Warning: No sensors found on selected robots.")
+            self.analysis_progress_bar.model.set_value(1.0) # Indicate completion (of nothing)
+            return
             
-        self._log_message("Analysis complete")
+        self.processed_sensors_count = 0
+
+        async def update_progress():
+            self.processed_sensors_count += 1
+            progress = self.processed_sensors_count / total_sensors_to_process
+            self.analysis_progress_bar.model.set_value(progress)
+            # Force UI update
+            await omni.kit.app.get_app().next_update_async()
+
+        if disable_raycasters:
+            for robot in self.robots:
+                for sensor in robot.sensors:
+                    if isinstance(sensor.sensor, Sensor3D) and hasattr(sensor, 'ray_casters') and sensor.ray_casters:
+                        try:
+                            omni.kit.commands.execute('ToggleActivePrims',
+                                    prim_paths=[prim_utils.get_prim_path(rc) for rc in sensor.ray_casters if rc], # Check if rc is valid
+                                    active=False,
+                                    stage_or_context=self._usd_context)
+                            self._log_message(f"Disabled raycaster(s) for sensor {sensor.name}")
+                        except Exception as e:
+                             self._log_message(f"Warning: Could not disable raycaster for {sensor.name}: {e}")
+
+
+        async def run_all_analyses():
+            tasks = []
+            for robot in self.robots:
+                # Pass the update_progress async function as a callback
+                tasks.append(self._calc_perception_entropy(robot, update_progress_callback=update_progress, disable_raycasters=disable_raycasters))
+            
+            # Wait for all robot analyses to complete
+            await asyncio.gather(*tasks)
+            
+            # Ensure progress bar reaches 100% at the end
+            self.analysis_progress_bar.model.set_value(1.0)
+            self._log_message("Analysis complete")
+            # Update the results UI (consider making this async too if needed)
+            # self._update_results_ui(results_data) # Assuming results_data is populated elsewhere or passed back
+
+        # Run the analyses asynchronously
+        asyncio.ensure_future(run_all_analyses())
+        
+        # Note: Results UI update might need adjustment depending on how results_data is populated by the async tasks.
+
+    async def _calc_perception_entropy(self, robot:Bot3D, update_progress_callback=None, disable_raycasters=True):
+        """ Caluclate the perception entropy for a single robot."""
+
+        self._log_message(f"Calculating perception entropy for robot {robot.name}...")
+
+        sensor_voxel_m = dict.fromkeys([s.name for s in robot.sensors], None)
+
+        for sensor_instance in robot.sensors:
+            # Pass the progress bar update callback to the measurement function
+            sensor_voxel_m[sensor_instance.name] = await self._get_measurements_raycast(sensor_instance, disable_raycaster=disable_raycasters)
+            # Call the progress update callback after measurements for this sensor are done
+            if update_progress_callback:
+                await update_progress_callback()
+        
+        vg_m_early_fusion_per_type = {}
+        # Get the measurements for each sensor type on each voxel and apply early fusion
+        unique_sensor_names = set([sensor.name for sensor in robot.sensors])
+        for name in unique_sensor_names:
+            measurements_for_sensor = {name: sensor_voxel_m[name] for name in unique_sensor_names if name in sensor_voxel_m and sensor_voxel_m[name] is not None}
+            if measurements_for_sensor: # Check if dict is not empty
+                vg_m_early_fusion_per_type.update({name: self._apply_early_fusion(measurements_for_sensor)})
+        
+        sum_normalized_voxel_entropy = 0.0
+        for voxel_group, voxels in self.weighted_voxels.items():
+            if voxel_group == "UNGROUPED":
+                self._log_message(f"Warning: Skipping {voxel_group} voxels")
+                continue
+            vg_measurements = vg_m_early_fusion_per_type[sensor_instance.sensor.name][voxel_group]
+            
+            vg_sensor_voxel_ap = dict.fromkeys(unique_sensor_names, None)
+            vg_sensor_voxel_ap_clipped = dict.fromkeys(unique_sensor_names, None)
+            vg_sensor_voxel_uncertainty = dict.fromkeys(unique_sensor_names, None)
+            # For each unique sensor, calculate the average precision (AP) and uncertainty (σ) for each voxel
+            for sensor_name in unique_sensor_names:
+                sensor_instances = robot.get_sensors_by_name(sensor_name)
+                if len(sensor_instances) == 0:
+                    self._log_message(f"Warning: No sensors found with name {sensor_name}")
+                    continue
+                elif len(sensor_instances) > 1:
+                    self._log_message(f"Warning: Multiple sensors found with name {sensor_name}, using the first one")
+                sensor_instance = sensor_instances[0]
+
+                # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
+                a = sensor_instance.sensor.ap_constants['a']
+                b = sensor_instance.sensor.ap_constants['b']
+                vg_sensor_voxel_ap[sensor_instance.sensor.name] = a * np.log(vg_measurements) + b
+
+                # Clip the AP values to avoid log(0) or log(1)
+                vg_sensor_voxel_ap_clipped[sensor_instance.sensor.name] = np.clip(vg_sensor_voxel_ap[sensor_instance.sensor.name], 0.0001, 0.9999)
+
+                # Calculate the sensor uncertainty for each voxel, where σ = 1/AP - 1
+                vg_sensor_voxel_uncertainty[sensor_instance.sensor.name] = 1.0 / vg_sensor_voxel_ap_clipped[sensor_instance.sensor.name] - 1.0
+        
+            # Apply per-voxel late fusion to get the total entropy where σ_fused = sqrt(1 / Σ(1/σ_i²))
+            vg_voxel_uncertainty_late_fusion = self._apply_late_fusion(vg_sensor_voxel_uncertainty)
+            
+            # Calculate the per-voxel entropy H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
+            vg_voxel_entropy = 2 * np.log(vg_voxel_uncertainty_late_fusion) + 1 + np.log(2*np.pi)
+            # Normalize from 0 to 1
+            vg_voxel_entropy = (vg_voxel_entropy - np.min(vg_voxel_entropy)) / (np.max(vg_voxel_entropy) - np.min(vg_voxel_entropy))
+
+            # Calculate the total perception entropy, which is simply the weighted average of the voxel entropies
+            vg_normalized_weight = self.weighted_voxels[voxel_group][1]/sum([w for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
+            vg_normalized_voxel_entropy = vg_normalized_weight * vg_voxel_entropy
+            sum_normalized_voxel_entropy += np.sum(vg_normalized_voxel_entropy)
+        
+        total_perception_entropy = sum_normalized_voxel_entropy / sum([len(v) for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
+        
+        self._log_message(f"Total perception entropy for robot {robot.name}: {total_perception_entropy:.4f}")
+        return total_perception_entropy
+
+        
+    def _update_results_ui(self, results_data=None):
+        """Update the results UI with entropy results for each robot"""
+        # Clear existing results
+        self.results_list.clear()
+        
+        with self.results_list:
+            with ui.VStack(spacing=5):
+                if not self.robots:
+                    ui.Label("No robots selected")
+                elif not results_data:
+                    ui.Label("Run analysis to see results")
+                else:
+                    # Add an overall results section
+                    with ui.CollapsableFrame(
+                        "Overall Results", 
+                        height=0,
+                        style={"border_width": 2, "border_color": ui.color("#00aa00")},
+                        collapsed=False
+                    ):
+                        with ui.VStack(spacing=5):
+                            # Display combined results if available
+                            if "combined" in results_data:
+                                combined = results_data["combined"]
+                                ui.Label(f"Total Perception Entropy: {combined['total']:.4f}")
+                                ui.Label(f"All Cameras: {combined['cameras']:.4f}")
+                                ui.Label(f"All LiDARs: {combined['lidars']:.4f}")
+                    
+                    # For each robot, create a collapsible frame with its results
+                    for robot_name, robot_results in results_data.items():
+                        if robot_name == "combined":
+                            continue  # Skip the combined results as they're already displayed
+                        
+                        with ui.CollapsableFrame(
+                            f"Robot: {robot_name}", 
+                            height=0,
+                            style={"border_width": 2, "border_color": ui.color("#0059ff")},
+                            collapsed=False
+                        ):
+                            with ui.VStack(spacing=5):
+                                ui.Label(f"Total Entropy: {robot_results['total']:.4f}")
+                                
+                                # Camera results
+                                with ui.CollapsableFrame(
+                                    f"Cameras: {robot_results['cameras']:.4f}", 
+                                    height=0,
+                                    style={"border_color": ui.color("#00c3ff")},
+                                    collapsed=False
+                                ):
+                                    with ui.VStack(spacing=2):
+                                        for camera_name, camera_entropy in robot_results.get('camera_details', {}).items():
+                                            ui.Label(f"{camera_name}: {camera_entropy:.4f}")
+                                
+                                # LiDAR results
+                                with ui.CollapsableFrame(
+                                    f"LiDARs: {robot_results['lidars']:.4f}", 
+                                    height=0,
+                                    style={"border_color": ui.color("#00c3ff")},
+                                    collapsed=False
+                                ):
+                                    with ui.VStack(spacing=2):
+                                        for lidar_name, lidar_entropy in robot_results.get('lidar_details', {}).items():
+                                            ui.Label(f"{lidar_name}: {lidar_entropy:.4f}")
 
     def _get_prim_attribute(self, prim, attr_name, default_value=None):
         """Get the value of a prim attribute or return a default value"""
@@ -844,318 +1232,472 @@ class GO4RExtension(omni.ext.IExt):
         
         return position, rotation
     
-    def _calculate_camera_entropy(self, cameras: List[Dict]) -> float:
-        """Calculate perception entropy for all cameras"""
-        if not cameras:
-            return 0.0
+    def _get_robot_to_sensor_transform(self, robot_prim, sensor_prim) -> Tuple[Gf.Vec3d, Gf.Rotation]:
+        """Get the transform from the robot to the sensor"""
+        xform = UsdGeom.Xformable(sensor_prim)
+        sensor_transform = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         
-        # Generate sample points in the perception space
-        sample_points = self._generate_sample_points()
+        # Get the world transform of the robot
+        robot_position, robot_rotation = self._get_world_transform(robot_prim)
         
-        # For each camera, calculate entropy at each sample point
-        camera_entropies = []
+        # Calculate the transform from the robot to the sensor
+        sensor_position = Gf.Vec3d(sensor_transform.ExtractTranslation())
+        sensor_rotation = sensor_transform.ExtractRotationMatrix()
         
-        for camera in cameras:
-            entropy_sum = 0.0
-            total_weight = 0.0
-            
-            for point, obj_type, weight in sample_points:
-                # Calculate pixel count (sensor measurement) for this point
-                pixel_count = self._calculate_camera_pixel_count(camera, point, obj_type)
-                
-                # Convert pixel count to AP
-                ap = self._calculate_camera_ap(pixel_count)
-                
-                # Convert AP to standard deviation
-                sigma = self._ap_to_sigma(ap)
-                
-                # Calculate entropy
-                point_entropy = self._gaussian_entropy(sigma)
-                entropy_sum += point_entropy * weight
-                total_weight += weight
-            
-            if total_weight > 0:
-                camera_entropies.append(entropy_sum / total_weight)
-                self._log_message(f"Camera {camera['name']} entropy: {camera_entropies[-1]:.4f}")
+        # Calculate the relative transform from robot to sensor
+        relative_position = sensor_position - robot_position
+        relative_rotation = sensor_rotation * robot_rotation.GetInverse()
         
-        # Use early fusion strategy for multiple cameras (sum of measurements)
-        # In practice, we'd need a more sophisticated fusion model
-        if len(camera_entropies) > 1:
-            combined_entropy = self._apply_early_fusion(camera_entropies)
-            return combined_entropy
-        elif camera_entropies:
-            return camera_entropies[0]
+        return relative_position, relative_rotation
+    
+    def _on_voxelize_button_clicked(self):
+        """Wrapper for the async function"""
+        async def _initialize_and_voxelize():
+
+            # Wait for stage to stabilize
+            await omni.kit.app.get_app().next_update_async()    
+
+            self.timeline.play()
+            for _ in range(3):  # Wait for a few frames to ensure physics is ready
+                await omni.kit.app.get_app().next_update_async()
+            self.timeline.pause()
+
+            voxels = await self._voxelize_perception_mesh()
+            if voxels:
+                self._update_voxel_groups_ui()  # Update UI to show voxels in first group
+            return voxels
+        
+        asyncio.ensure_future(_initialize_and_voxelize())
+
+    async def _voxelize_perception_mesh(self):
+        """Select a mesh to use as the target perception area"""
+        self.voxelize_progress_bar.model.set_value(0.0)  # Reset progress bar
+        # Get current selection
+        selection = self._usd_context.get_selection().get_selected_prim_paths()
+        
+        if not selection:
+            self._log_message("No mesh selected. Please select a mesh prim in the stage.")
+            self.perception_mesh_label.text = "(Not selected)"
+            self.perception_mesh = None
+            self.perception_mesh_path = None
+            return
+        
+        # Use the Xform object at the top level called "PerceptionVolume" as the parent for all the voxels. If it doesn't exist, create it.
+        stage = get_current_stage()
+        xform_path = "/World/GO4R_PerceptionVolume"
+        xform_prim = stage.GetPrimAtPath(xform_path)
+        if not xform_prim:
+            xform_prim = UsdGeom.Xform.Define(stage, xform_path)
+
+        # Use the first selected item
+        mesh_path = selection[0]
+        stage = get_current_stage()
+        mesh_prim = stage.GetPrimAtPath(mesh_path)
+        
+        if not mesh_prim:
+            self._log_message(f"Error: Could not find prim at path {mesh_path}")
+            return
+        
+        # Check if it's a mesh or has a bounding box we can use
+        if not (mesh_prim.IsA(UsdGeom.Mesh) or mesh_prim.IsA(UsdGeom.Boundable)):
+            self._log_message(f"Selected prim {mesh_path} is not a mesh or boundable object")
+            return
+        
+        # Try to apply the collision API to the selected mesh
+        if not UsdPhysics.CollisionAPI.CanApply(mesh_prim):
+            self._log_message(f"Error: Cannot apply CollisionAPI to {mesh_path}")
+            return
+        
+        # Create an XFrom with the name of the mesh under the perception volume to add the voxels to
+        mesh_name = mesh_prim.GetName()
+        voxel_grp_xform_path = f"{xform_path}/{mesh_name}"
+        i=0
+        while stage.GetPrimAtPath(voxel_grp_xform_path):
+            voxel_grp_xform_path = f"{xform_path}/{mesh_name}_{i}"
+            i += 1
+        voxel_grp_xform_prim = UsdGeom.Xform.Define(stage, voxel_grp_xform_path)
+        
+        voxels = await self.voxelize_mesh(mesh_prim, self.voxel_size, parent_path=voxel_grp_xform_path)
+        self.voxelize_progress_bar.model.set_value(1.0)  # Set progress bar to complete
+
+        if voxels:
+            self._log_message(f"Created {len(voxels)} voxel meshes inside {mesh_path}")
+
+            omni.kit.commands.execute('ToggleActivePrims',
+                stage_or_context=omni.usd.get_context().get_stage(),
+                prim_paths=[mesh_path],
+                active=False)
+
         else:
-            return 0.0
-    
-    def _calculate_lidar_entropy(self, lidars: List[Dict]) -> float:
-        """Calculate perception entropy for all LiDARs"""
-        if not lidars:
-            return 0.0
+            self._log_message(f"No voxels created for {mesh_path}")
         
-        # Generate sample points in the perception space
-        sample_points = self._generate_sample_points()
-        
-        # For each LiDAR, calculate entropy at each sample point
-        lidar_entropies = []
-        
-        for lidar in lidars:
-            entropy_sum = 0.0
-            total_weight = 0.0
-            
-            for point, obj_type, weight in sample_points:
-                # Calculate point count (sensor measurement) for this point
-                point_count = self._calculate_lidar_point_count(lidar, point, obj_type)
-                
-                # Convert point count to AP
-                ap = self._calculate_lidar_ap(point_count)
-                
-                # Convert AP to standard deviation
-                sigma = self._ap_to_sigma(ap)
-                
-                # Calculate entropy
-                point_entropy = self._gaussian_entropy(sigma)
-                entropy_sum += point_entropy * weight
-                total_weight += weight
-            
-            if total_weight > 0:
-                lidar_entropies.append(entropy_sum / total_weight)
-                self._log_message(f"LiDAR {lidar['name']} entropy: {lidar_entropies[-1]:.4f}")
-        
-        # Use early fusion strategy for multiple LiDARs (sum of measurements)
-        if len(lidar_entropies) > 1:
-            combined_entropy = self._apply_early_fusion(lidar_entropies)
-            return combined_entropy
-        elif lidar_entropies:
-            return lidar_entropies[0]
-        else:
-            return 0.0
-    
-    def _generate_sample_points(self) -> List[Tuple[Gf.Vec3d, str, float]]:
-        """Generate sample points in the perception space with associated object types and weights"""
-        sample_points = []
-        
-        # Coarse sampling for efficiency; adjust step size as needed
-        step_size = 5.0  # meters
-        
-        x_range = self.perception_space["x_range"]
-        y_range = self.perception_space["y_range"]
-        z_range = self.perception_space["z_range"]
-        
-        # Place samples for each object type
-        for obj_type, obj_data in self.target_objects.items():
-            weight = obj_data["weight"]
-            
-            for x in np.arange(x_range[0], x_range[1], step_size):
-                for y in np.arange(y_range[0], y_range[1], step_size):
-                    # For simplicity, we place objects on the ground (z=0)
-                    # In a more complex simulation, we'd vary height as well
-                    point = Gf.Vec3d(x, y, z_range[0])
-                    sample_points.append((point, obj_type, weight))
-        
-        return sample_points
-    
-    def _calculate_camera_pixel_count(self, camera: Dict, point: Gf.Vec3d, obj_type: str) -> int:
-        """Calculate the number of pixels an object at given point would occupy in the camera"""
-        # Extract camera properties
-        cam_pos, cam_rot_matrix = camera["transform"]
-        hfov = camera["hfov"]
-        resolution = camera["resolution"]
-        
-        # Get object dimensions
-        obj_dimensions = self.target_objects[obj_type]["dimensions"]
-        
-        # Calculate vector from camera to point in world space
-        direction_vector = point - cam_pos
-        distance = direction_vector.GetLength()
-        
-        # Skip if too far
-        if distance <= 0 or distance > 150:  # Maximum reasonable distance
-            return 0
-        
-        # Transform the direction vector to camera space using the rotation matrix
-        # Camera looks along +Z axis, with +Y up and +X to the right
-        # We need to invert the rotation matrix to convert from world to camera space
-        cam_rot_inverse = cam_rot_matrix.GetInverse()
-        direction_camera_space = cam_rot_inverse * direction_vector
-        
-        # Check if the point is in front of the camera (positive Z in camera space)
-        if direction_camera_space[2] <= 0:
-            return 0  # Behind the camera
-        
-        # Calculate the horizontal and vertical angles in camera space
-        horizontal_angle = math.atan2(direction_camera_space[0], direction_camera_space[2])
-        vertical_angle = math.atan2(direction_camera_space[1], direction_camera_space[2])
-        
-        # Check if within camera FOV
-        # Assuming the vertical FOV is derived from horizontal FOV and aspect ratio
-        aspect_ratio = resolution[0] / resolution[1]
-        vfov = hfov / aspect_ratio
-        
-        if abs(horizontal_angle) > hfov/2 or abs(vertical_angle) > vfov/2:
-            return 0  # Outside field of view
-        
-        # Calculate object dimensions in camera view
-        obj_width = obj_dimensions[1]   # Width of object
-        obj_height = obj_dimensions[2]  # Height of object
-        
-        # Calculate angular width and height in radians
-        angular_width = math.atan2(obj_width, distance)
-        angular_height = math.atan2(obj_height, distance)
-        
-        # Calculate pixel width and height based on angular size
-        pixel_width = (angular_width / hfov) * resolution[0]
-        pixel_height = (angular_height / vfov) * resolution[1]
-        
-        # Calculate pixel count
-        pixel_count = max(0, int(pixel_width * pixel_height))
-        
-        return pixel_count
-    
-    def _calculate_lidar_point_count(self, lidar: Dict, point: Gf.Vec3d, obj_type: str) -> int:
-        """Calculate the number of LiDAR points that would hit an object at the given point"""
-        # Extract LiDAR properties
-        lidar_pos, lidar_rot_matrix = lidar["transform"]
-        channels = lidar["channels"]
-        fov_vertical = lidar["fov_vertical"]
-        fov_horizontal = lidar["fov_horizontal"]
-        max_range = lidar["max_range"]
-        
-        # Get object dimensions
-        obj_dimensions = self.target_objects[obj_type]["dimensions"]
-        
-        # Calculate vector from LiDAR to point in world space
-        direction_vector = point - lidar_pos
-        distance = direction_vector.GetLength()
-        
-        # Skip if the point is too far
-        if distance > max_range or distance <= 0:
-            return 0
-        
-        # Transform the direction vector to LiDAR space using the rotation matrix
-        # Assuming LiDAR looks along +X axis, with +Z up and +Y to the right
-        # We need to invert the rotation matrix to convert from world to LiDAR space
-        lidar_rot_inverse = lidar_rot_matrix.GetInverse()
-        direction_lidar_space = lidar_rot_inverse * direction_vector
-        
-        # Normalize the vector in LiDAR space
-        dir_norm = direction_lidar_space.GetNormalized()
-        
-        # Calculate angles in LiDAR space
-        # Horizontal angle (in xy plane) - azimuth
-        horizontal_angle = math.atan2(dir_norm[1], dir_norm[0])
-        
-        # Vertical angle (elevation from xy plane)
-        vertical_angle = math.asin(dir_norm[2])
-        
-        # Check if point is within LiDAR's FOV
-        if abs(horizontal_angle) > fov_horizontal/2 or abs(vertical_angle) > fov_vertical/2:
-            return 0  # Outside field of view
-        
-        # Estimate point density based on angular resolution and channels
-        # Horizontal resolution depends on scan rate and rotation speed
-        # Simplification: assuming uniform angular resolution
-        horizontal_resolution = 0.2 * math.degrees(fov_horizontal) # points per degree horizontally
-        vertical_resolution = channels / math.degrees(fov_vertical) # points per degree vertically
-        
-        # Calculate angular dimensions of the object from the LiDAR's perspective
-        obj_width = obj_dimensions[1]   # Width of object
-        obj_height = obj_dimensions[2]  # Height of object
-        
-        # Calculate angular width and height in degrees
-        angular_width_deg = math.degrees(math.atan2(obj_width, distance))
-        angular_height_deg = math.degrees(math.atan2(obj_height, distance))
-        
-        # Calculate estimated point count based on angular size and resolution
-        horizontal_points = angular_width_deg * horizontal_resolution
-        vertical_points = angular_height_deg * vertical_resolution
-        
-        # Calculate total points, with distance attenuation factor
-        # Points decrease with square of distance due to beam divergence
-        attenuation_factor = 50.0 / (distance * distance) # Adjust the constant as needed
-        attenuation_factor = min(1.0, max(0.1, attenuation_factor)) # Clamp to reasonable range
-        
-        point_count = max(1, int(horizontal_points * vertical_points * attenuation_factor))
-        
-        return point_count
-    
-    def _calculate_camera_ap(self, pixel_count: int) -> float:
-        """Calculate Average Precision (AP) based on pixel count using the paper's formula"""
-        if pixel_count <= 0:
-            return 0.001  # Minimal AP for numerical stability
-        
-        # Using the formula from the paper: AP ≈ a * ln(m) + b
-        a = self.camera_ap_constants["a"]
-        b = self.camera_ap_constants["b"]
-        
-        ap = a * math.log(pixel_count) + b
-        
-        # Clamp AP to valid range
-        ap = max(0.001, min(0.999, ap))
-        
-        return ap
-    
-    def _calculate_lidar_ap(self, point_count: int) -> float:
-        """Calculate Average Precision (AP) based on point count using the paper's formula"""
-        if point_count <= 0:
-            return 0.001  # Minimal AP for numerical stability
-        
-        # Using the formula from the paper: AP ≈ a * ln(m) + b
-        a = self.lidar_ap_constants["a"]
-        b = self.lidar_ap_constants["b"]
-        
-        ap = a * math.log(point_count) + b
-        
-        # Clamp AP to valid range
-        ap = max(0.001, min(0.999, ap))
-        
-        return ap
-    
-    def _ap_to_sigma(self, ap: float) -> float:
-        """Convert Average Precision (AP) to standard deviation using the paper's formula"""
-        # Using the formula from the paper: σ = 1/AP - 1
-        sigma = (1 / ap) - 1
-        return sigma
-    
-    def _gaussian_entropy(self, sigma: float) -> float:
-        """Calculate the entropy of a 2D Gaussian distribution with given standard deviation"""
-        # Using the formula from the paper: H(S|m, q) = 2*ln(σ) + 1 + ln(2π)
-        entropy = 2 * math.log(sigma) + 1 + math.log(2 * math.pi)
-        return entropy
-    
-    def _apply_early_fusion(self, entropies: List[float]) -> float:
-        """Apply early fusion strategy to combine entropies (average them)"""
-        if not entropies:
-            return 0.0
-        return sum(entropies) / len(entropies)
-    
-    def _apply_late_fusion(self, entropies: List[float]) -> float:
-        """Apply late fusion strategy to combine entropies from different sensor types
-        
-        Based on the formula: σ_fused = sqrt(1 / Σ(1/σ_i²))
+        self._log_message(f"Selected mesh '{mesh_path}' as perception area")
+
+        return voxels
+
+    async def voxelize_mesh(self, mesh_prim, voxel_size, parent_path):
         """
-        if not entropies:
-            return 0.0
-            
-        # Convert entropies back to standard deviations
-        sigmas = []
-        for entropy in entropies:
-            # Reverse the entropy formula to get sigma
-            # H = 2*ln(σ) + 1 + ln(2π)
-            # σ = exp((H - 1 - ln(2π))/2)
-            sigma = math.exp((entropy - 1 - math.log(2 * math.pi)) / 2)
-            sigmas.append(sigma)
+        Split a mesh into voxels of specified size and optionally create primitives for each voxel
         
-        # Calculate fused sigma using the formula from the paper
-        sum_inverse_sigma_squared = sum(1 / (sigma ** 2) for sigma in sigmas)
-        if sum_inverse_sigma_squared > 0:
-            sigma_fused = math.sqrt(1 / sum_inverse_sigma_squared)
+        Args:
+            mesh_prim (Usd.Prim): The source mesh to voxelize
+            voxel_size (float): Size of each voxel in meters
+            create_primitives (bool): If True, creates actual mesh primitives for each voxel
+            parent_path (str): Path where voxel meshes will be created (defaults to mesh's parent)
             
-            # Convert back to entropy
-            entropy_fused = 2 * math.log(sigma_fused) + 1 + math.log(2 * math.pi)
-            return entropy_fused
-        else:
+        Returns:
+            List of voxel mesh primitives if create_primitives=True, otherwise list of voxel bounds
+        """
+        
+        # Get the mesh geometry
+        mesh_geom = UsdGeom.Mesh(mesh_prim)
+        mesh_name = mesh_prim.GetName()
+        
+        # Get the points and face indices
+        points = mesh_geom.GetPointsAttr().Get()
+        face_vertex_counts = mesh_geom.GetFaceVertexCountsAttr().Get()
+        face_vertex_indices = mesh_geom.GetFaceVertexIndicesAttr().Get()
+        
+        if not points or not face_vertex_counts or not face_vertex_indices:
+            self._log_message(f"Missing mesh data for {mesh_prim.GetPath()}")
+            return []
+        
+        # Get the mesh transform
+        xform = UsdGeom.Xformable(mesh_prim)
+        
+        # Get the mesh bounding box
+        bounds = self._get_mesh_bounds(mesh_prim)
+        if not bounds:
+            self._log_message("Error: Could not determine mesh bounds.")
+            return []
+        
+        min_point, max_point = bounds
+        
+        # Calculate grid dimensions
+        grid_size_x = int((max_point[0] - min_point[0]) / voxel_size)
+        grid_size_y = int((max_point[1] - min_point[1]) / voxel_size)
+        grid_size_z = int((max_point[2] - min_point[2]) / voxel_size)
+        
+        self._log_message(f"Creating voxel grid: {grid_size_x}x{grid_size_y}x{grid_size_z} " + 
+                        f"({grid_size_x * grid_size_y * grid_size_z} potential voxels)")
+
+        # Create an array to store all voxel centers for later use
+        voxel_centers = []
+
+        # Target the prim mesh for ray casting
+        self.target_prims_collision(prim_utils.get_prim_path(mesh_prim))
+        await self._ensure_physics_updated(pause=False) # Don't pause the simulation
+
+        # Iterate through the grid to find voxels intersected by triangles
+        total_voxels = grid_size_x * grid_size_y * grid_size_z
+        processed_voxels = 0
+
+        for i in range(grid_size_x):
+            for j in range(grid_size_y):
+                for k in range(grid_size_z):
+                    # Calculate voxel center
+                    center_x = min_point[0] + (i + 0.5) * voxel_size
+                    center_y = min_point[1] + (j + 0.5) * voxel_size
+                    center_z = min_point[2] + (k + 0.5) * voxel_size
+                    voxel_center = carb.Float3(center_x, center_y, center_z)
+                    voxel_extent = carb.Float3(voxel_size, voxel_size, voxel_size)
+                    
+                    # Check if the voxel center is inside the mesh
+                    # overlap = self._does_box_overlap_prim(voxel_center, voxel_extent, mesh_prim.GetPath()) #This only generates vozels at the edges of the mesh! Use _is_pont_in_mesh instead
+                    center_inside = self._is_point_in_mesh(voxel_center, mesh_prim)
+                    if center_inside == True:
+                        voxel_centers.append(((i,j,k),voxel_center))
+                    processed_voxels += 1
+                    self.voxelize_progress_bar.model.set_value(processed_voxels / total_voxels /2) # Update progress bar up to 50%
+
+        # Pause the simulation
+        self.timeline.pause()
+        
+        created_voxels = []
+        stage = get_current_stage()
+
+        self.voxelize_progress_bar.model.set_value(0.5)
+        
+        # Create a mesh for each occupied voxel
+        for (i,j,k), p in voxel_centers:
+            # world_p = Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))):
+            # Calculate voxel corners
+            min_x = p[0] - voxel_size / 2
+            min_y = p[1] - voxel_size / 2
+            min_z = p[2] - voxel_size / 2
+            max_x = min_x + voxel_size
+            max_y = min_y + voxel_size
+            max_z = min_z + voxel_size
+            
+            # Define voxel as a cube
+            voxel_points = [
+                Gf.Vec3f(min_x, min_y, min_z),
+                Gf.Vec3f(max_x, min_y, min_z),
+                Gf.Vec3f(max_x, max_y, min_z),
+                Gf.Vec3f(min_x, max_y, min_z),
+                Gf.Vec3f(min_x, min_y, max_z),
+                Gf.Vec3f(max_x, min_y, max_z),
+                Gf.Vec3f(max_x, max_y, max_z),
+                Gf.Vec3f(min_x, max_y, max_z)
+            ]
+            
+            # Define the faces (6 faces, each with 4 vertices)
+            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
+            face_vertex_indices = Vt.IntArray([
+                0, 1, 2, 3,  # bottom
+                4, 5, 6, 7,  # top
+                0, 1, 5, 4,  # front
+                1, 2, 6, 5,  # right
+                2, 3, 7, 6,  # back
+                3, 0, 4, 7   # left
+            ])
+            
+            # Create voxel mesh using USD API directly
+            voxel_path = f"{parent_path}/{mesh_name}_voxel_{i}_{j}_{k}"
+            mesh_def = UsdGeom.Mesh.Define(stage, voxel_path)
+            mesh_def.CreatePointsAttr().Set(voxel_points)
+            mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
+            mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            
+            # Define or get the transparent material
+            mat_path = Sdf.Path(f"/World/GO4R_PerceptionVolume/Looks/{mesh_name}_material")
+            mat_prim = stage.GetPrimAtPath(mat_path)
+            if not mat_prim:
+                mat_prim = UsdShade.Material.Define(stage, mat_path)
+                shader_path = mat_path.AppendPath("Shader")
+                shader = UsdShade.Shader.Define(stage, shader_path)
+                shader.CreateIdAttr("UsdPreviewSurface")
+                shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.1, 0.1, 0.8)) # Bluish tint
+                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.1) # Set transparency
+                mat_prim.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+
+            # Bind the material to the voxel mesh
+            UsdShade.MaterialBindingAPI(mesh_def.GetPrim()).Bind(UsdShade.Material(mat_prim))
+
+            created_voxels.append(mesh_def.GetPrim())
+            self.voxelize_progress_bar.model.set_value(0.5 + processed_voxels / total_voxels / 2) # Update progress bar to 100%
+        
+        return created_voxels
+
+    def _get_mesh_bounds(self, mesh_prim):
+        """Get the bounding box of a mesh prim"""
+        try:
+            if mesh_prim.IsA(UsdGeom.Boundable):
+                # Get the bounding box in world space
+                bound = UsdGeom.Boundable(mesh_prim).ComputeWorldBound(
+                    Usd.TimeCode.Default(), UsdGeom.Tokens.default_
+                )
+                box = bound.ComputeAlignedBox()
+                min_point = box.GetMin()
+                max_point = box.GetMax()
+                # self._log_message(f"Mesh bounds: {min_point} to {max_point}")
+                return (min_point, max_point)
+        except Exception as e:
+            self._log_message(f"Error getting bounds of mesh: {str(e)}")
+        
+        return None
+    
+    def _does_box_overlap_prim(self, origin:carb.Float3, extent:carb.Float3, prim_path) -> bool:
+        """Check if a box overlaps with a given prim path"""
+
+        # Target the prim mash
+        self.target_prims_collision(prim_path)
+
+        rotation = carb.Float4(1.0, 0.0, 0.0, 0.0) # No rotation
+
+        half_extent = carb.Float3(
+            max(0.001, extent[0] / 2.0),
+            max(0.001, extent[1] / 2.0), 
+            max(0.001, extent[2] / 2.0)
+        )
+
+        prim_found = False
+
+        def report_overlap(overlap):
+            nonlocal prim_found
+            if overlap.collision == prim_path:
+                prim_found = True
+            return True
+
+        try:
+            omni.physx.get_physx_scene_query_interface().overlap_box(half_extent, origin, rotation, report_overlap, False)
+        
+        except Exception as e:
+            self._log_message(f"Error in overlap_box: {str(e)}")
+        
+        # if prim_found:
+        #     self._log_message(f"Box overlaps with prim {prim_path}")
+        # else:
+        #     self._log_message(f"No overlap found with prim {prim_path}")
+    
+        return prim_found
+    
+    def _single_ray_cast_to_mesh(self, 
+                                origin:Tuple[float, float, float]=(0.0,0.0,0.0), 
+                                direction:Tuple[float, float, float]=(1.0,0.0,0.0), 
+                                max_dist: float=100.0,
+                                prim_path: str = None):
+        """Projects a raycast in the given direction and checks for intersection with the target prim.
+        If the ray hits the target prim, it returns the path to the geometry that was hit and the hit distance.
+        If there is no target prim, it checks for intersection with anything with collision enabled in the entire scene annd returns the paths to the geometry that was hit and the hit distances.
+
+        See https://docs.omniverse.nvidia.com/kit/docs/omni_physics/105.1/extensions/runtime/source/omni.physx/docs/index.html#raycast
+
+        Args:
+            position (np.array): origin's position for ray cast
+            orientation (np.array): origin's orientation for ray cast
+            offset (np.array): offset for ray cast
+            max_dist (float, optional): maximum distance to test for collisions in stage units. Defaults to 100.0.
+            prim_path (str, optional): path to the target prim. If None, will check for intersection with anything with collision enabled in the entire scene. Defaults to None.
+
+        Returns:
+            typing.Tuple[typing.Union[None, str], float]: path to geometry that was hit and hit distance, returns None, 10000 if no hit occurred
+        """
+        prim_path = str(prim_path)
+        ray_hits = []
+
+        def report_raycast(hit):
+            nonlocal ray_hits
+            if prim_path is None:
+                # Add the hit to the list of hits
+                ray_hits.append((hit.collision, hit.distance))
+            elif hit.collision == prim_path:
+                # If the hit is the target prim, add it to the list of hits
+                ray_hits = (hit.collision, hit.distance)
+                return True
+            else:
+                self._log_message(f"Hit something other than the target prim {prim_path}: hit {hit.collision} at distance {hit.distance}")
+                # If the hit is not the target prim, ignore it
+                # ray_hits.append((hit.collision, hit.distance))
+            return False
+            
+
+        omni.physx.get_physx_scene_query_interface().raycast_all(origin, direction, max_dist, report_raycast, True)
+        if ray_hits == []:
+            # No hit found
+            return None, max_dist
+        return ray_hits
+        
+
+    def _is_point_in_mesh(self, point:Tuple[float,float,float], mesh_prim:Usd.Prim) -> bool:
+        """
+        Check if a point is inside a mesh using ray casting.
+        This is accurate and works well even for sparse meshes.
+        """
+
+        # Quick bounds check first to avoid unnecessary calculations
+        bounds = self._get_mesh_bounds(mesh_prim)
+        if not bounds:
+            self._log_message(f"Error: Could not determine bounds for mesh {mesh_prim.GetPath()}")
+            return False
+
+        min_point, max_point = bounds
+
+        # Check if point is outside bounding box
+        if (point[0] < min_point[0] or point[0] > max_point[0] or
+            point[1] < min_point[1] or point[1] > max_point[1] or
+            point[2] < min_point[2] or point[2] > max_point[2]):
+            return False
+
+        # Directions for ray casting
+        directions = [
+            (1.0, 0.0, 0.0),  # +X
+            (-1.0, 0.0, 0.0), # -X
+            (0.0, 1.0, 0.0),  # +Y
+            (0.0, -1.0, 0.0), # -Y
+            (0.0, 0.0, 1.0),  # +Z
+            (0.0, 0.0, -1.0)  # -Z
+        ]
+
+        # Set up counters for inside/outside voting
+        inside_votes = 0
+        outside_votes = 0
+
+        # Use twice the hypotenuse to determine the ray length
+        ray_length = math.sqrt(
+            (max_point[0] - min_point[0]) ** 2 +
+            (max_point[1] - min_point[1]) ** 2 +
+            (max_point[2] - min_point[2]) ** 2
+        )
+
+        for direction in directions:
+            # Use ray_cast 
+            hit= self._single_ray_cast_to_mesh(
+                    point,              # Origin point as 3D vector np.array
+                    direction,          # Direction as a 3D vector np.array
+                    ray_length,         # Ray length
+                    mesh_prim.GetPath() # Prim path to check for intersection
+                )
+            if hit[0] is None:
+                return False
+
+        # If we reach here, the point is inside the mesh
+        return True
+
+    def _apply_early_fusion(self, sensor_measurements: dict[str,dict[str,Tuple[np.ndarray[int],float]]]) -> dict[str,Tuple[List[int],float]]:
+        """Apply early fusion strategy to combine measurements of the same sensor per voxel.
+        This is just a sum of the measurements on the voxel.
+        
+        Parameters
+        ----------
+        measurements : dict[str,dict[str,Tuple[np.ndarray[int],float]]]
+            Dictionary of measurements for each sensor type, where each value is a tuple of the measurements and the weight.
+            The structure is {sensor_name: {group: ([measurements], weight)}}
+
+        Returns
+        -------
+        dict[str,Tuple[np.ndarray[int],float]]
+            Dictionary of combined measurements for each sensor type, where each value is a tuple of the combined measurements and the weight.
+            The structure is {group: ([measurements], weight)}
+        """
+
+        # Initialize a dictionary to hold the combined measurements
+        combined_measurements = {}
+
+        # Iterate through each sensor type and its measurements
+        for sensor_name, measurements in sensor_measurements.items(): #TODO ERROR HERE
+            for group, (measurements_list, weight) in measurements.items():
+                if group not in combined_measurements:
+                    combined_measurements[group] = measurements_list
+
+                # Assume that the measurements are in the same order for each sensor type
+                combined_measurements[group] += measurements_list
+        
+        return combined_measurements
+    
+    def _apply_late_fusion(self, uncertainties:dict[str, np.ndarray[float]]) -> float:
+        """Apply late fusion strategy to combine uncertainties (σ's)from different sensor types per voxel
+        This is based on the formula from the "Perception Entropy..."
+        
+        σ_fused = sqrt(1 / Σ(1/σ_i²))
+
+        Parameters
+        ----------
+        uncertainties : dict[str, list[float]]
+            Dictionary of uncertainties (σ_i's) for each sensor type, where each value is a list of uncertainties.
+            The structure is {group: [uncertainties]}
+        
+        Returns
+        -------
+        float
+            The combined uncertainty (σ_fused) for the voxel.
+        """
+        if not uncertainties:
             return 0.0
+            
+        uncertainties_array = np.array(list(uncertainties.values())) # this should be a 2D array of uncertainties, where each row is a sensor and each column is a voxel
+        # Calculate the sum of the inverse squares of the uncertainties
+        sum_inverse_squares = np.sum(1 / (uncertainties_array ** 2), axis=0)
+        # Calculate the fused uncertainty
+        sig_fused = np.sqrt(1 / sum_inverse_squares)
+        # Normalize the uncertainty
+        # sig_fused = sig_fused / np.max(sig_fused) # Normalize to be between 0 and 1
+        # Normalize the uncertainty to be between 0 and 1
+        # sig_fused = np.clip(sig_fused, 0.0, 1.0)
+        # self._log_message(f"Fused uncertainty: {sig_fused}")
+
+        return sig_fused
+            
     
     # def _on_window(self, visible):
     #     if self._window.visible:
@@ -1186,3 +1728,266 @@ class GO4RExtension(omni.ext.IExt):
             self._window = None
         self._cleanup_ui()
         gc.collect()
+
+    def target_prims_collision(self, prim_paths:str|Sdf.Path|List[Sdf.Path|str], disable_others:bool=True):
+        """Set the target prim collisions on for ray cast / lidar sensing, set all the other prims to be non-collidable"""
+        stage = get_current_stage()
+        if not isinstance(prim_paths, list): # Means that there is only one prim path
+            prim_paths = [prim_paths]
+        else:
+            prim_paths = [str(p) for p in prim_paths] # this creates a copy
+
+        num_prims = len(prim_paths)
+        
+        # Search through all the prims in the stage. 
+        # If the prim is in the list, set it to be collidable. 
+        # If not, set it to be non-collidable (only if disable_others=True).
+        for p in stage.Traverse():
+            if p.IsA(UsdGeom.Mesh):
+                collision_api = UsdPhysics.CollisionAPI(p)
+                if not collision_api:
+                    # Apply the CollisionAPI to the prim
+                    collision_api = UsdPhysics.CollisionAPI.Apply(p)
+                # Get the collision enabled attribute
+                collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                
+                if p.GetPath() not in prim_paths:
+                    if disable_others:
+                        # Set the prim to be non-collidable
+                        # self._log_message(f"Setting {p.GetPath()} as non-collidable")
+                        collision_enabled_attr.Set(False)
+                    # else:
+                    #     self._log_message(f"NOT setting {p.GetPath()} as non-collidable")
+                else:
+                    # Set the target prim to be collidable
+                    collision_enabled_attr.Set(True)
+                    # Remove the prim from the list of target prims
+                    prim_paths.remove(p.GetPath())
+        
+        if len(prim_paths) != 0:
+            self._log_message(f"Warning: {len(prim_paths)} out of {num_prims} not found in the stage when setting collision targets!!")
+        else:
+            self._log_message(f"Set {num_prims} prims as target for ray cast / lidar sensing")
+        
+
+    def untarget_prims_collision(self, prim_paths:str|Sdf.Path|List[Sdf.Path|str]):
+        """Set the target prim collisions off for ray cast / lidar sensing"""
+        stage = get_current_stage()
+        processed_count = 0
+        original_count = len(prim_paths)
+        for path_str in prim_paths:
+            p = stage.GetPrimAtPath(path_str)
+            # Check if prim exists and is a mesh before attempting to modify
+            if p and p.IsA(UsdGeom.Mesh):
+                collision_api = UsdPhysics.CollisionAPI(p)
+                if not collision_api:
+                    # This prim should already have had CollisionAPI applied by target_prims_collision
+                    # If not, log a warning, but applying it here might be slow.
+                    # Consider ensuring it's applied robustly in target_prims_collision or voxel creation.
+                    self._log_message(f"Warning: CollisionAPI missing on {path_str} during untargeting.")
+                    collision_api = UsdPhysics.CollisionAPI.Apply(p) # Apply if missing, might impact perf
+
+                if collision_api:
+                    collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                    if collision_enabled_attr: # Check if attribute exists
+                         collision_enabled_attr.Set(False)
+                         processed_count += 1
+                    else:
+                         self._log_message(f"Warning: CollisionEnabled attribute missing on {path_str}.")
+            # else:
+            #     # DEBUG: Log if a path didn't correspond to a valid mesh prim
+            #     self._log_message(f"Info: Path {path_str} not found or not a mesh during untargeting.")
+
+        # # DEBUG: Log discrepancies if needed
+        # if processed_count != original_count:
+        #     self._log_message(f"Info: Untargeted {processed_count} out of {original_count} requested prims.")
+
+
+    async def _ensure_physics_updated(self, pause=True, steps=1):
+        """Ensures the physics scene is updated by stepping the simulation if paused, or waiting frames if playing.
+        Call with `await self._ensure_physics_updated()` to ensure the physics scene is updated.
+
+        Args:
+            pause (bool, optional): Whether to pause the simulation after stepping. Defaults to True.
+            steps (int, optional): The number of physics steps/frames to advance. Defaults to 1.
+        """
+        if not hasattr(self, 'timeline') or self.timeline is None:
+            self._log_message("Warning: Timeline interface not found, attempting to re-acquire.")
+            try:
+                self.timeline = omni.timeline.get_timeline_interface()
+            except Exception as e:
+                self._log_message(f"Error: Failed to acquire timeline interface: {e}")
+                # Cannot proceed without timeline, maybe raise an error or return
+                raise AttributeError("Timeline interface could not be acquired.")
+        
+        was_playing = self.timeline.is_playing()
+        if not was_playing:
+            # If not playing, play before stepping
+            self.timeline.play()
+            # Wait for play command to take effect
+            await omni.kit.app.get_app().next_update_async()
+
+        # Advance the simulation by the specified number of steps
+        for _ in range(steps):
+            await omni.kit.app.get_app().next_update_async()
+
+        if pause and not was_playing:
+            # If it wasn't playing originally, pause it again
+            self.timeline.pause()
+        elif not pause and was_playing:
+            # If it was playing originally and pause is False, ensure it continues playing
+            # (This might be redundant if play() keeps it playing, but ensures state)
+            self.timeline.play()
+    
+    async def _get_points_raycast(self, sensor_instance:Sensor3D_Instance, mesh_prim_path:Sdf.Path) -> List[Tuple[Gf.Vec3d, str, float]]:
+        """Get the number of points from a raycast that land on the given prim"""
+
+        points = []
+
+        for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
+            i = i if len(sensor_instance.ray_casters) != 1 else ""
+            print(f"i = {i}, and the sensor is a {sensor_instance.__getattribute__(f'sensor{i}').__class__}")
+            self.target_prims_collision(mesh_prim_path)
+            
+            self.timeline.play()                                             # Play the simulation to get the ray data
+            await omni.kit.app.get_app().next_update_async()                 # wait one frame for data
+            self.timeline.pause()                                            # Pause the simulation to populate the LIDAR's depth buffers
+            pathstr = prim_utils.get_prim_path(ray_caster)
+
+            #Get the linear depth data from the lidar. If the linear depth of a point != the maximum range, it means that the point hit something
+            lin_depth = self.lidarInterface.get_linear_depth_data(pathstr)
+            for index in filter(lambda x: lin_depth[x] != self.lidarInterface.get_max_range(), range(len(lin_depth))):
+                # Get the point in world space
+                point = ray_caster.get_point(index)
+                for obj, obj_data in self.target_objects.items():
+                    weight = obj_data["weight"]
+                    points.append((point, obj, weight))
+            print(f"Num points hitting {mesh_prim_path}: {len(points)}")
+            self._log_message(f"Num points hitting {mesh_prim_path}: {len(points)}")
+
+        return points
+    
+    async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, disable_raycaster=False) -> dict[str,Tuple[np.ndarray[int],float]]:
+        """Get the number of points from a raycaster that pass through each of the voxels in the given list
+        The voxels and voxel groups will be stored in the same order as the weighted_voxels dictionary."""
+        # Set the time for calculating how long it takes to get the measurements
+        start_time = time.time()
+        # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
+        # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
+        measurements = {}
+        for gp_name, (voxels, weight) in self.weighted_voxels.items():
+            # Ensure UNGROUPED voxels are skipped if present
+            if gp_name == "UNGROUPED":
+                continue
+            measurements.update({gp_name: (np.full(len(voxels),0,int), weight)})
+
+        # Check if the sensor instance has ray casters
+        if not hasattr(sensor_instance, 'ray_casters') or not sensor_instance.ray_casters:
+             self._log_message(f"Warning: Sensor {sensor_instance.name} has no ray casters. Skipping measurements.")
+             return measurements # Return empty measurements
+
+        # For each ray caster, get the number of points that hit each voxel
+        # For stereo cameras, we simply add the number of points from each camera (apply early fusion)
+
+        for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
+            if not ray_caster: # Skip if ray_caster prim is invalid/deleted
+                self._log_message(f"Warning: Invalid ray_caster found for sensor {sensor_instance.name}. Skipping.")
+                continue
+
+            # Enable the ray caster in case it is disabled
+            try:
+                omni.kit.commands.execute('ToggleActivePrims',
+                                        prim_paths=[prim_utils.get_prim_path(ray_caster)],
+                                        active=True,
+                                        stage_or_context=self._usd_context)
+                await self._ensure_physics_updated(pause=False, steps=1)
+            except Exception as e:
+                self._log_message(f"Warning: Failed to enable raycaster {prim_utils.get_prim_path(ray_caster)}: {e}. Skipping.")
+                continue
+
+
+            self._log_message(f"Generating measurements for {sensor_instance.name} ray caster {i} of {len(sensor_instance.ray_casters)}")
+
+            # Enable collisions for all the voxels, disable collisions on everything else.
+            all_voxel_paths = []
+            for group_name, voxel_group in self.weighted_voxels.items():
+                 # Ensure UNGROUPED voxels are skipped if present
+                if group_name == "UNGROUPED":
+                    continue
+                all_voxel_paths.extend([str(v.GetPath()) for v in voxel_group[0]])
+
+            if not all_voxel_paths:
+                self._log_message("Warning: No valid voxels found to target for raycasting.")
+                continue # Skip this ray_caster if no voxels
+
+            self.target_prims_collision(all_voxel_paths, disable_others=True)
+
+            # Convert to a set for efficient removal later
+            remaining_voxel_paths_set = set(all_voxel_paths)
+
+            # Now, while there are still enabled voxels, cast, add the points to the measurements, then un-target any voxels that were hit
+            iterations = 0
+            print(f"Iteration\tHit paths\tVoxels hit\tRemaining")
+            print("---------\t---------\t----------\t---------")
+            while len(remaining_voxel_paths_set) > 0:
+                # Try reducing steps, e.g., to 1 or 2, if 3 is too slow/unnecessary
+                await self._ensure_physics_updated(pause=False, steps=1) # Reduced steps
+                rc_pathstr = str(prim_utils.get_prim_path(ray_caster))
+                hit_paths_raw = self.lidarInterface.get_prim_data(rc_pathstr)
+                # Remove empty hits and count occurrences efficiently
+                hit_counts = Counter(path for path in hit_paths_raw if path != "")
+
+                # If there are no hits, break out of the loop
+                if not hit_counts:
+                    break
+
+                # Get the set of unique prims that were hit in this iteration
+                unique_hit_paths_set = set(hit_counts.keys())
+
+                # Filter this set to only include paths that are still in our remaining voxels
+                # This prevents trying to process/disable things that aren't voxels or were already disabled
+                actual_voxel_hits_set = unique_hit_paths_set.intersection(remaining_voxel_paths_set)
+
+                if not actual_voxel_hits_set:
+                     self._log_message(f"  Iteration {iterations}: Hits detected, but not on remaining target voxels. Breaking.")
+                     break # No relevant hits
+
+                # Count the number of hits on each voxel using the pre-calculated counts
+                total_hits_this_iter = 0
+                for voxel_group_name, (voxels, weight) in self.weighted_voxels.items(): # Use measurements dict which excludes UNGROUPED
+                    for idx, voxel in enumerate(voxels):
+                        voxel_path = str(voxel.GetPath())
+                        # Check if the voxel was hit in this iteration using the efficient set
+                        if voxel_path in actual_voxel_hits_set:
+                            # Add the pre-calculated count
+                            count = hit_counts[voxel_path]
+                            measurements[voxel_group_name][0][idx] += count
+                            total_hits_this_iter += count
+
+
+                # Untarget the hit paths from collisions more efficiently
+                # Pass the set directly if untarget_prims_collision is updated, otherwise convert back to list
+                self.untarget_prims_collision(list(actual_voxel_hits_set))
+
+                # Remove the hit voxels from the set of remaining voxels
+                remaining_voxel_paths_set -= actual_voxel_hits_set
+
+                print(f"  {iterations}\t\t  {total_hits_this_iter}\t\t  {len(actual_voxel_hits_set)}\t\t  {len(remaining_voxel_paths_set)}")
+
+                iterations += 1
+                # Add a safety break condition
+                if iterations > 1000: # Adjust limit as needed
+                    self._log_message("Warning: Exceeded maximum iterations. Breaking loop.")
+                    break
+            
+            # Disable the ray caster
+            # Enable the ray caster in case it is disabled
+            if disable_raycaster:
+                omni.kit.commands.execute('ToggleActivePrims',
+                                    prim_paths=[prim_utils.get_prim_path(ray_caster)],
+                                    active=False,
+                                    stage_or_context=self._usd_context)
+        await self._ensure_physics_updated(pause=True, steps=1)
+        print(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
+        self._log_message(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
+        return measurements
