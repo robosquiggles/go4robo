@@ -92,7 +92,10 @@ class GO4RExtension(omni.ext.IExt):
         # Perception Space Voxels
         self.voxel_size = 0.1
         self.weighted_voxels = {} # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
-        self.xform_groups = {}  # Maps xform paths to group IDs
+
+        self.percep_entr_results_data = {} # {"robot_name": {"Entropy By Voxel Group": {group_id: entropy, ...},
+                                           #                 "Entropy By Sensor Type": {sensor_name: entropy, ...},
+                                           #                 "Total Entropy":           total_entropy}}
 
         # Logging
         self.log_messages = []
@@ -141,7 +144,7 @@ class GO4RExtension(omni.ext.IExt):
 
                     ui.Spacer(height=10)
                     
-                    with ui.CollapsableFrame("Perception Entropy", height=0):
+                    with ui.CollapsableFrame("Perception Space", height=0):
                         with ui.VStack(spacing=5, height=0):
 
                             # Add a label with instructions
@@ -190,20 +193,19 @@ class GO4RExtension(omni.ext.IExt):
 
                                     # Container for dynamically added voxel groups
                                     self.voxel_groups_container = ui.VStack(spacing=5, height=0)
-                        
-                            # Buttons for operations
-                            with ui.HStack(spacing=5, height=0):
-                                self.analyze_btn = ui.Button("Analyze Perception", clicked_fn=self._calc_perception_entropies, width=120, height=36)
-                                # Initially disable the button since no mesh is selected
-                                self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
-                                self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
-                            self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
                     
                     ui.Spacer(height=10)
                     
                     # Results section
-                    with ui.CollapsableFrame("Results", height=0, collapsed=True):
+                    with ui.CollapsableFrame("Metric: Perception Entropy", height=0, collapsed=False):
                         with ui.VStack(spacing=5):
+                            # Buttons for operations
+                            with ui.HStack(spacing=5, height=0):
+                                self.analyze_btn = ui.Button("Analyze Perception Entropy", clicked_fn=self._calc_perception_entropies, width=120, height=36)
+                                # Initially disable the button since no mesh is selected
+                                self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
+                                self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
+                            # self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
                             self.results_list = ui.ScrollingFrame(height=250)
                             # Initialize with empty results
                             with self.results_list:
@@ -744,7 +746,7 @@ class GO4RExtension(omni.ext.IExt):
                                         )
                     cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
                     cam3d_instance.create_ray_casters(get_current_stage(), self._usd_context)
-                    self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
+                    # self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
                     raise e
@@ -784,7 +786,7 @@ class GO4RExtension(omni.ext.IExt):
                                     )
                     lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
                     lidar_instance.create_ray_casters(get_current_stage(), self._usd_context)
-                    self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
+                    # self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
             
@@ -806,7 +808,7 @@ class GO4RExtension(omni.ext.IExt):
             # Check for camera
             camera = _find_camera(prim)
             if camera is not None:
-                self._log_message(f"Found camera at path: {prim.GetPath()}")
+                self._log_message(f"Adding camera: {camera.name} to robot {bot.name}")
                 
                 # Handle stereo camera pairing
                 found_stereo_pair = False
@@ -830,7 +832,7 @@ class GO4RExtension(omni.ext.IExt):
                                     self._log_message(f"  Path 2: {sensor_instance.path.pathString}")
                                     # Find the common parent of the two cameras based on the paths
                                     common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path.pathString])
-                                    self._log_message(f"  Common: {common_parent_path}")
+                                    # self._log_message(f"  Common: {common_parent_path}")
                                     common_parent_prim = get_current_stage().GetPrimAtPath(common_parent_path)
                                     if not common_parent_prim:
                                         self._log_message(f"Error: Could not find common parent prim at path {common_parent_path}")
@@ -864,7 +866,7 @@ class GO4RExtension(omni.ext.IExt):
                         
                 # Add camera only if it wasn't part of a stereo pair
                 if not found_stereo_pair:
-                    self._log_message(f"Adding camera: {camera.name} to robot {bot.name}")
+                    self._log_message(f"Adding stereo camera: {camera.name} to robot {bot.name}")
                     bot.sensors.append(camera)
             
             # Always continue recursively even if sensors were found at this level
@@ -1015,8 +1017,8 @@ class GO4RExtension(omni.ext.IExt):
         if "UNGROUPED" in self.weighted_voxels:
             self._log_message("Warning: There are ungrouped voxels that will not be considered!")
 
-        results_data = {}
-        results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
+        percep_entr_results_data = {}
+        percep_entr_results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
 
         # Calculate total number of sensors for progress tracking
         total_sensors_to_process = sum(len(robot.sensors) for robot in self.robots)
@@ -1061,18 +1063,21 @@ class GO4RExtension(omni.ext.IExt):
             self.analysis_progress_bar.model.set_value(1.0)
             self._log_message("Analysis complete")
             # Update the results UI (consider making this async too if needed)
-            # self._update_results_ui(results_data) # Assuming results_data is populated elsewhere or passed back
+            self._update_percep_entr_results_ui()
 
         # Run the analyses asynchronously
         asyncio.ensure_future(run_all_analyses())
-        
-        # Note: Results UI update might need adjustment depending on how results_data is populated by the async tasks.
 
     async def _calc_perception_entropy(self, robot:Bot3D, update_progress_callback=None, disable_raycasters=True):
         """ Caluclate the perception entropy for a single robot."""
 
         self._log_message(f"Calculating perception entropy for robot {robot.name}...")
 
+        # Add the robot to the results data dict. Results will be tracked at different levels and the UI updated at the end
+        self.percep_entr_results_data.update({robot.name: {"Total Entropy": 0.0, 
+                                                           "Entropy By Sensor Type": {}, 
+                                                           "Entropy By Voxel Group": {}}})
+        
         sensor_voxel_m = dict.fromkeys([s.name for s in robot.sensors], None)
 
         for sensor_instance in robot.sensors:
@@ -1120,14 +1125,17 @@ class GO4RExtension(omni.ext.IExt):
 
                 # Calculate the sensor uncertainty for each voxel, where σ = 1/AP - 1
                 vg_sensor_voxel_uncertainty[sensor_instance.sensor.name] = 1.0 / vg_sensor_voxel_ap_clipped[sensor_instance.sensor.name] - 1.0
+
+                # Calulate the total entropy for the sensor type
+                vg_sensor_total_entropy = self._calc_total_entropy(vg_sensor_voxel_uncertainty[sensor_instance.sensor.name])
+                self.percep_entr_results_data[robot.name]["Entropy By Sensor Type"].update( {sensor_name: np.sum(vg_sensor_total_entropy)} )
         
             # Apply per-voxel late fusion to get the total entropy where σ_fused = sqrt(1 / Σ(1/σ_i²))
             vg_voxel_uncertainty_late_fusion = self._apply_late_fusion(vg_sensor_voxel_uncertainty)
             
             # Calculate the per-voxel entropy H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
-            vg_voxel_entropy = 2 * np.log(vg_voxel_uncertainty_late_fusion) + 1 + np.log(2*np.pi)
-            # Normalize from 0 to 1
-            vg_voxel_entropy = (vg_voxel_entropy - np.min(vg_voxel_entropy)) / (np.max(vg_voxel_entropy) - np.min(vg_voxel_entropy))
+            vg_voxel_entropy = self._calc_total_entropy(vg_voxel_uncertainty_late_fusion)
+            self.percep_entr_results_data[robot.name]["Entropy By Voxel Group"].update( {voxel_group: np.sum(vg_voxel_entropy)} )
 
             # Calculate the total perception entropy, which is simply the weighted average of the voxel entropies
             vg_normalized_weight = self.weighted_voxels[voxel_group][1]/sum([w for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
@@ -1135,12 +1143,21 @@ class GO4RExtension(omni.ext.IExt):
             sum_normalized_voxel_entropy += np.sum(vg_normalized_voxel_entropy)
         
         total_perception_entropy = sum_normalized_voxel_entropy / sum([len(v) for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
-        
+        self.percep_entr_results_data[robot.name]["Total Entropy"] = total_perception_entropy
         self._log_message(f"Total perception entropy for robot {robot.name}: {total_perception_entropy:.4f}")
         return total_perception_entropy
 
+    def _calc_total_entropy(self, uncertainties:np.ndarray, normalize=True) -> float:
+        """Calculate the total entropy from the uncertainties
+        H(S|m,q) = 2ln(σ) + 1 + ln(2pi)"""
+        entropy = 2 * np.log(uncertainties) + 1 + np.log(2*np.pi)
+        if normalize:
+            # Normalize the entropy to be between 0 and 1
+            entropy = (entropy - np.min(entropy)) / (np.max(entropy) - np.min(entropy))
+        return entropy
+
         
-    def _update_results_ui(self, results_data=None):
+    def _update_percep_entr_results_ui(self):
         """Update the results UI with entropy results for each robot"""
         # Clear existing results
         self.results_list.clear()
@@ -1149,28 +1166,11 @@ class GO4RExtension(omni.ext.IExt):
             with ui.VStack(spacing=5):
                 if not self.robots:
                     ui.Label("No robots selected")
-                elif not results_data:
+                elif not self.percep_entr_results_data:
                     ui.Label("Run analysis to see results")
                 else:
-                    # Add an overall results section
-                    with ui.CollapsableFrame(
-                        "Overall Results", 
-                        height=0,
-                        style={"border_width": 2, "border_color": ui.color("#00aa00")},
-                        collapsed=False
-                    ):
-                        with ui.VStack(spacing=5):
-                            # Display combined results if available
-                            if "combined" in results_data:
-                                combined = results_data["combined"]
-                                ui.Label(f"Total Perception Entropy: {combined['total']:.4f}")
-                                ui.Label(f"All Cameras: {combined['cameras']:.4f}")
-                                ui.Label(f"All LiDARs: {combined['lidars']:.4f}")
-                    
                     # For each robot, create a collapsible frame with its results
-                    for robot_name, robot_results in results_data.items():
-                        if robot_name == "combined":
-                            continue  # Skip the combined results as they're already displayed
+                    for robot_name, robot_results in self.percep_entr_results_data.items():
                         
                         with ui.CollapsableFrame(
                             f"Robot: {robot_name}", 
@@ -1179,29 +1179,21 @@ class GO4RExtension(omni.ext.IExt):
                             collapsed=False
                         ):
                             with ui.VStack(spacing=5):
-                                ui.Label(f"Total Entropy: {robot_results['total']:.4f}")
                                 
-                                # Camera results
-                                with ui.CollapsableFrame(
-                                    f"Cameras: {robot_results['cameras']:.4f}", 
-                                    height=0,
-                                    style={"border_color": ui.color("#00c3ff")},
-                                    collapsed=False
-                                ):
-                                    with ui.VStack(spacing=2):
-                                        for camera_name, camera_entropy in robot_results.get('camera_details', {}).items():
-                                            ui.Label(f"{camera_name}: {camera_entropy:.4f}")
-                                
-                                # LiDAR results
-                                with ui.CollapsableFrame(
-                                    f"LiDARs: {robot_results['lidars']:.4f}", 
-                                    height=0,
-                                    style={"border_color": ui.color("#00c3ff")},
-                                    collapsed=False
-                                ):
-                                    with ui.VStack(spacing=2):
-                                        for lidar_name, lidar_entropy in robot_results.get('lidar_details', {}).items():
-                                            ui.Label(f"{lidar_name}: {lidar_entropy:.4f}")
+                                for result_type, result_value in robot_results.items():
+                                    if isinstance(result_value, dict):
+                                        with ui.CollapsableFrame(
+                                            result_type, 
+                                            height=0,
+                                            style={"border_color": ui.color("#00c3ff")},
+                                            collapsed=False
+                                        ):
+                                            with ui.VStack(spacing=2):
+                                                for key, entropy in result_value.items():
+                                                    ui.Label(f"{key}: {entropy:.4f}")
+                                    else:
+                                        ui.Label(f"{result_type}: {result_value:.4f}")
+                                        
 
     def _get_prim_attribute(self, prim, attr_name, default_value=None):
         """Get the value of a prim attribute or return a default value"""
