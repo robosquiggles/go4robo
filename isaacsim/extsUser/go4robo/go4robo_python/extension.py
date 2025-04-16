@@ -28,10 +28,8 @@ from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
 import os, sys
 
-bot_3d_rep_module_path = sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
-
-print(f"Looking for bot_3d_rep in {bot_3d_rep_module_path}")
-from bot_3d_rep import *
+from .bot_3d_rep import *
+from .bot_3d_problem import *
 
 sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
@@ -1193,7 +1191,7 @@ class GO4RExtension(omni.ext.IExt):
                                                     ui.Label(f"{key}: {entropy:.4f}")
                                     else:
                                         ui.Label(f"{result_type}: {result_value:.4f}")
-                                        
+
 
     def _get_prim_attribute(self, prim, attr_name, default_value=None):
         """Get the value of a prim attribute or return a default value"""
