@@ -4,12 +4,12 @@ import omni.ext
 import omni.ui as ui
 import omni.kit.commands
 import omni.physx as _physx
-from omni.isaac.core.utils.stage import get_current_stage
+from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, Semantics, UsdShade
-import omni.isaac.core.utils.prims as prim_utils
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade
+import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
 from isaacsim.sensors.physx import _range_sensor
 
@@ -1082,23 +1082,25 @@ class GO4RExtension(omni.ext.IExt):
             if update_progress_callback:
                 await update_progress_callback()
         
-        m_early_fusion_per_type = {}
+        vg_m_early_fusion_per_type = {}
         # Get the measurements for each sensor type on each voxel and apply early fusion
         unique_sensor_names = set([sensor.name for sensor in robot.sensors])
         for name in unique_sensor_names:
             measurements_for_sensor = {name: sensor_voxel_m[name] for name in unique_sensor_names if name in sensor_voxel_m and sensor_voxel_m[name] is not None}
             if measurements_for_sensor: # Check if dict is not empty
-                m_early_fusion_per_type.update({name: self._apply_early_fusion(measurements_for_sensor)})
+                vg_m_early_fusion_per_type.update({name: self._apply_early_fusion(measurements_for_sensor)})
         
-        sum_normalized_perception_entropy = 0.0
+        sum_normalized_voxel_entropy = 0.0
         for voxel_group, voxels in self.weighted_voxels.items():
             if voxel_group == "UNGROUPED":
                 self._log_message(f"Warning: Skipping {voxel_group} voxels")
                 continue
-            vg_measurements = m_early_fusion_per_type[sensor_instance.sensor.name][voxel_group]
+            vg_measurements = vg_m_early_fusion_per_type[sensor_instance.sensor.name][voxel_group]
             
             vg_sensor_voxel_ap = dict.fromkeys(unique_sensor_names, None)
+            vg_sensor_voxel_ap_clipped = dict.fromkeys(unique_sensor_names, None)
             vg_sensor_voxel_uncertainty = dict.fromkeys(unique_sensor_names, None)
+            # For each unique sensor, calculate the average precision (AP) and uncertainty (σ) for each voxel
             for sensor_name in unique_sensor_names:
                 sensor_instances = robot.get_sensors_by_name(sensor_name)
                 if len(sensor_instances) == 0:
@@ -1107,25 +1109,32 @@ class GO4RExtension(omni.ext.IExt):
                 elif len(sensor_instances) > 1:
                     self._log_message(f"Warning: Multiple sensors found with name {sensor_name}, using the first one")
                 sensor_instance = sensor_instances[0]
+
                 # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
                 a = sensor_instance.sensor.ap_constants['a']
                 b = sensor_instance.sensor.ap_constants['b']
                 vg_sensor_voxel_ap[sensor_instance.sensor.name] = a * np.log(vg_measurements) + b
 
+                # Clip the AP values to avoid log(0) or log(1)
+                vg_sensor_voxel_ap_clipped[sensor_instance.sensor.name] = np.clip(vg_sensor_voxel_ap[sensor_instance.sensor.name], 0.0001, 0.9999)
+
                 # Calculate the sensor uncertainty for each voxel, where σ = 1/AP - 1
-                vg_sensor_voxel_uncertainty[sensor_instance.sensor.name] = 1.0 / vg_sensor_voxel_ap[sensor_instance.sensor.name] - 1.0
+                vg_sensor_voxel_uncertainty[sensor_instance.sensor.name] = 1.0 / vg_sensor_voxel_ap_clipped[sensor_instance.sensor.name] - 1.0
         
-            # Apply late fusion to get the total entropy where σ_fused = sqrt(1 / Σ(1/σ_i²))
-            total_voxel_uncertainty_late_fusion = self._apply_late_fusion(vg_sensor_voxel_uncertainty)
+            # Apply per-voxel late fusion to get the total entropy where σ_fused = sqrt(1 / Σ(1/σ_i²))
+            vg_voxel_uncertainty_late_fusion = self._apply_late_fusion(vg_sensor_voxel_uncertainty)
             
-            # Calculate the per-voxel entropy H(S|m,q) = 2ln(σ) + 1 + ln(pi)
-            total_voxel_entropy = 2 * np.log(total_voxel_uncertainty_late_fusion) + 1 + np.log(np.pi)
+            # Calculate the per-voxel entropy H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
+            vg_voxel_entropy = 2 * np.log(vg_voxel_uncertainty_late_fusion) + 1 + np.log(2*np.pi)
+            # Normalize from 0 to 1
+            vg_voxel_entropy = (vg_voxel_entropy - np.min(vg_voxel_entropy)) / (np.max(vg_voxel_entropy) - np.min(vg_voxel_entropy))
 
             # Calculate the total perception entropy, which is simply the weighted average of the voxel entropies
-            normalized_weight = self.weighted_voxels[voxel_group][1]/sum([w for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
-            sum_normalized_perception_entropy += normalized_weight * total_voxel_entropy
+            vg_normalized_weight = self.weighted_voxels[voxel_group][1]/sum([w for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
+            vg_normalized_voxel_entropy = vg_normalized_weight * vg_voxel_entropy
+            sum_normalized_voxel_entropy += np.sum(vg_normalized_voxel_entropy)
         
-        total_perception_entropy = sum_normalized_perception_entropy / sum([len(v) for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
+        total_perception_entropy = sum_normalized_voxel_entropy / sum([len(v) for vg, (v,w) in self.weighted_voxels.items() if vg != "UNGROUPED"])
         
         self._log_message(f"Total perception entropy for robot {robot.name}: {total_perception_entropy:.4f}")
         return total_perception_entropy
@@ -1459,7 +1468,7 @@ class GO4RExtension(omni.ext.IExt):
                 shader = UsdShade.Shader.Define(stage, shader_path)
                 shader.CreateIdAttr("UsdPreviewSurface")
                 shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.1, 0.1, 0.8)) # Bluish tint
-                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.5) # Set transparency
+                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.1) # Set transparency
                 mat_prim.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
 
             # Bind the material to the voxel mesh
@@ -1676,17 +1685,15 @@ class GO4RExtension(omni.ext.IExt):
         if not uncertainties:
             return 0.0
             
-        uncertainties_array = np.array(list(uncertainties.values()))
+        uncertainties_array = np.array(list(uncertainties.values())) # this should be a 2D array of uncertainties, where each row is a sensor and each column is a voxel
         # Calculate the sum of the inverse squares of the uncertainties
-        sum_inverse_squares = np.sum(1 / (uncertainties_array ** 2))
+        sum_inverse_squares = np.sum(1 / (uncertainties_array ** 2), axis=0)
         # Calculate the fused uncertainty
-        if sum_inverse_squares == 0:
-            return 0.0
         sig_fused = np.sqrt(1 / sum_inverse_squares)
         # Normalize the uncertainty
-        sig_fused = sig_fused / np.max(sig_fused)
+        # sig_fused = sig_fused / np.max(sig_fused) # Normalize to be between 0 and 1
         # Normalize the uncertainty to be between 0 and 1
-        sig_fused = np.clip(sig_fused, 0.0, 1.0)
+        # sig_fused = np.clip(sig_fused, 0.0, 1.0)
         # self._log_message(f"Fused uncertainty: {sig_fused}")
 
         return sig_fused
@@ -1861,7 +1868,8 @@ class GO4RExtension(omni.ext.IExt):
         return points
     
     async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, disable_raycaster=False) -> dict[str,Tuple[np.ndarray[int],float]]:
-        """Get the number of points from a raycaster that pass through each of the voxels in the given list"""
+        """Get the number of points from a raycaster that pass through each of the voxels in the given list
+        The voxels and voxel groups will be stored in the same order as the weighted_voxels dictionary."""
         # Set the time for calculating how long it takes to get the measurements
         start_time = time.time()
         # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
@@ -1980,5 +1988,6 @@ class GO4RExtension(omni.ext.IExt):
                                     active=False,
                                     stage_or_context=self._usd_context)
         await self._ensure_physics_updated(pause=True, steps=1)
+        print(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
         self._log_message(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
         return measurements
