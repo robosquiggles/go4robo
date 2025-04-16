@@ -5,9 +5,10 @@ from typing import Type
 import PIL
 import PIL.ImageColor
 
-import copy
+import os
 import random
 import numpy as np
+import math
 
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
@@ -17,6 +18,8 @@ import plotly.graph_objects as go
 
 from scipy.optimize import minimize as scipy_minimize
 from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
+
+import omni.isaac.core.utils.prims as prim_utils
 
 try:
     from pxr import UsdGeom, Gf, Sdf, Usd
@@ -70,6 +73,7 @@ class TF:
             [ 0, 1, 0, 0],
             [-s, 0, c, 0],
             [ 0, 0, 0, 1]
+            
         ])
     
     # Rotation matrix around Z-axis
@@ -83,13 +87,18 @@ class TF:
         ])
     
     def inverse_matrix(tf_matrix):
-        return np.linalg.inv(tf_matrix)
+        """Calculate the inverse of a transformation matrix."""
+        # Cast to a np.ndarray if not already
+        if not isinstance(tf_matrix, np.ndarray):
+            tf_matrix_np = np.array(tf_matrix)
+        else:
+            tf_matrix_np = tf_matrix
+        return np.linalg.inv(tf_matrix_np)
 
 
 class Sensor3D:
     def __init__(self, 
                  name:str,
-                 type:str,
                  h_fov:float=None, 
                  h_res:int=None,
                  v_fov:float=None,
@@ -99,12 +108,16 @@ class Sensor3D:
                  cost:float=None,
                  body:UsdGeom.Mesh=None, 
                  focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ap_constants:dict = {
+                        "a": 0.055,  # coefficient from the paper for camera
+                        "b": 0.155   # coefficient from the paper for camera
+                    },
+                 ray_caster=None
                  ):
         """
         Initialize a new instance of the class.
         Args:
             name (str): The name of the sensor.
-            type (str): The type of the sensor.
             h_fov (float): The horizontal field of view *in radians*.
             h_res (int): The horizontal resolution of the sensor.
             v_fov (float): The vertical field of view *in radians*.
@@ -132,12 +145,42 @@ class Sensor3D:
         else:
             self.focal_point = focal_point
 
+        self.ap_constants = ap_constants
+        self.ray_caster = ray_caster
+
     def get_properties_dict(self):
         properties = {}
         for key, value in self.__dict__.items():
             if not key.startswith("__") and not callable(value):
                 properties[key] = value
         return properties
+    
+    def calculate_ap(self, pixel_count: int) -> float:
+        """Calculate Average Precision (AP) based on pixel count using the paper's formula"""
+        if pixel_count <= 0:
+            return 0.001  # Minimal AP for numerical stability
+        
+        # Using the formula from the paper: AP ≈ a * ln(m) + b
+        
+        ap = self.ap_constants['a'] * math.log(pixel_count) + self.ap_constants['b']
+        
+        # Clamp AP to valid range
+        ap = max(0.001, min(0.999, ap))
+        
+        return ap
+    
+    def calculate_ap_sigma(self, pixel_count: int) -> float:
+        ap = self.calculate_ap(pixel_count)
+        sigma = (1 / ap) - 1
+        return sigma
+    
+    def calculate_gaussian_entropy(self, sigma: float) -> float:
+        """Calculate the entropy of a 2D Gaussian distribution with given standard deviation"""
+        # Using the formula from the paper: H(S|m, q) = 2*ln(σ) + 1 + ln(2π)
+        sigma = self.calculate_ap_sigma(sigma)
+        entropy = 2 * math.log(sigma) + 1 + math.log(2 * math.pi)
+        return entropy
+
 
 
 class MonoCamera3D(Sensor3D):
@@ -152,24 +195,50 @@ class MonoCamera3D(Sensor3D):
                  body:UsdGeom.Mesh=None,
                  cost:float=None,
                  focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ap_constants:dict = {
+                        "a": 0.055,  # coefficient from the paper for camera
+                        "b": 0.155   # coefficient from the paper for camera
+                    }
                  ):
+        """
+        Initialize a new instance of the class.
+        Args:
+            name (str): The name of the sensor.
+            focal_length (float): The focal length of the camera.
+            h_aperture (float): The horizontal aperture of the camera.
+            v_aperture (float): The vertical aperture of the camera.
+            aspect_ratio (float): The aspect ratio of the camera.
+            h_res (int): The horizontal resolution of the camera.
+            v_res (int): The vertical resolution of the camera.
+            body (USDGeom.Mesh): The body of the sensor.
+            cost (float): The cost of the sensor.
+            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
+        """
 
+        self.name = name
         self.h_aperture = h_aperture
         self.v_aperture = v_aperture
         self.aspect_ratio = aspect_ratio
-        self.h_res = h_res
-        self.v_res = v_res
         self.body = body
         self.cost = cost
-        self.focal_point = focal_point
+        if isinstance(focal_point, (list, tuple)):
+            self.focal_point = np.array([[1, 0, 0, focal_point[0]],
+                                         [0, 1, 0, focal_point[1]],
+                                         [0, 0, 1, focal_point[2]],
+                                         [0,0,0,1]])
+        else:
+            self.focal_point = focal_point
 
-        self.h_fov = 2 * np.arctan(h_aperture / (2 * focal_length))
-        self.v_fov = 2 * np.arctan(v_aperture / (2 * focal_length))
+        self.h_fov = np.rad2deg(2 * np.arctan(h_aperture / (2 * focal_length)))
+        self.v_fov = np.rad2deg(2 * np.arctan(v_aperture / (2 * focal_length)))
+
+        self.h_res = self.h_fov/h_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
+        self.v_res = self.v_fov/v_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
 
         self.max_range = 100.0 # TODO: This should be clipping distance?
         self.min_range = 0.0 # TODO: This should be clipping distance?
 
-        super().__init__(name, "MonoCamera", self.h_fov, self.h_res, self.v_fov, v_res, self.max_range, self.min_range, self.cost, self.body, self.focal_point)
+        self.ap_constants = ap_constants
         
 
 class StereoCamera3D(Sensor3D):
@@ -181,8 +250,24 @@ class StereoCamera3D(Sensor3D):
                  tf_sensor2:tuple[Gf.Vec3d, Gf.Matrix3d],
                  cost:float=None,
                  body:UsdGeom.Mesh=None,
+                 ap_constants:dict = {
+                        "a": 0.055,  # coefficient from the paper for camera
+                        "b": 0.155   # coefficient from the paper for camera
+                    }
                  ):
+        """
+        Initialize a new instance of the class.
+        Args:
+            name (str): The name of the sensor.
+            sensor1 (MonoCamera3D): The first camera sensor.
+            sensor2 (MonoCamera3D): The second camera sensor.
+            tf_sensor1 (tuple[Gf.Vec3d, Gf.Matrix3d]): The transformation matrix for the first camera.
+            tf_sensor2 (tuple[Gf.Vec3d, Gf.Matrix3d]): The transformation matrix for the second camera.
+            cost (float): The cost of the sensor.
+            body (USDGeom.Mesh): The body of the sensor.
+        """
 
+        self.name = name
         self.sensor1 = sensor1
         self.sensor2 = sensor2
         self.tf_1 = tf_sensor1
@@ -196,9 +281,8 @@ class StereoCamera3D(Sensor3D):
         self.v_res = sensor1.v_res
         self.max_range = sensor1.max_range
         self.min_range = sensor1.min_range
+        self.ap_constants = ap_constants
 
-        super().__init__(name, "StereoCamera", h_fov=self.h_fov, h_res=self.h_res, v_fov=self.v_fov, v_res=self.v_res, max_range=self.max_range, min_range=self.min_range, cost=self.cost, body=self.body, focal_point=(0.0, 0.0, 0.0))
-        
 
 class Lidar3D(Sensor3D):
     def __init__(self, 
@@ -212,6 +296,10 @@ class Lidar3D(Sensor3D):
                  cost:float,
                  body:UsdGeom.Mesh, 
                  focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
+                 ap_constants = {
+                        "a": 0.152,  # coefficient from the paper for lidar
+                        "b": 0.659   # coefficient from the paper for lidar
+                    }
                  ):
         """
         Initialize a new instance of the class.
@@ -226,7 +314,7 @@ class Lidar3D(Sensor3D):
             body (USDGeom.Mesh): The body of the sensor.
             focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
         """
-        super().__init__(name, "Lidar", h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point)
+        super().__init__(name, h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point, ap_constants=ap_constants)
 
 
 class Sensor3D_Instance:
@@ -240,7 +328,102 @@ class Sensor3D_Instance:
         self.sensor = sensor
         self.path = path
         self.tf = tf
+        self.ray_casters = []
 
+    def create_ray_casters(self, stage, context, disable=False):
+        """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
+        import omni.kit.commands
+        import isaacsim.core.utils.transformations as tf_utils
+        import isaacsim.core.utils.xforms as xforms_utils
+        
+
+        if self.ray_casters == []: # No ray casters are loaded
+            if isinstance(self.sensor, StereoCamera3D):
+                sensors = [self.sensor.sensor1, self.sensor.sensor2]
+            else:
+                sensors = [self.sensor]
+
+            for sensor in sensors:
+                parent_path = self.get_ancestor_path(1)
+                ray_caster_path = parent_path + f'/GO4R_RAYCASTER_{sensor.name}'
+                # First check the stage for the ray caster
+                if stage.GetPrimAtPath(ray_caster_path).IsValid():
+                    # print(f"Ray caster {ray_caster_path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
+                    self.ray_casters.append(prim_utils.get_prim_at_path(ray_caster_path))
+                    continue
+
+                # If the ray caster does not exist, create it
+                else:
+                    # First get the path that is currently selected in the stage
+                    # This is the path that the ray caster will be parented to
+
+                    # Then select the prim from the stage
+                    omni.kit.commands.execute('SelectPrims',
+                                              old_selected_paths=[context.get_selection().get_selected_prim_paths()],
+                                              new_selected_paths=[self.get_ancestor_path(1)])
+                    #Then create the ray caster at the selection
+                    result, rc_prim = omni.kit.commands.execute('RangeSensorCreateLidar',
+                        path=f'/GO4R_RAYCASTER_{sensor.name}',
+                        parent=parent_path,
+                        min_range=sensor.min_range,
+                        max_range=sensor.max_range,
+                        draw_points=True, # Turn this off for simulation performance
+                        draw_lines=False, # Turn this off for simulation performance
+                        horizontal_fov=sensor.h_fov,
+                        vertical_fov=sensor.v_fov,
+                        horizontal_resolution=sensor.h_res,
+                        vertical_resolution=sensor.v_res,
+                        rotation_rate=0.0, # Generate all points at once!
+                        high_lod=True, # Generate all points at once!
+                        yaw_offset=0.0,
+                        enable_semantics=True)
+                    
+                    if disable:
+                        omni.kit.commands.execute('ToggleActivePrims',
+                                    prim_paths=[ray_caster_path],
+                                    active=False,
+                                    stage_or_context=self._usd_context)
+                    
+                    #If the ray caster is a MonoCamera3D, set the transform to match the Camera (which is rotated 90 about x, and -90 about y)
+                    if isinstance(sensor, MonoCamera3D):
+
+                        cam_prim = prim_utils.get_prim_at_path(self.path)
+                        parent_prim = prim_utils.get_prim_at_path(parent_path)
+
+                        # Get the original/current rc local transform
+                        rc_local_transform_orig = Gf.Matrix4d(tf_utils.get_relative_transform(parent_prim, rc_prim))
+
+                        # Get the camera local transform
+                        cam_local_pose = xforms_utils.get_local_pose(str(cam_prim.GetPath()))
+                        cam_local_tf_from_pose = tf_utils.tf_matrix_from_pose(*cam_local_pose)
+
+                        cam_to_rc_tf = TF.rotation_y_matrix(np.pi/2) @ TF.rotation_x_matrix(-np.pi/2)
+                        cam_to_rc_tf = TF.inverse_matrix(np.array([[ 0.0, -1.0,  0.0,  0.0],
+                                                                   [ 0.0,  0.0,  1.0,  0.0],
+                                                                   [-1.0,  0.0,  0.0,  0.0],
+                                                                   [ 0.0,  0.0,  0.0,  1.0]]))
+                        
+
+                        # Get the new ray caster local transform
+                        rc_local_transform = Gf.Matrix4d(cam_to_rc_tf @ cam_local_tf_from_pose.T) #TODO Try to use Torch/Tensors?
+
+                        # Transform the ray caster to the correct camera transform
+                        omni.kit.commands.execute('TransformPrimCommand',
+                            path=rc_prim.GetPath(),
+                            old_transform_matrix=rc_local_transform_orig,
+                            new_transform_matrix=rc_local_transform,
+                            time_code=Usd.TimeCode(),
+                            had_transform_at_key=False)
+
+                if result:
+                    self.ray_casters.append(rc_prim)
+                else:
+                    print(f"Failed to create ray caster for {sensor.name} at {self.path}. Skipping!")
+        else:
+            print(f"Ray casters already exist for {self.name}. Skipping creation.")
+
+        return self.ray_casters
+    
     def get_position(self):
         return self.tf[0]
     
@@ -281,6 +464,13 @@ class Sensor3D_Instance:
         """Returns whether or not the sensor body is within the given mesh volume."""
         raise NotImplementedError("This method is not yet implemented.")
     
+    def get_ancestor_path(self, level:int=1):
+        """Returns the path to the ancestor of the sensor instance at the given level. 1 is the direct parent, 2 is the grandparent, etc."""
+        path = self.path
+        for i in range(level):
+            path = str(path).rsplit('/', 1)[0]
+        return path
+    
 
 class Bot3D:
     def __init__(self, 
@@ -307,6 +497,9 @@ class Bot3D:
         self.sensor_coverage_requirement = sensor_coverage_requirement
         self.sensor_pose_constraint = sensor_pose_constraint
 
+        self.perception_entropy = 0.0
+        self.perception_coverage_percentage = 0.0
+
         # TODO Remove self.body from any of the sensor_coverage_requirement meshes
 
     def get_sensors_by_type(self, sensor_type:Type[Sensor3D]) -> list[Sensor3D_Instance]:
@@ -315,6 +508,21 @@ class Bot3D:
             if isinstance(sensor_instance.sensor, sensor_type):
                 sensor_instances.append(sensor_instance)
         return sensor_instances
+    
+    def get_sensors_by_name(self, name:str) -> list[Sensor3D_Instance]:
+        sensor_instances = []
+        for sensor_instance in self.sensors:
+            if sensor_instance.sensor.name == name:
+                sensor_instances.append(sensor_instance)
+        return sensor_instances
+    
+    def get_ray_casters(self):
+        """Returns a list of all the ray casters in the bot."""
+        ray_casters = []
+        for sensor_instance in self.sensors:
+            if sensor_instance.ray_casters != []:
+                ray_casters.extend(sensor_instance.ray_casters)
+        return ray_casters
 
     def add_sensor_3d(self, sensor:Sensor3D|list[Sensor3D]|None):
         """
