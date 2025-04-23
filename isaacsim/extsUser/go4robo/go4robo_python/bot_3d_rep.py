@@ -6,6 +6,7 @@ import PIL
 import PIL.ImageColor
 
 import os
+import copy
 import random
 import numpy as np
 import math
@@ -19,10 +20,13 @@ import plotly.graph_objects as go
 from scipy.optimize import minimize as scipy_minimize
 from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
 
+import omni
+import omni.physx as physx
 import omni.isaac.core.utils.prims as prim_utils
 
+
 try:
-    from pxr import UsdGeom, Gf, Sdf, Usd
+    from pxr import UsdGeom, Gf, Sdf, Usd, PhysicsSchemaTools
     print("USD found; USD-specific features will work.")
     USD_MODE = True
 except ImportError:
@@ -111,8 +115,7 @@ class Sensor3D:
                  ap_constants:dict = {
                         "a": 0.055,  # coefficient from the paper for camera
                         "b": 0.155   # coefficient from the paper for camera
-                    },
-                 ray_caster=None
+                    }
                  ):
         """
         Initialize a new instance of the class.
@@ -146,7 +149,6 @@ class Sensor3D:
             self.focal_point = focal_point
 
         self.ap_constants = ap_constants
-        self.ray_caster = ray_caster
 
     def get_properties_dict(self):
         properties = {}
@@ -321,36 +323,92 @@ class Sensor3D_Instance:
     def __init__(self,
                  sensor:Sensor3D,
                  path:str,
+                 usd_context:omni.usd.UsdContext,
                  tf:tuple[Gf.Vec3d, Gf.Matrix3d],
-                 name:str|None=None
+                 name:str|None=None,
                  ):
+        """Initialize a new instance of the class.
+        Args:
+            sensor (Sensor3D): The sensor object.
+            path (str): The path to the sensor in the USD stage.
+            tf (tuple[Gf.Vec3d, Gf.Matrix3d]): The transformation matrix for the sensor.
+            name (str|None): The name of the sensor instance. If None, use the sensor's name.
+        """
         self.name = name
         self.sensor = sensor
-        self.path = path
         self.tf = tf
-        self.ray_casters = []
 
-    def create_ray_casters(self, stage, context, disable=False):
+        self.usd_context = usd_context
+        self.stage = self.usd_context.get_stage()
+        self.path = path
+
+        self.ray_casters = []
+        self.ray_casters = self.create_ray_casters()
+        self.body = self.create_sensor_body(sensor.body)
+        
+
+    def create_sensor_body(self, body:UsdGeom.Mesh):
+        """Create the sensor body in the USD stage. Returns the created sensor body."""
+        # First check the stage for the sensor body
+        if self.stage.GetPrimAtPath(self.path).IsValid():
+            # print(f"Sensor body {self.path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
+            return prim_utils.get_prim_at_path(self.path)
+        else:
+            # If the sensor body does not exist, create it
+            # Copy the body to the sensor path on the stage
+            result, sensor_body = omni.kit.commands.execute('CopyPrim',
+                                                           path_from=body.GetPath(),
+                                                           path_to=self.path,
+                                                           exclusive_select=False,
+                                                           copy_to_introducing_layer=False
+                                                           )
+            if result:
+                return sensor_body
+            else:
+                print(f"Failed to create sensor body for {self.name} at {self.path}. Skipping!")
+                return None
+
+
+    def create_ray_casters(self, disable=False):
         """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
         import omni.kit.commands
         import isaacsim.core.utils.transformations as tf_utils
         import isaacsim.core.utils.xforms as xforms_utils
+
+        def tree_search(prim, name):
+            """Search the tree for the ray caster with name: f'/GO4R_RAYCASTER_{sensor.name}'"""
+            if str(prim.GetPath()).endswith(name):
+                return prim
+            for child in prim.GetChildren():
+                result = tree_search(child, name)
+                if result:
+                    return result
         
 
         if self.ray_casters == []: # No ray casters are loaded
             if isinstance(self.sensor, StereoCamera3D):
+                # If the sensor is a stereo camera, the ray casters were already created for the mono cameras
+                # We just have to find them and add them to the list
                 sensors = [self.sensor.sensor1, self.sensor.sensor2]
-            else:
-                sensors = [self.sensor]
+                for sensor in sensors:
+                    # Search the tree for the ray caster with name: f'/GO4R_RAYCASTER_{sensor.name}'
+                    ray_caster_path_end = f'/GO4R_RAYCASTER_{sensor.name}'
+                    highest_path = self.get_ancestor_path(1)
+                    ray_caster = tree_search(self.stage.GetPrimAtPath(highest_path), ray_caster_path_end)
+                    if ray_caster:
+                        # print(f"Ray caster {ray_caster_path_end} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
+                        self.ray_casters.append(ray_caster)
 
-            for sensor in sensors:
+
+            else:
+                sensor = self.sensor
+
                 parent_path = self.get_ancestor_path(1)
                 ray_caster_path = parent_path + f'/GO4R_RAYCASTER_{sensor.name}'
                 # First check the stage for the ray caster
-                if stage.GetPrimAtPath(ray_caster_path).IsValid():
+                if self.stage.GetPrimAtPath(ray_caster_path).IsValid():
                     # print(f"Ray caster {ray_caster_path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
                     self.ray_casters.append(prim_utils.get_prim_at_path(ray_caster_path))
-                    continue
 
                 # If the ray caster does not exist, create it
                 else:
@@ -359,7 +417,7 @@ class Sensor3D_Instance:
 
                     # Then select the prim from the stage
                     omni.kit.commands.execute('SelectPrims',
-                                              old_selected_paths=[context.get_selection().get_selected_prim_paths()],
+                                              old_selected_paths=[self.usd_context.get_selection().get_selected_prim_paths()],
                                               new_selected_paths=[self.get_ancestor_path(1)])
                     #Then create the ray caster at the selection
                     result, rc_prim = omni.kit.commands.execute('RangeSensorCreateLidar',
@@ -382,7 +440,7 @@ class Sensor3D_Instance:
                         omni.kit.commands.execute('ToggleActivePrims',
                                     prim_paths=[ray_caster_path],
                                     active=False,
-                                    stage_or_context=self._usd_context)
+                                    stage_or_context=self.stage)
                     
                     #If the ray caster is a MonoCamera3D, set the transform to match the Camera (which is rotated 90 about x, and -90 about y)
                     if isinstance(sensor, MonoCamera3D):
@@ -415,10 +473,10 @@ class Sensor3D_Instance:
                             time_code=Usd.TimeCode(),
                             had_transform_at_key=False)
 
-                if result:
-                    self.ray_casters.append(rc_prim)
-                else:
-                    print(f"Failed to create ray caster for {sensor.name} at {self.path}. Skipping!")
+                        if result:
+                            self.ray_casters.append(rc_prim)
+                        else:
+                            print(f"Failed to create ray caster for {sensor.name} at {self.path}. Skipping!")
         else:
             print(f"Ray casters already exist for {self.name}. Skipping creation.")
 
@@ -460,10 +518,6 @@ class Sensor3D_Instance:
         self.tf[1] = self.tf[1] * tf_matrix
         return self
     
-    def contained_in(self, mesh:o3d.geometry.TriangleMesh):
-        """Returns whether or not the sensor body is within the given mesh volume."""
-        raise NotImplementedError("This method is not yet implemented.")
-    
     def get_ancestor_path(self, level:int=1):
         """Returns the path to the ancestor of the sensor instance at the given level. 1 is the direct parent, 2 is the grandparent, etc."""
         path = self.path
@@ -471,10 +525,41 @@ class Sensor3D_Instance:
             path = str(path).rsplit('/', 1)[0]
         return path
     
+    def contained_in(self, mesh:o3d.geometry.TriangleMesh):
+        """Returns whether or not the sensor body is within the given mesh volume."""
+        raise NotImplementedError("This method is not yet implemented.")
+    
+    def overlaps(self):
+        """Returns whether or not the sensor body overlaps with the given mesh volume."""
+
+        prim_path = prim_utils.get_prim_path(self.body)
+        prim_found = False
+
+        def report_overlap(overlap):
+            if overlap.rigid_body == prim_path:
+                global prim_found
+                prim_found = True
+                # Now that we have found our prim, return False to abort further search.
+                return False
+            return True
+        
+        physx.get_physx_scene_query_interface().overlap_mesh(PhysicsSchemaTools.sdfPathToInt(prim_path),
+                                                             report_overlap,
+                                                             anyHit=False)
+        if prim_found:
+            print("Prim overlapped mesh!")
+            return True
+        return False
+    
+    def overlaps_any(self, stage):
+        """Returns whether or not the sensor body overlaps with anything in the given stage."""
+        raise NotImplementedError("This method is not yet implemented.")
+    
 
 class Bot3D:
     def __init__(self, 
                  name:str,
+                 usd_context:omni.usd.UsdContext,
                  body:list[UsdGeom.Mesh]=None,
                  path:str=None,
                  sensor_coverage_requirement:list[UsdGeom.Mesh]=None,
@@ -483,16 +568,20 @@ class Bot3D:
         """
         Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
         Args:
-            body (open3d.geometry): The mesh body of the bot.
-            sensor_coverage_requirement (list[open3d.geometry]): The required coverage area of the sensors.
-            color (str): The color of the bot.
-            sensor_pose_constraint (list[open3d.geometry]): The constraints on the sensor pose.
-            occlusions (list[open3d.geometry]): The occlusions that the sensors must avoid.
+            name (str): The name of the bot.
+            body (list[UsdGeom.Mesh]): The body of the bot.
+            path (str): The path to the bot in the USD stage.
+            sensor_coverage_requirement (list[UsdGeom.Mesh]): The required coverage area for the sensors.
+            sensor_pose_constraint (list[UsdGeom.Mesh]): The constraints for the sensor poses.
+            sensors (list[Sensor3D_Instance]): A list of sensor instances attached to the bot.
         """
         self.name = name
         self.path = path
         self.body = body
         self.sensors = sensors
+
+        self.usd_context = usd_context
+        self.stage = self.usd_context.get_stage()
             
         self.sensor_coverage_requirement = sensor_coverage_requirement
         self.sensor_pose_constraint = sensor_pose_constraint
@@ -524,46 +613,52 @@ class Bot3D:
                 ray_casters.extend(sensor_instance.ray_casters)
         return ray_casters
 
-    def add_sensor_3d(self, sensor:Sensor3D|list[Sensor3D]|None):
+    def add_sensor_3d_at(self, sensor:Sensor3D|list[Sensor3D]|None, tf:Gf.Matrix4d, name:str=None, path:str=None):
         """
         Adds a 3D sensor to the list of sensors. Only adds a sensor if it is not None.
         Parameters:
-            sensor (Sensor3D|None): The 3D sensor to be added (or None).
+            sensor (Sensor3D|list[Sensor3D]|None): The sensor to be added.
+            tf (Gf.Matrix4d): The transformation matrix for the sensor.
+            name (str|None): The name of the sensor. If None, use the sensor's name.
+            path (str|None): The path to the sensor in the USD stage. If None, use the default path.
         Returns:
             bool: True if the sensor was added successfully, False otherwise.
         """
-        if sensor is not None:
-            if sensor is list:
-                self.sensors.extend(sensor)
-            else:
-                self.sensors.append(sensor)
-            return True
-        return False
+        if (sensor is not None) and (tf is not None):
+            sensor_instance = Sensor3D_Instance(sensor=sensor, 
+                                                tf=tf,
+                                                name=name if name is not None else sensor.name,
+                                                path=path if path is not None else f"{self.path}/{sensor.name}/{sensor.name}",
+                                                usd_context=self.usd_context)
+            self.sensors.append(sensor_instance)
+        else:
+            print("Sensor or Transform is None, not adding to bot.")
+            return False
 
-#     def add_sensor_valid_pose(self, sensor:FOV3D, max_tries:int=25, verbose=False):
-#         """
-#         Adds a sensor to a valid location within the defined constraints.
-#         This method generates random points within the bounding box of the 
-#         sensor pose constraints and translates the sensor to these points. 
-#         It checks if the new sensor pose is valid and, if so, adds the sensor 
-#         to the list of sensors.
-#         Args:
-#             sensor (FOV3D): The sensor to be added, which will be translated 
-#                     to a valid location within the constraints.
-#         """
-#         for i in range(max_tries):
-#             x, y = pointpats.random.poisson(self.sensor_pose_constraint, size=1)
-#             rotation = -np.degrees(np.arctan2(x, y))
+    # def add_sensor_valid_pose(self, sensor:Sensor3D, max_tries:int=25, verbose=False):
+    #     """
+    #     Adds a sensor to a valid location within the defined constraints.
+    #     This method generates random points within the bounding box of the 
+    #     sensor pose constraints and translates the sensor to these points. 
+    #     It checks if the new sensor pose is valid and, if so, adds the sensor 
+    #     to the list of sensors.
+    #     Args:
+    #         sensor (FOV3D): The sensor to be added, which will be translated 
+    #                 to a valid location within the constraints.
+    #     """
+    #     for i in range(max_tries):
+    #         x, y = pointpats.random.poisson(self.sensor_pose_constraint, size=1)
+    #         rotation = -np.degrees(np.arctan2(x, y))
 
-#             sensor.set_translation(x, y)
-#             sensor.set_rotation(rotation) #this isn't quite right but good enough
+    #         sensor.set_translation(x, y)
+    #         sensor.set_rotation(rotation) #this isn't quite right but good enough
             
-#             if self.is_valid_sensor_pose(sensor):
-#                 self.add_sensor_2d(sensor)
-#                 break
-#             if i == max_tries and verbose:
-#                 print(f"Did not find a valid sensor pose in {max_tries} tries. Quitting!")
-#         return sensor
+    #         if self.is_valid_sensor_pose(sensor):
+    #             self.add_sensor_2d(sensor)
+    #             break
+    #         if i == max_tries and verbose:
+    #             print(f"Did not find a valid sensor pose in {max_tries} tries. Quitting!")
+    #     return sensor
 
 #     def remove_sensor_by_index(self, index):
 #         """Removes a sensor from the sensors list by its index."""

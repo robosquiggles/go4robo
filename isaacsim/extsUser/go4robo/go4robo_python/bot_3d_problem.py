@@ -59,7 +59,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         super().__init__(vars=variables, n_obj=2, **kwargs)
 
-    def convert_sensor_to_1D(self, sensor:Sensor3D_Instance|None, idx:int, dtype=np.ndarray):
+    def convert_sensor_instance_to_1D(self, sensor_instance:Sensor3D_Instance|None, idx:int, dtype=np.ndarray):
         """
         Converts a 2D sensor object to a 1D representation.
         Parameters:
@@ -73,16 +73,16 @@ class SensorPkgOptimization(ElementwiseProblem):
             KeyError: If the sensor is not found in the sensor_options.
         """
 
-        def get_sensor_key(sensor):
+        def get_sensor_key(sensor_instance:Sensor3D_Instance|None):
             for key, s in self.sensor_options.items():
-                if s == sensor:
+                if s == sensor_instance.sensor:
                     return key
-            raise KeyError(f"Sensor: {sensor} not found in options: {self.sensor_options}")
+            raise KeyError(f"Sensor: {sensor_instance} not found in options: {self.sensor_options}")
         
-        if sensor is not None:
+        if sensor_instance is not None:
             x = {
-                f"s{idx}_type": get_sensor_key(sensor),
-                f"s{idx}_tf": sensor.tf,
+                f"s{idx}_type": get_sensor_key(sensor_instance),
+                f"s{idx}_tf": sensor_instance.tf,
             }
         else:
             x = {

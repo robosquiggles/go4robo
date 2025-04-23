@@ -738,12 +738,15 @@ class GO4RExtension(omni.ext.IExt):
                                         aspect_ratio=aspect_ratio,
                                         h_res=resolution[0] if resolution else None,
                                         v_res=resolution[1] if resolution else None,
-                                        body=prim,
+                                        body=_find_sensor_body(prim),
                                         cost=1.0,
                                         focal_point=(0, 0, 0)
                                         )
-                    cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
-                    cam3d_instance.create_ray_casters(get_current_stage(), self._usd_context)
+                    cam3d_instance = Sensor3D_Instance(cam3d, 
+                                                       path=prim.GetPath(), 
+                                                       name=_remove_trailing_digits(name), 
+                                                       tf=self._get_robot_to_sensor_transform(prim, robot_prim),
+                                                       usd_context=self._usd_context)
                     # self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
@@ -754,7 +757,7 @@ class GO4RExtension(omni.ext.IExt):
             else:
                 return None
 
-        def _find_lidar(prim:Usd.Prim) -> Dict:
+        def _find_lidar(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find LiDARs that are descendants of the selected robot"""
 
             # self._log_message(f"DEBUG: Checking for LiDAR prim {prim.GetName()} of type {prim.GetTypeName()}")
@@ -779,16 +782,58 @@ class GO4RExtension(omni.ext.IExt):
                                     v_res=self._get_prim_attribute(prim, "verticalResolution"),
                                     max_range=self._get_prim_attribute(prim, "maxRange"),
                                     min_range=self._get_prim_attribute(prim, "minRange"),
-                                    body=prim,
+                                    body=_find_sensor_body(prim),
                                     cost=1.0,
                                     )
-                    lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
-                    lidar_instance.create_ray_casters(get_current_stage(), self._usd_context)
+                    lidar_instance = Sensor3D_Instance(lidar, 
+                                                       path=prim.GetPath(), 
+                                                       name=_remove_trailing_digits(name), 
+                                                       tf=self._get_robot_to_sensor_transform(prim, robot_prim),
+                                                       usd_context=self._usd_context)
                     # self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
             
             return lidar_instance
+        
+
+        def _find_sensor_body(prim:Usd.Prim) -> Usd.Prim:
+            """Find the body of the sensor, which is the first mesh encountered in the local tree ancestry of the given prim"""
+            def _recurse_find_sensor_body(prim):
+                
+                # First check at the most likely place
+                prim_path = prim.GetPath()
+                parent_path = prim_path.GetParentPath()
+                likely_body_path = str(parent_path) + "GO4R_BODY"
+                likely_body = get_current_stage().GetPrimAtPath(likely_body_path)
+                if likely_body and likely_body.IsA(UsdGeom.Mesh):
+                    return likely_body
+
+                # Traverse the parent tree, looking for a mesh.
+                # If no mesh in the children of the parent, go up a level and check again.
+                # Do this recursively until we find meshes.
+
+                if prim.IsA(UsdGeom.Mesh):
+                    return prim
+                else:
+                    # Check if this is a mesh
+                    for child in prim.GetChildren():
+                        if child.IsA(UsdGeom.Mesh):
+                            return child
+                    # If not, check the parent
+                    parent = prim.GetParent()
+                    if parent:
+                        return _recurse_find_sensor_body(parent)
+                
+                # If no mesh found, return None
+                return None
+
+            
+            body = _recurse_find_sensor_body(prim)
+            if body is None:
+                self._log_message(f"Warning: No body found for sensor {prim.GetPath()}")
+            return body
+
 
 
         def _assign_sensors_to_robot(prim, bot, processed_camera_paths=None):
@@ -800,7 +845,6 @@ class GO4RExtension(omni.ext.IExt):
             lidar = _find_lidar(prim)
             if lidar is not None:
                 self._log_message(f"Adding LiDAR: {lidar.name} to robot {bot.name}")
-                bot.sensors.append(lidar)
                 # Don't return, continue searching in case there are other sensors
 
             # Check for camera
@@ -812,18 +856,24 @@ class GO4RExtension(omni.ext.IExt):
                 found_stereo_pair = False
                 for role in ["left", "right"]:
                     if (role in camera.name.lower() or 
-                        (prim.HasAttribute("stereoRole") and prim.GetAttribute("stereoRole").Get() == role)):
+                        (prim.HasAttribute("stereoRole") and 
+                         prim.GetAttribute("stereoRole").Get() and 
+                         prim.GetAttribute("stereoRole").Get().lower() == role)):
                         this_cam_role = role
                         this_cam_name = camera.name
                         this_cam_path_str = prim.GetPath().pathString
                         other_cam_role = "left" if role == "right" else "right"
-                        other_cam_name = camera.name.replace(role, other_cam_role)
-                        other_cam_path_str = str(this_cam_path_str).replace(role, other_cam_role)
+                        
+                        # Case-insensitive replacement for the other camera name
+                        pattern = re.compile(re.escape(role), re.IGNORECASE)
+                        other_cam_name = pattern.sub(other_cam_role, camera.name)
+                        other_cam_path_str = pattern.sub(other_cam_role, str(this_cam_path_str))
 
                         # Check if the other camera is already in the sensors list
                         for i, sensor_instance in enumerate(bot.sensors):
                             if isinstance(sensor_instance.sensor, MonoCamera3D):
-                                if sensor_instance.name == other_cam_name:
+                                # Case-insensitive comparison
+                                if sensor_instance.name.lower() == other_cam_name.lower():
                                     # Found the other camera, create a stereo camera
                                     self._log_message(f"Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
                                     self._log_message(f"  Path 1: {this_cam_path_str}")
@@ -842,7 +892,6 @@ class GO4RExtension(omni.ext.IExt):
                                     if common_parent_name.endswith("_XX"):
                                         common_parent_name = common_parent_name[:-3]
 
-
                                     stereo_cam = StereoCamera3D(
                                         name=_remove_trailing_digits(common_parent_name),
                                         sensor1=sensor_instance.sensor if this_cam_role == "left" else camera.sensor,
@@ -852,9 +901,11 @@ class GO4RExtension(omni.ext.IExt):
                                         cost=sensor_instance.sensor.cost + camera.sensor.cost,
                                         body=prim
                                     )
-                                    stereo_instance = Sensor3D_Instance(stereo_cam, path=common_parent_path, 
-                                                                    name=_remove_trailing_digits(common_parent_name), 
-                                                                    tf=camera.tf)
+                                    stereo_instance = Sensor3D_Instance(stereo_cam, 
+                                                                        path=common_parent_path, 
+                                                                        name=_remove_trailing_digits(common_parent_name), 
+                                                                        tf=camera.tf,
+                                                                        usd_context=self._usd_context)
                                     # Move the ray casters from the MonoCamera3D instance to the StereoCamera3D instance
                                     stereo_instance.ray_casters = sensor_instance.ray_casters + camera.ray_casters
                                     bot.sensors[i] = stereo_instance  # Replace the mono camera with stereo
@@ -879,7 +930,7 @@ class GO4RExtension(omni.ext.IExt):
         
         total_sensors = dict.fromkeys(sensor_types, 0)
         for bot_prim in self.selected_prims:
-            bot = Bot3D(bot_prim.GetName(), path=bot_prim.GetPath())
+            bot = Bot3D(bot_prim.GetName(), path=bot_prim.GetPath(), usd_context=self._usd_context)
             self.robots.append(bot)
             # Clear existing sensors before searching again
             bot.sensors = []
@@ -1042,7 +1093,7 @@ class GO4RExtension(omni.ext.IExt):
                             omni.kit.commands.execute('ToggleActivePrims',
                                     prim_paths=[prim_utils.get_prim_path(rc) for rc in sensor.ray_casters if rc], # Check if rc is valid
                                     active=False,
-                                    stage_or_context=self._usd_context)
+                                    stage_or_context=self.stage)
                             self._log_message(f"Disabled raycaster(s) for sensor {sensor.name}")
                         except Exception as e:
                              self._log_message(f"Warning: Could not disable raycaster for {sensor.name}: {e}")
@@ -1314,7 +1365,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Created {len(voxels)} voxel meshes inside {mesh_path}")
 
             omni.kit.commands.execute('ToggleActivePrims',
-                stage_or_context=omni.usd.get_context().get_stage(),
+                stage_or_context=self.stage,
                 prim_paths=[mesh_path],
                 active=False)
 
