@@ -11,11 +11,15 @@ import random
 import numpy as np
 import math
 
+from typing import List, Dict, Tuple, Optional, Union
+
 import matplotlib.pyplot as plt
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib.animation import FuncAnimation
 import plotly.graph_objects as go
+
+import torch
 
 from scipy.optimize import minimize as scipy_minimize
 from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
@@ -98,6 +102,225 @@ class TF:
         else:
             tf_matrix_np = tf_matrix
         return np.linalg.inv(tf_matrix_np)
+
+
+class PerceptionSpace:
+
+    class VoxelGroup:
+        def __init__(self, 
+                    name:str,
+                    voxels:torch.Tensor[str]|None,
+                    voxel_centers:torch.Tensor[Gf.Vec3d]|None,
+                    voxel_sizes:float|torch.Tensor[float]|None):
+            """
+            Initialize a new instance of the class.
+            Args:
+                name (str): The name of the voxel group.
+                voxels (torch.Tensor[str]): List of paths to voxels in the stage.
+                voxel_centers (torch.Tensor[Gf.Vec3d]): The centers of the voxels.
+                voxel_sizes (torch.Tensor[float]): The sizes of the voxels.
+            """
+            self.name = name
+            # all the tensors must be the same size
+            if torch.shape(voxels) != torch.shape(voxel_centers) or torch.shape(voxels) != torch.shape(voxel_sizes):
+                raise ValueError("All tensors must be the same size.")
+            self.voxels = voxels if voxels is not None else torch.tensor([])
+            self.voxel_centers = voxel_centers if voxel_centers is not None else torch.tensor([])
+            if voxel_sizes is float:
+                self.voxel_sizes = voxel_sizes if voxel_sizes is not None else torch.tensor([])
+
+        def add_voxel(self, voxel:str, center:Gf.Vec3d, size:float):
+            """
+            Add a voxel to the voxel group.
+            Args:
+                voxel (str): The voxel to be added.
+                center (Gf.Vec3d): The center of the voxel.
+                size (float): The size of the voxel.
+            """
+            self.voxels = torch.cat((self.voxels, torch.tensor([voxel])))
+            self.voxel_centers = torch.cat((self.voxel_centers, torch.tensor([center])))
+            self.voxel_sizes = torch.cat((self.voxel_sizes, torch.tensor([size])))
+
+        def remove_voxel(self, voxel:str):
+            """
+            Remove a voxel from the voxel group.
+            Args:
+                voxel (str): The voxel to be removed.
+            """
+            index = torch.where(self.voxels == voxel)[0]
+            if index.size(0) > 0:
+                self.voxels = torch.cat((self.voxels[:index], self.voxels[index+1:]))
+                self.voxel_centers = torch.cat((self.voxel_centers[:index], self.voxel_centers[index+1:]))
+                self.voxel_sizes = torch.cat((self.voxel_sizes[:index], self.voxel_sizes[index+1:]))
+
+        def remove_voxel_by_center(self, center:Gf.Vec3d):
+            """
+            Remove a voxel from the voxel group by its center.
+            Args:
+                center (Gf.Vec3d): The center of the voxel to be removed.
+            """
+            index = torch.where(self.voxel_centers == center)[0]
+            if index.size(0) > 0:
+                self.voxels = torch.cat((self.voxels[:index], self.voxels[index+1:]))
+                self.voxel_centers = torch.cat((self.voxel_centers[:index], self.voxel_centers[index+1:]))
+                self.voxel_sizes = torch.cat((self.voxel_sizes[:index], self.voxel_sizes[index+1:]))
+
+
+    def __init__(self,
+                 usd_context:omni.usd.UsdContext,
+                 voxel_groups:torch.Tensor[VoxelGroup]=None, 
+                 weights:torch.Tensor[float]=None):
+        """Initialize a new instance of the class.
+        Args:
+            usd_context (omni.usd.UsdContext): The USD context.
+            voxel_groups (torch.Tensor[VoxelGroup]): The voxel groups.
+            weights (torch.Tensor[float]): The weights of the voxel groups.
+        """
+        self.usd_context = usd_context
+        self.stage = self.usd_context.get_stage()
+        self.voxel_groups = voxel_groups
+        self.weights = weights
+
+    def add_voxel_group(self, voxel_group:VoxelGroup):
+        """
+        Add a voxel group to the perception space.
+        Args:
+            voxel_group (VoxelGroup): The voxel group to be added.
+        """
+        if self.voxel_groups is None:
+            self.voxel_groups = torch.tensor([voxel_group])
+        else:
+            self.voxel_groups = torch.cat((self.voxel_groups, torch.tensor([voxel_group])))
+
+    def remove_voxel_group(self, voxel_group:VoxelGroup):
+        """
+        Remove a voxel group from the perception space.
+        Args:
+            voxel_group (VoxelGroup): The voxel group to be removed.
+        """
+        index = torch.where(self.voxel_groups == voxel_group)[0]
+        if index.size(0) > 0:
+            self.voxel_groups = torch.cat((self.voxel_groups[:index], self.voxel_groups[index+1:]))
+            self.weights = torch.cat((self.weights[:index], self.weights[index+1:]))
+
+    def get_voxel_group(self, name:str) -> VoxelGroup:
+        """
+        Get a voxel group by its name.
+        Args:
+            name (str): The name of the voxel group.
+        Returns:
+            VoxelGroup: The voxel group.
+        """
+        index = torch.where(self.voxel_groups == name)[0]
+        if index.size(0) > 0:
+            return self.voxel_groups[index]
+        else:
+            raise ValueError(f"Voxel group {name} not found.")
+        
+    def get_vozel_paths(self) -> torch.Tensor[str]:
+        """
+        Get the paths of the voxels in the voxel groups.
+        Returns:
+            torch.Tensor[str]: The paths of the voxels.
+        """
+        voxel_paths = []
+        for voxel_group in self.voxel_groups:
+            voxel_paths.append(voxel_group.voxels)
+        return torch.cat(voxel_paths)
+    
+    def get_voxel_centers(self) -> torch.Tensor[Gf.Vec3d]:
+        """
+        Get the centers of the voxels in the voxel groups.
+        Returns:
+            torch.Tensor[Gf.Vec3d]: The centers of the voxels.
+        """
+        voxel_centers = []
+        for voxel_group in self.voxel_groups:
+            voxel_centers.append(voxel_group.voxel_centers)
+        return torch.cat(voxel_centers)
+    
+    def get_voxel_sizes(self) -> torch.Tensor[float]:
+        """
+        Get the sizes of the voxels in the voxel groups.
+        Returns:
+            torch.Tensor[float]: The sizes of the voxels.
+        """
+        voxel_sizes = []
+        for voxel_group in self.voxel_groups:
+            voxel_sizes.append(voxel_group.voxel_sizes)
+        return torch.cat(voxel_sizes)
+    
+    def get_voxel_mins(self) -> torch.Tensor[Gf.Vec3d]:
+        """
+        Get the minimum coordinates of the voxels in the voxel groups.
+        Returns:
+            torch.Tensor[Gf.Vec3d]: The minimum coordinates of the voxels.
+        """
+        voxel_centers = self.get_voxel_centers()
+        voxel_sizes = self.get_voxel_sizes()
+        return voxel_centers - (voxel_sizes / 2)
+    
+    def get_voxel_maxs(self) -> torch.Tensor[Gf.Vec3d]:
+        """
+        Get the maximum coordinates of the voxels in the voxel groups.
+        Returns:
+            torch.Tensor[Gf.Vec3d]: The maximum coordinates of the voxels.
+        """
+        voxel_centers = self.get_voxel_centers()
+        voxel_sizes = self.get_voxel_sizes()
+        return voxel_centers + (voxel_sizes / 2)
+    
+    def get_vozel_meshes_from_stage(self, voxel_group_name:str|None) -> List[UsdGeom.Mesh]:
+        """
+        Get the meshes of the voxels in the voxel group. If voxel_group_name is None, return all the voxels from the stage.
+        Returns:
+            List[UsdGeom]: The meshes of the voxels.
+        """
+        if voxel_group_name is None:
+            # Get all the meshes in the stage
+            meshes = []
+            for prim in self.stage.Traverse():
+                if prim.IsA(UsdGeom.Mesh):
+                    meshes.append(prim)
+            return meshes
+        else:
+            # Get the meshes in the voxel group
+            voxel_group = self.get_voxel_group(voxel_group_name)
+            meshes = []
+            for voxel in voxel_group.voxels:
+                mesh = self.stage.GetPrimAtPath(voxel)
+                if mesh.IsA(UsdGeom.Mesh):
+                    meshes.append(mesh)
+            return meshes
+        
+
+    
+    def batch_ray_voxel_intersections(self, ray_origins, ray_directions):
+        num_rays = ray_origins.shape[0]
+        voxel_mins = self.get_voxel_mins()  # Shape: (N, 3)
+        voxel_maxs = self.get_voxel_maxs()  # Shape: (N, 3)
+        num_voxels = voxel_mins.shape[0]
+
+        # Expand rays and voxels for broadcasting
+        rays_o = ray_origins.unsqueeze(1).expand(-1, num_voxels, -1)       # Shape: (R, N, 3)
+        rays_d = ray_directions.unsqueeze(1).expand(-1, num_voxels, -1)    # Shape: (R, N, 3)
+        boxes_min = voxel_mins.unsqueeze(0).expand(num_rays, -1, -1)       # Shape: (R, N, 3)
+        boxes_max = voxel_maxs.unsqueeze(0).expand(num_rays, -1, -1)       # Shape: (R, N, 3)
+
+        inv_dir = 1.0 / rays_d
+        tmin = (boxes_min - rays_o) * inv_dir
+        tmax = (boxes_max - rays_o) * inv_dir
+
+        t1 = torch.minimum(tmin, tmax)
+        t2 = torch.maximum(tmin, tmax)
+
+        t_enter = torch.max(t1, dim=2).values
+        t_exit = torch.min(t2, dim=2).values
+
+        # A ray intersects a voxel if t_enter <= t_exit and t_exit >= 0
+        hits = (t_enter <= t_exit) & (t_exit >= 0)
+
+        return hits  # Shape: (R, N)
 
 
 class Sensor3D:
@@ -482,6 +705,68 @@ class Sensor3D_Instance:
 
         return self.ray_casters
     
+    def get_prim(self):
+        """Get the USD prim for the sensor"""
+        return self.stage.GetPrimAtPath(self.path)
+    
+    def get_world_transform(self) -> Gf.Matrix4d:
+        """Get the world transform of a prim"""
+        xform = UsdGeom.Xformable(self.get_prim())
+        world_transform = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        
+        # Extract position and rotation
+        # position = Gf.Vec3d(world_transform.ExtractTranslation())
+        # rotation = world_transform.ExtractRotationMatrix()
+        
+        return world_transform
+
+    def get_rays(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Returns (ray_origins, ray_directions) for this sensor instance.
+
+        Returns
+        -------
+            ray_origins: (N, 3) numpy array of world-space ray origins.
+            ray_directions: (N, 3) numpy array of world-space ray directions.
+        """
+        import numpy as np
+
+        ray_origins = np.zeros((0, 3))
+        ray_directions = np.zeros((0, 3))
+        # ray_distances = np.zeros((0,))
+
+        for ray_caster in self.ray_casters:
+            hfov = ray_caster.GetAttribute("horizontalFov").Get() #degrees
+            vfov = ray_caster.GetAttribute("verticalFov").Get() #degrees
+            hres = int(hfov / ray_caster.GetAttribute("horizontalResolution").Get())
+            vres = int(vfov / ray_caster.GetAttribute("verticalResolution").Get())
+            world_tf = self.get_world_transform()
+            position = np.array(world_tf.ExtractTranslation())
+            rotation = np.array(world_tf.ExtractRotationMatrix())
+            
+            # The ray distances are the same for all rays, just max_range
+            # ray_distances = np.append(ray_distances, np.full((hres*vres,), max_range), axis=0)
+            # The origin is the World space origin of the ray caster
+            ray_origins = np.append(ray_origins, np.tile(position, (hres*vres, 1)), axis=0)
+
+            # The direction is the ray direction in world space are a bit more complicated
+            h_angles = np.linspace(-hfov/2, hfov/2, hres)
+            v_angles = np.linspace(-vfov/2, vfov/2, vres)
+            rays = []
+            for v in v_angles:
+                for h in h_angles:
+                    # Spherical coordinates to direction vector
+                    x = np.cos(v) * np.sin(h)
+                    y = np.sin(v)
+                    z = np.cos(v) * np.cos(h)
+                    dir_vec = np.array([x, y, z])
+                    dir_vec = dir_vec / np.linalg.norm(dir_vec)
+                    rays.append(dir_vec)
+            rotated_directions = (rotation @ np.array(rays).T).T
+            ray_directions = np.append(ray_directions, rotated_directions, axis=0)
+
+        return ray_origins, ray_directions
+
+    
     def get_position(self):
         return self.tf[0]
     
@@ -634,6 +919,18 @@ class Bot3D:
         else:
             print("Sensor or Transform is None, not adding to bot.")
             return False
+        
+    def get_prim(self):
+        """Get the USD prim for the bot"""
+        return self.stage.GetPrimAtPath(self.path)
+
+    def get_world_transform(self) -> Tuple[Gf.Vec3d, Gf.Rotation]:
+        """Get the world transform (position and rotation) of a prim"""
+        xform = UsdGeom.Xformable(self.get_prim())
+        world_transform = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        
+        return world_transform
+    
 
     # def add_sensor_valid_pose(self, sensor:Sensor3D, max_tries:int=25, verbose=False):
     #     """

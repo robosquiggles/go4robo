@@ -8,7 +8,7 @@ from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade, PhysxSchema
 import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
 from isaacsim.sensors.physx import _range_sensor
@@ -208,6 +208,20 @@ class GO4RExtension(omni.ext.IExt):
                             # Initialize with empty results
                             with self.results_list:
                                 ui.Label("Run analysis to see results")
+
+                    ui.Spacer(height=20)
+                    
+                    with ui.CollapsableFrame("Optimization", height=0, collapsed=False):
+                        with ui.VStack(spacing=5):
+                            # Buttons for operations
+                            with ui.HStack(spacing=5, height=0):
+                                self.optimize_btn = ui.Button("Optimize", clicked_fn=self._optimize_robot, height=36)
+                                self.optimize_btn.set_style({"color": ui.color("#FF0000")})
+                                self.optimize_btn.set_tooltip("Reset all settings to default values")
+                            # self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
+                            # Initialize with empty results
+                            with self.results_list:
+                                ui.Label("Run analysis to see results")
                     
                     ui.Spacer(height=20)
                     
@@ -318,6 +332,43 @@ class GO4RExtension(omni.ext.IExt):
         # If /World/GO4R_PerceptionVolume exists, update the voxel groups found there
         if get_current_stage().GetPrimAtPath("/World/GO4R_PerceptionVolume"):
             self._update_voxel_groups_from_stage()
+
+    def _zero_gravity(self):
+        """Disable gravity for all active prims in the stage"""
+        # Iterate over all prims in the stage
+        for prim in self.stage.Traverse():
+            # Check if the prim is active and not a prototype
+            if prim.IsActive() and not prim.IsInstance():
+                # Apply RigidBodyAPI and PhysxRigidBodyAPI
+                UsdPhysics.RigidBodyAPI.Apply(prim)
+                PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+
+                # Access the PhysxRigidBodyAPI
+                physx_api = PhysxSchema.PhysxRigidBodyAPI(prim)
+
+                # Disable gravity
+                physx_api.CreateDisableGravityAttr(True)
+
+                # Optionally, increase damping to prevent drifting
+                physx_api.GetLinearDampingAttr().Set(1000.0)
+                physx_api.GetAngularDampingAttr().Set(1000.0)
+
+    def _gravity(self):
+        for prim in self.stage.Traverse():
+            # Check if the prim is active and not a prototype
+            if prim.IsActive() and not prim.IsInstance():
+                # Access the PhysxRigidBodyAPI
+                physx_api = PhysxSchema.PhysxRigidBodyAPI(prim)
+
+                # Enable gravity
+                if physx_api.GetDisableGravityAttr().IsValid():
+                    physx_api.GetDisableGravityAttr().Set(False)
+
+                # Reset damping values
+                if physx_api.GetLinearDampingAttr().IsValid():
+                    physx_api.GetLinearDampingAttr().Set(0.0)
+                if physx_api.GetAngularDampingAttr().IsValid():
+                    physx_api.GetAngularDampingAttr().Set(0.0)
 
     def _update_voxel_groups_from_stage(self):
         """Update voxel groups based on XForm hierarchy under GO4R_PerceptionVolume"""
@@ -1047,6 +1098,9 @@ class GO4RExtension(omni.ext.IExt):
         """Main function to analyze all sensors on all the robots.
         
         Must have a perception mesh voxelized, and at least one robot analyzed"""
+        self._log_message("Disabling gravity...")
+        self._zero_gravity()
+
         self._log_message("Starting perception entropy analysis...")
         self.analysis_progress_bar.model.set_value(0.0) # Reset progress bar
 
@@ -1458,40 +1512,39 @@ class GO4RExtension(omni.ext.IExt):
         stage = get_current_stage()
 
         self.voxelize_progress_bar.model.set_value(0.5)
+
+        min_x = - voxel_size / 2
+        min_y = - voxel_size / 2
+        min_z = - voxel_size / 2
+        max_x = min_x + voxel_size
+        max_y = min_y + voxel_size
+        max_z = min_z + voxel_size
+        
+        # Define voxel as a cube
+        voxel_points = [
+            Gf.Vec3f(min_x, min_y, min_z),
+            Gf.Vec3f(max_x, min_y, min_z),
+            Gf.Vec3f(max_x, max_y, min_z),
+            Gf.Vec3f(min_x, max_y, min_z),
+            Gf.Vec3f(min_x, min_y, max_z),
+            Gf.Vec3f(max_x, min_y, max_z),
+            Gf.Vec3f(max_x, max_y, max_z),
+            Gf.Vec3f(min_x, max_y, max_z)
+        ]
+
+        # Define the faces (6 faces, each with 4 vertices)
+        face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
+        face_vertex_indices = Vt.IntArray([
+            0, 1, 2, 3,  # bottom
+            4, 5, 6, 7,  # top
+            0, 1, 5, 4,  # front
+            1, 2, 6, 5,  # right
+            2, 3, 7, 6,  # back
+            3, 0, 4, 7   # left
+        ])
         
         # Create a mesh for each occupied voxel
         for (i,j,k), p in voxel_centers:
-            # world_p = Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))):
-            # Calculate voxel corners
-            min_x = p[0] - voxel_size / 2
-            min_y = p[1] - voxel_size / 2
-            min_z = p[2] - voxel_size / 2
-            max_x = min_x + voxel_size
-            max_y = min_y + voxel_size
-            max_z = min_z + voxel_size
-            
-            # Define voxel as a cube
-            voxel_points = [
-                Gf.Vec3f(min_x, min_y, min_z),
-                Gf.Vec3f(max_x, min_y, min_z),
-                Gf.Vec3f(max_x, max_y, min_z),
-                Gf.Vec3f(min_x, max_y, min_z),
-                Gf.Vec3f(min_x, min_y, max_z),
-                Gf.Vec3f(max_x, min_y, max_z),
-                Gf.Vec3f(max_x, max_y, max_z),
-                Gf.Vec3f(min_x, max_y, max_z)
-            ]
-            
-            # Define the faces (6 faces, each with 4 vertices)
-            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
-            face_vertex_indices = Vt.IntArray([
-                0, 1, 2, 3,  # bottom
-                4, 5, 6, 7,  # top
-                0, 1, 5, 4,  # front
-                1, 2, 6, 5,  # right
-                2, 3, 7, 6,  # back
-                3, 0, 4, 7   # left
-            ])
             
             # Create voxel mesh using USD API directly
             voxel_path = f"{parent_path}/{mesh_name}_voxel_{i}_{j}_{k}"
@@ -1499,6 +1552,10 @@ class GO4RExtension(omni.ext.IExt):
             mesh_def.CreatePointsAttr().Set(voxel_points)
             mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
             mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            
+            # Set the voxel's transform at its center
+            xform = UsdGeom.Xformable(mesh_def)
+            xform.AddTranslateOp().Set(Gf.Vec3d(p[0], p[1], p[2]))
             
             # Define or get the transparent material
             mat_path = Sdf.Path(f"/World/GO4R_PerceptionVolume/Looks/{mesh_name}_material")
@@ -1911,124 +1968,65 @@ class GO4RExtension(omni.ext.IExt):
     async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, disable_raycaster=False) -> dict[str,Tuple[np.ndarray[int],float]]:
         """Get the number of points from a raycaster that pass through each of the voxels in the given list
         The voxels and voxel groups will be stored in the same order as the weighted_voxels dictionary."""
-        # Set the time for calculating how long it takes to get the measurements
         start_time = time.time()
-        # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
-        # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
         measurements = {}
         for gp_name, (voxels, weight) in self.weighted_voxels.items():
-            # Ensure UNGROUPED voxels are skipped if present
             if gp_name == "UNGROUPED":
                 continue
-            measurements.update({gp_name: (np.full(len(voxels),0,int), weight)})
+            measurements[gp_name] = (np.zeros(len(voxels), dtype=int), weight)
 
-        # Check if the sensor instance has ray casters
-        if not hasattr(sensor_instance, 'ray_casters') or not sensor_instance.ray_casters:
-             self._log_message(f"Warning: Sensor {sensor_instance.name} has no ray casters. Skipping measurements.")
-             return measurements # Return empty measurements
-
-        # For each ray caster, get the number of points that hit each voxel
-        # For stereo cameras, we simply add the number of points from each camera (apply early fusion)
-
-        for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
-            if not ray_caster: # Skip if ray_caster prim is invalid/deleted
-                self._log_message(f"Warning: Invalid ray_caster found for sensor {sensor_instance.name}. Skipping.")
+        # Build a mapping from voxel center to index for fast lookup
+        voxel_centers = {}
+        voxel_idx_map = {}
+        for gp_name, (voxels, weight) in self.weighted_voxels.items():
+            if gp_name == "UNGROUPED":
                 continue
+            for idx, voxel in enumerate(voxels):
+                center = voxel.GetAttribute("xformOp:translate").Get()
+                center_tuple = tuple(center)
+                voxel_centers[center_tuple] = (gp_name, idx)
+                voxel_idx_map[center_tuple] = (gp_name, idx)
 
-            # Enable the ray caster in case it is disabled
-            try:
-                omni.kit.commands.execute('ToggleActivePrims',
-                                        prim_paths=[prim_utils.get_prim_path(ray_caster)],
-                                        active=True,
-                                        stage_or_context=self._usd_context)
-                await self._ensure_physics_updated(pause=False, steps=1)
-            except Exception as e:
-                self._log_message(f"Warning: Failed to enable raycaster {prim_utils.get_prim_path(ray_caster)}: {e}. Skipping.")
-                continue
+        # Compute grid bounds and voxel size
+        all_centers = np.array(list(voxel_centers.keys()))
+        grid_min = np.min(all_centers, axis=0)
+        grid_max = np.max(all_centers, axis=0)
+        # Assume uniform voxel size from your settings
+        voxel_size = self.voxel_size if isinstance(self.voxel_size, float) else float(self.voxel_size[0])
 
+        # For each ray caster (sensor), get rays and process
+        ray_origins, ray_directions = sensor_instance.get_rays()
+        # Get ray origins and directions for this sensor
 
-            self._log_message(f"Generating measurements for {sensor_instance.name} ray caster {i} of {len(sensor_instance.ray_casters)}")
+        for ray_origin, ray_direction in zip(ray_origins, ray_directions):
+            # 1. Ray-mesh intersection for occlusion
+            hit_prim, hit_distance = self._single_ray_cast_to_mesh(
+                origin=carb.Float3(float(ray_origin[0]), float(ray_origin[1]), float(ray_origin[2])), 
+                direction=carb.Float3(float(ray_direction[0]), float(ray_direction[1]), float(ray_direction[2])), 
+                max_dist=sensor_instance.sensor.max_range, 
+                prim_path=None
+            )
 
-            # Enable collisions for all the voxels, disable collisions on everything else.
-            all_voxel_paths = []
-            for group_name, voxel_group in self.weighted_voxels.items():
-                 # Ensure UNGROUPED voxels are skipped if present
-                if group_name == "UNGROUPED":
-                    continue
-                all_voxel_paths.extend([str(v.GetPath()) for v in voxel_group[0]])
-
-            if not all_voxel_paths:
-                self._log_message("Warning: No valid voxels found to target for raycasting.")
-                continue # Skip this ray_caster if no voxels
-
-            self.target_prims_collision(all_voxel_paths, disable_others=True)
-
-            # Convert to a set for efficient removal later
-            remaining_voxel_paths_set = set(all_voxel_paths)
-
-            # Now, while there are still enabled voxels, cast, add the points to the measurements, then un-target any voxels that were hit
-            iterations = 0
-            print(f"Iteration\tHit paths\tVoxels hit\tRemaining")
-            print("---------\t---------\t----------\t---------")
-            while len(remaining_voxel_paths_set) > 0:
-                # Try reducing steps, e.g., to 1 or 2, if 3 is too slow/unnecessary
-                await self._ensure_physics_updated(pause=False, steps=1) # Reduced steps
-                rc_pathstr = str(prim_utils.get_prim_path(ray_caster))
-                hit_paths_raw = self.lidarInterface.get_prim_data(rc_pathstr)
-                # Remove empty hits and count occurrences efficiently
-                hit_counts = Counter(path for path in hit_paths_raw if path != "")
-
-                # If there are no hits, break out of the loop
-                if not hit_counts:
-                    break
-
-                # Get the set of unique prims that were hit in this iteration
-                unique_hit_paths_set = set(hit_counts.keys())
-
-                # Filter this set to only include paths that are still in our remaining voxels
-                # This prevents trying to process/disable things that aren't voxels or were already disabled
-                actual_voxel_hits_set = unique_hit_paths_set.intersection(remaining_voxel_paths_set)
-
-                if not actual_voxel_hits_set:
-                     self._log_message(f"  Iteration {iterations}: Hits detected, but not on remaining target voxels. Breaking.")
-                     break # No relevant hits
-
-                # Count the number of hits on each voxel using the pre-calculated counts
-                total_hits_this_iter = 0
-                for voxel_group_name, (voxels, weight) in self.weighted_voxels.items(): # Use measurements dict which excludes UNGROUPED
-                    for idx, voxel in enumerate(voxels):
-                        voxel_path = str(voxel.GetPath())
-                        # Check if the voxel was hit in this iteration using the efficient set
-                        if voxel_path in actual_voxel_hits_set:
-                            # Add the pre-calculated count
-                            count = hit_counts[voxel_path]
-                            measurements[voxel_group_name][0][idx] += count
-                            total_hits_this_iter += count
-
-
-                # Untarget the hit paths from collisions more efficiently
-                # Pass the set directly if untarget_prims_collision is updated, otherwise convert back to list
-                self.untarget_prims_collision(list(actual_voxel_hits_set))
-
-                # Remove the hit voxels from the set of remaining voxels
-                remaining_voxel_paths_set -= actual_voxel_hits_set
-
-                print(f"  {iterations}\t\t  {total_hits_this_iter}\t\t  {len(actual_voxel_hits_set)}\t\t  {len(remaining_voxel_paths_set)}")
-
-                iterations += 1
-                # Add a safety break condition
-                if iterations > 1000: # Adjust limit as needed
-                    self._log_message("Warning: Exceeded maximum iterations. Breaking loop.")
-                    break
-            
-            # Disable the ray caster
-            # Enable the ray caster in case it is disabled
-            if disable_raycaster:
-                omni.kit.commands.execute('ToggleActivePrims',
-                                    prim_paths=[prim_utils.get_prim_path(ray_caster)],
-                                    active=False,
-                                    stage_or_context=self._usd_context)
-        await self._ensure_physics_updated(pause=True, steps=1)
-        print(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
-        self._log_message(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
+            # 2. DDA traversal up to hit_distance
+            for voxel_idx in self.dda_ray_voxel_traversal(
+                ray_origin, ray_direction, max_distance=hit_distance
+            ):
+                # Map voxel_idx (i,j,k) to world center
+                center = (
+                    grid_min[0] + (voxel_idx[0] + 0.5) * voxel_size,
+                    grid_min[1] + (voxel_idx[1] + 0.5) * voxel_size,
+                    grid_min[2] + (voxel_idx[2] + 0.5) * voxel_size,
+                )
+                # Find which group/index this voxel belongs to
+                if center in voxel_idx_map:
+                    gp_name, idx = voxel_idx_map[center]
+                    measurements[gp_name][0][idx] += 1
+        
+        print(f"Measurements for {sensor_instance.name} took {time.time() - start_time:.2f} sec")
+        self._log_message(f"Measurements for {sensor_instance.name} took {time.time() - start_time:.2f} sec")
         return measurements
+
+
+    def _optimize_robot():
+        """Optimize the robot's sensor poses"""
+        raise NotImplementedError("Robot optimization is not implemented yet.")
