@@ -20,7 +20,7 @@ from pymoo.indicators.hv import HV
 
 class SensorPkgOptimization(ElementwiseProblem):
 
-    def __init__(self, bot:Bot3D, sensor_options:list[Sensor3D|None], max_n_sensors:int=4, **kwargs):
+    def __init__(self, bot:Bot3D, sensor_options:list[Sensor3D|None], max_n_sensors:int=5, **kwargs):
         """
         Initializes the sensor package optimization problem.
 
@@ -31,11 +31,11 @@ class SensorPkgOptimization(ElementwiseProblem):
                                 [r4, r5, r6, y],
                                 [r7, r8, r9, z],
                                 [0,  0,  0,  1]]
-                   We simply chop off the last row (containing only the scaling information) to get a 3x4 matrix.
+                   We simply chop off the last row (containing only the scaling information) to get a 3x4 matrix, and then flatten it.
         Parameters:
             bot (Bot3D): The robot object to be optimized.
             sensor_options (list): List of sensor objects to be used in the optimization.
-            max_n_sensors (int): Maximum number of sensors to be used in the optimization.
+            max_n_sensors (int): Maximum number of sensor instances to be used in the optimization.
             **kwargs: Additional keyword arguments for the parent class.
         """
 
@@ -45,21 +45,66 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         # SENSORS
         if None not in sensor_options:
-            sensor_options.insert(0, None)
-        self.sensor_options = dict(enumerate(sensor_options))
+            sensor_options.insert(0, None)                    # This makes sure that we have a None option for the sensor
+        self.sensor_options = dict(enumerate(sensor_options)) # This is the mapping of sensor type (enum) to sensor object
         self.max_n_sensors = max_n_sensors
 
-        # VARIABLES
-        variables = dict()
-        s_bounds = np.array(bot.sensor_pose_constraint.bounds)
+        # PROBLEM VARIABLES
+        self.variables = dict()
+        self.s_bounds = np.array(bot.sensor_pose_constraint.bounds) 
         for i in range(self.max_n_sensors):
             variables[f"s{i}_type"] = Integer(bounds=(0,len(self.sensor_options)-1))
-            variables[f"s{i}_tf"] = Real(bounds=(0, 1), shape=(3, 4))
+            variables[f"s{i}_tf"] = Real(bounds=(0, 1), shape=(3, 4)) 
         self.n_var = len(variables)
 
         super().__init__(vars=variables, n_obj=2, **kwargs)
 
-    def convert_sensor_instance_to_1D(self, sensor_instance:Sensor3D_Instance|None, idx:int, dtype=np.ndarray):
+    def convert_4dtf_to_1D(self, tf:np.ndarray|list|tuple, dtype=np.ndarray):
+        """
+        Converts a 4x4 transformation matrix to a 1D representation. 1D representation is a flattened version of the matrix.
+        The last row (containing only the scaling information) is chopped off to get a 3x4 matrix, and then flattened.
+        The translations are normalized to the bounds of the sensor pose constraint.
+        The rotation portion of the matrix is normalized using SVD.
+        Parameters:
+            tf (np.ndarray|list|tuple): The 4x4 transformation matrix to be converted.
+            dtype (type): The desired output type (e.g., np.ndarray, list).
+        Returns:
+            a 1D representation of the transformation matrix. We simply chop off the last row 
+            (containing only the scaling information) to get a 3x4 matrix, and then flatten it.
+        """
+        normalized_tf = TF.normalize_svd(tf, bounds=self.s_bounds)
+        flat = TF.flatten_matrix(normalized_tf)
+        flat = flat[:12]  # Take only the first 12 elements (3x4 matrix)
+        
+        if dtype == dict:
+            return {f"tf_{i}": tf[i] for i in range(len(tf))}
+        elif dtype == np.ndarray or dtype == np.array or dtype == list:
+            return tf
+        else:
+            raise ValueError("Invalid dtype:", dtype)
+        
+    def convert_1D_to_4dtf(self, tf_1D:np.ndarray|list|tuple, dtype=np.ndarray):
+        """
+        Converts a 1D representation of a transformation matrix back to a 4x4 matrix.
+        The translation portion of the matrix is denormalized using the bounds of the sensor pose constraint.
+        The rotation portion of the matrix is kept as is because the SVD normalization is equivalent equivalent.
+        The last row (containing only the scaling information) is added back to get a 4x4 matrix.
+        Parameters:
+            tf_1D (np.ndarray|list|tuple): The 1D representation of the transformation matrix.
+            dtype (type): The desired output type (e.g., np.ndarray, list).
+        Returns:
+            A 4x4 transformation matrix.
+        """
+        tf = TF.unflatten_matrix(tf_1D)
+        
+        if dtype == dict:
+            return {f"tf_{i}": tf[i] for i in range(len(tf))}
+        elif dtype == np.ndarray or dtype == np.array or dtype == list:
+            return tf
+        else:
+            raise ValueError("Invalid dtype:", dtype)
+
+    def convert_sensor_instance_to_1D(self, sensor_instance:Sensor3D_Instance|None, idx:int, dtype=np.ndarray, verbose=False):
         """
         Converts a 2D sensor object to a 1D representation.
         Parameters:
@@ -68,10 +113,18 @@ class SensorPkgOptimization(ElementwiseProblem):
         Returns:
             dict: A dictionary containing the 1D representation of the sensor with keys:
                 - 's{idx}_type': The type of the sensor.
-                - 's{idx}_tf': The transformation matrix of the sensor.
+                - 's{idx}_tf': The transformation matrix of the sensor, flattened.
         Raises:
             KeyError: If the sensor is not found in the sensor_options.
         """
+
+        assert sensor_instance is None or isinstance(sensor_instance, Sensor3D_Instance), "sensor_instance must be a Sensor3D_Instance or None"
+        assert idx < self.max_n_sensors, "idx must be less than max_n_sensors"
+        assert sensor_instance is None or sensor_instance.sensor in self.sensor_options.values(), "sensor_instance must be in sensor_options"
+        assert sensor_instance is None or sensor_instance.get_transform() is not None, "sensor_instance must have a transform"
+
+        if verbose:
+            print("Convert sensor->1d X:", sensor_instance)
 
         def get_sensor_key(sensor_instance:Sensor3D_Instance|None):
             for key, s in self.sensor_options.items():
@@ -82,7 +135,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         if sensor_instance is not None:
             x = {
                 f"s{idx}_type": get_sensor_key(sensor_instance),
-                f"s{idx}_tf": sensor_instance.tf,
+                f"s{idx}_tf": self.convert_4dtf_to_1D(sensor_instance.get_transform(), dtype=dtype),
             }
         else:
             x = {
@@ -97,42 +150,51 @@ class SensorPkgOptimization(ElementwiseProblem):
         else:
             raise ValueError("Invalid dtype:", dtype)
     
-    def convert_1D_to_sensor(self, x:dict|np.ndarray|list, idx:int, verbose=False):
+    def convert_1D_to_sensor(self, x:dict|np.ndarray|list, idx:int, verbose=False) -> Sensor3D_Instance|None:
         """
         Converts a 1D representation of a sensor to a sensor object.
         Args:
             x (dict): A dictionary containing sensor parameters.
             idx (int): The index of the sensor in the dictionary.
         Returns:
-            Sensor: A deep copy of the sensor object with updated translation and rotation,
+            Sensor: A Sensor3D_Instance object with updated translation and rotation,
                     or None if the sensor type is not available.
         """
-        if verbose:
-            print("Convert 1D->sensor X:", x)
-        if type(x) is not dict:
-            x = {
-                f"s{idx}_type": x[0],
-                f"s{idx}_x": x[1],
-                f"s{idx}_y": x[2],
-                f"s{idx}_rotation": x[3]
-            }
+        assert idx < self.max_n_sensors, "idx must be less than max_n_sensors"
+        assert x is not None, "x must not be None"
+        assert type(x) is dict or type(x) is np.ndarray or type(x) is list, "x must be a dict or np.ndarray or list"
 
-        if self.sensor_options[x[f"s{idx}_type"]] is None:
-            return None
+        if type(x) is dict:
+            sensor_type = x[f"s{idx}_type"]
+            tf = x[f"s{idx}_tf"]
         else:
-            sensor = copy.deepcopy(self.sensor_options[x[f"s{idx}_type"]])
-            sensor.set_translation(x[f"s{idx}_x"], x[f"s{idx}_y"])
-            sensor.set_rotation(x[f"s{idx}_rotation"])
-            return sensor
+            sensor_type = x[idx * 2]
+            tf = x[idx * 2 + 1]
 
-    def convert_bot_to_1D(self, bot, verbose=False, dtype=np.ndarray):
+        if verbose:
+            print("Convert 1d->sensor X:", x)
+        
+        if sensor_type in self.sensor_options:
+            sensor = self.sensor_options[sensor_type]
+            sensor_instance = Sensor3D_Instance(sensor=sensor,
+                                                name=f"sensor_{idx}",
+                                                tf=self.convert_1D_to_4dtf(tf),
+                                                path=None)
+            return sensor_instance
+        else:
+            return None
+
+    def convert_bot_to_1D(self, bot:Bot3D, verbose=False, dtype=np.ndarray) -> np.ndarray|dict:
         """
-        Converts a bot object with 2D sensor data into a 1D numpy array.
+        Converts a Bot3D object (perception system design) into a 1D numpy array.
         Parameters:
-            bot (object): The bot object containing sensors with 2D data.
+            bot (Bot3D): The bot object containing sensors with 2D data.
         Returns:
             numpy.ndarray: A 1D numpy array containing the converted sensor data.
         """
+
+        assert isinstance(bot, Bot3D), "bot must be a Bot3D object"
+        assert len(bot.sensors) <= self.max_n_sensors, "bot must have less than max_n_sensors sensors"
         
         if dtype == dict:
             x = dict()
@@ -185,10 +247,10 @@ class SensorPkgOptimization(ElementwiseProblem):
     def _evaluate(self, x, out, *args, **kwargs):
         # print("In EVALUATE, eavulating:", x)
         bot = self.convert_1D_to_bot(x)
-        if bot.is_valid_pkg():
+        if bot.get_design_validity():
             out["F"] = [
-                1 - bot.get_sensor_coverage(),  # maximize sensor coverage, so subtract from 1
-                bot.get_pkg_cost()              # minimize cost as is
+                bot.calculate_perception_entropy(),  # minimize perception entropy
+                bot.calculate_cost()              # minimize cost as is
                 ]
         else:
             out["F"] = [
@@ -202,38 +264,46 @@ class CustomSensorPkgRandomSampling(Sampling):
         super().__init__()
 
     def _do(self, problem, n_samples, **kwargs):
-        # print("In Custom Random Sampling")
+        # Get bounds for translation (assuming 3D box)
         xl, xu = problem.bounds()
-        xl = list(xl.values())
-        xu = list(xu.values())
+        xl = np.array(list(xl.values()))
+        xu = np.array(list(xu.values()))
         assert np.all(xu >= xl)
 
-        if self.p is None:
-            p = [1 / len(problem.sensor_options)] * len(problem.sensor_options)
-        else:
-            p = self.p
-            assert len(p) == len(problem.sensor_options)
-            assert np.sum(p) == 1
+        n_sensors = problem.max_n_sensors
+        n_types = len(problem.sensor_options)
 
+        # Sensor type probabilities
+        if self.p is None:
+            p = np.ones(n_types) / n_types
+        else:
+            p = np.array(self.p)
+            assert len(p) == n_types
+            assert np.isclose(np.sum(p), 1)
+
+        # Vectorized sampling of sensor types for all samples and all sensors
+        sensor_types = np.random.choice(n_types, size=(n_samples, n_sensors), p=p)
+
+        # Vectorized sampling of transforms (here: uniform in [xl, xu])
+        # For each sensor: 3x4 matrix flattened
+        # We'll use normalized [0,1] for each tf param, then scale/shift as needed
+        sensor_tfs = np.random.rand(n_samples, n_sensors, 12)  # shape: (n_samples, n_sensors, 3, 4)
+
+        # Prepare X as a list of dicts (or arrays) for batch conversion
         X = []
-        for _ in range(n_samples):
-            bot = copy.deepcopy(problem.bot)
-            bot.clear_sensors()
-            for i in range(problem.max_n_sensors):
-                sensor = problem.convert_1D_to_sensor({
-                    f"s{i}_type": np.random.choice(range(0,len(problem.sensor_options)), p=p),
-                    f"s{i}_x": 0,
-                    f"s{i}_y": 0,
-                    f"s{i}_rotation": 0
-                }, i)
-                if sensor is not None:
-                    bot.add_sensor_valid_pose(sensor)
-            X.append(problem.convert_bot_to_1D(bot, dtype=dict))
-        # print("Sampled X shape:", X.shape)
+        for i in range(n_samples):
+            sample_dict = {}
+            for j in range(n_sensors):
+                sample_dict[f"s{j}_type"] = sensor_types[i, j]
+                sample_dict[f"s{j}_tf"] = sensor_tfs[i, j]
+            X.append(sample_dict)
+
+        # TODO batch convert to bots and filter down to valid ones
+        # Use joblib or multiprocessing here
         return X
         
 
-def get_pareto_front(df, x='Cost', y='Perception Coverage'):
+def get_pareto_front(df, x='Cost', y='Perception Entropy'):
     # Extract the relevant columns for the Pareto front
     points = df[[x, y]].values
     
@@ -270,8 +340,7 @@ def get_hypervolume(df, ref_point, x='Cost', y='Perception Coverage', x_minimize
 
 def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, show=False, panzoom=False, **kwargs):
     """
-    Plot the trade space of concepts based on Cost and Perception Coverage.
-    This function creates a scatter plot visualizing the trade-offs between Cost and Perception Coverage for different concepts.
+    Plot the trade space of concepts based on Cost and Perception Entropy.
     Each point represents a concept, colored based on its optimization status. An ideal point is also marked on the plot.
     The plot can be displayed interactively with optional pan and zoom capabilities.
     Parameters:
@@ -293,22 +362,22 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
     opacity = 0.9 if 'opacity' not in kwargs else kwargs['opacity']
     title = f"Objective Space (best of {num_results} concepts)" if 'title' not in kwargs else kwargs['title']
     
-    fig = px.scatter(combined_df, x='Cost', y='Perception Coverage', 
-                     color='Optimized', 
-                     color_discrete_sequence=['#fc7114', '#1276a4'], 
+    fig = px.scatter(combined_df, x='Cost', y='Perception Entropy', 
+                    #  color='Optimized', 
+                     color_discrete_sequence=['#1276a4', '#fc7114'], 
                      opacity=opacity,
                      title=title, 
                      template="plotly_white", 
-                     labels={'Cost': 'Cost ($)', 'Perception Coverage': 'Perception Coverage (%)'},
+                     labels={'Cost': 'Cost ($)', 'Perception Entropy': 'Perception Entropy (-)'},
                      hover_name='Name',
-                     hover_data=['Cost', 'Perception Coverage'],
+                     hover_data=['Cost', 'Perception Entropy'],
                      custom_data=['Index'])
     
     fig.update_traces(marker=dict(size=5*(width/600)),
                       hovertemplate="<br>".join([
                             "Pkg: %{customdata[0]}",
                             "Cost: $%{x:.2f}",
-                            "Perception Coverage: %{y:.2f}%",
+                            "Perception Entropy: %{y:.2f}%",
                             ])
                       )
 
@@ -321,7 +390,7 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
                     )
     
     if show_pareto:
-        pareto, idx = get_pareto_front(combined_df, x="Cost", y="Perception Coverage")
+        pareto, idx = get_pareto_front(combined_df, x="Cost", y="Perception Entropy")
         fig.add_scatter(x=pareto[:, 0],
                         y=pareto[:, 1],
                         mode='lines+markers', 

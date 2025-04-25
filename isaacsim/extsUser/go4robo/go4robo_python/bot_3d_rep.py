@@ -60,6 +60,10 @@ torch.set_default_device(device)
 
 class TF:
     def translation_matrix(tx, ty, tz):
+        """Create a translation matrix from the given translation vector."""
+        assert isinstance(tx, (int, float)), "Translation values must be int or float."
+        assert isinstance(ty, (int, float)), "Translation values must be int or float."
+        assert isinstance(tz, (int, float)), "Translation values must be int or float."
         return np.array([
             [1, 0, 0, tx],
             [0, 1, 0, ty],
@@ -69,6 +73,9 @@ class TF:
 
     # Rotation matrix around X-axis
     def rotation_x_matrix(theta):
+        """Create a rotation matrix around the X-axis. Theta is in radians."""
+        assert isinstance(theta, (int, float)), "Rotation angle must be int or float."
+
         c, s = np.cos(theta), np.sin(theta)
         return np.array([
             [1, 0, 0, 0],
@@ -79,6 +86,8 @@ class TF:
     
     # Rotation matrix around Y-axis
     def rotation_y_matrix(theta):
+        """Create a rotation matrix around the Y-axis. Theta is in radians."""
+        assert isinstance(theta, (int, float)), "Rotation angle must be int or float."
         c, s = np.cos(theta), np.sin(theta)
         return np.array([
             [ c, 0, s, 0],
@@ -90,6 +99,8 @@ class TF:
     
     # Rotation matrix around Z-axis
     def rotation_z_matrix(theta):
+        """Create a rotation matrix around the Z-axis. Theta is in radians."""
+        assert isinstance(theta, (int, float)), "Rotation angle must be int or float."
         c, s = np.cos(theta), np.sin(theta)
         return np.array([
             [c, -s, 0, 0],
@@ -100,6 +111,7 @@ class TF:
     
     def inverse_matrix(tf_matrix):
         """Calculate the inverse of a transformation matrix."""
+        assert tf_matrix.shape == (4, 4), "Input matrix must be a 4x4 transformation matrix."
         # Cast to a np.ndarray if not already
         if not isinstance(tf_matrix, np.ndarray):
             tf_matrix_np = np.array(tf_matrix)
@@ -107,6 +119,77 @@ class TF:
             tf_matrix_np = tf_matrix
         return np.linalg.inv(tf_matrix_np)
 
+    def normalize_svd(tf_matrix:np.ndarray, bounds:None|list[tuple]=None, majority='column'):
+        """
+        Normalize the rotation part of a 4x4 transformation matrix.
+        If bounds are provided, the translation part is also normalized to be from 0 to 1 in all directions.
+
+        Parameters:
+            matrix_4x4 (np.ndarray): A 4x4 transformation matrix.
+            bounds (list(tuple), optional): A list of tuples specifying the min and max bounds for each axis.
+                If provided, the translation part will be normalized to be from 0 to 1 in all directions.
+                Order of the bounds should be ((min_x, max_x), (min_y, max_y), (min_z, max_z)).
+            majority (str): Specify whether to extract the translation from the last 'column' or 'row' of the matrix.
+
+        Returns:
+            np.ndarray: A 4x4 transformation matrix with a normalized rotation component.
+        """
+
+        assert tf_matrix.shape == (4, 4), "Input matrix must be a 4x4 transformation matrix."
+
+        if majority == 'column':
+            translation = tf_matrix[:, 3]  # Extract the translation component (last column)
+        elif majority == 'row':
+            translation = tf_matrix[3, :]  # Extract the translation component (last row)
+        
+        # Extract the translation component (last column)
+        
+        if bounds is not None:
+            # Normalize the translation component to be from 0 to 1 in all directions
+            for i in range(3):
+                min_bound, max_bound = bounds[i]
+                translation[i] = (translation[i] - min_bound) / (max_bound - min_bound)
+
+        # Extract the rotation component (upper-left 3x3 submatrix)
+        rotation = tf_matrix[:3, :3]
+
+        # Perform SVD on the rotation matrix
+        U, _, Vt = np.linalg.svd(rotation)
+
+        # Reconstruct the closest orthonormal rotation matrix
+        rotation_normalized = U @ Vt
+
+        # Ensure a right-handed coordinate system (determinant should be +1)
+        if np.linalg.det(rotation_normalized) < 0:
+            U[:, -1] *= -1
+            rotation_normalized = U @ Vt
+
+        # Construct the normalized 4x4 transformation matrix
+        normalized_matrix = np.eye(4)
+        normalized_matrix[:3, :3] = rotation_normalized
+        if majority == 'column':
+            normalized_matrix[:, 3] = translation
+        elif majority == 'row':
+            normalized_matrix[3, :] = translation
+
+        return normalized_matrix
+    
+    def flatten_matrix(tf_matrix):
+        """Flatten a 4x4 transformation matrix to a 1D array."""
+        assert tf_matrix.shape == (4, 4), "Input matrix must be a 4x4 transformation matrix."
+        if not isinstance(tf_matrix, np.ndarray):
+            tf_matrix = np.array(tf_matrix)
+        return tf_matrix.flatten()
+    
+    def unflatten_matrix(flat_matrix):
+        """Unflatten a 1D array to a 4x4 transformation matrix. Matrix must be 12 or 16 elements.
+        If 12 elements, the last row is assumed to be [0 0 0 1], and it is added to the matrix."""
+        if not isinstance(flat_matrix, np.ndarray):
+            flat_matrix = np.array(flat_matrix)
+        if len(flat_matrix) == 12:
+            flat_matrix = np.concatenate((flat_matrix, [0, 0, 0, 1]))
+        assert len(flat_matrix) == 16, "Input array must have 12 or 16 elements."
+        return flat_matrix.reshape(4, 4)
 
 class PerceptionSpace:
 
@@ -1016,7 +1099,7 @@ class Bot3D:
         
         return world_transform
     
-    def calculate_perception_entropy(self, perception_space:PerceptionSpace):
+    def calculate_perception_entropy(self, perception_space:PerceptionSpace, verbose:bool=False) -> float:
         """
         Calculate the perception entropy of the bot based on the sensors and the perception space.
         Args:
@@ -1064,8 +1147,8 @@ class Bot3D:
             torch.Tensor
                 A tensor of shape (N, S) where N is the number of voxels and S is the number of sensors.
             """
-            print(f"Calculating fused uncertainty for {uncertainties.shape[0]} voxels.")
-            print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]}, {uncertainties.shape[1]})")
+            print(f"Calculating fused uncertainty for {uncertainties.shape[0]} voxels.") if verbose else None
+            print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]}, {uncertainties.shape[1]})")  if verbose else None
             # Calculate the fused uncertainty using the formula
             # σ_fused = sqrt(1 / Σ(1/σ_i²))
             fused_uncertainty = torch.sqrt(1 / torch.sum(1 / (uncertainties ** 2), dim=0))
@@ -1101,23 +1184,23 @@ class Bot3D:
                 S = shape[1]
             else:
                 raise ValueError(f"Invalid shape for measurements: {measurements.shape}. Should be (N,) or (N, S).")
-            print(f"Calculating AP for N={N} voxels and S={S} sensors.")
-            print(f"  measurements.shape: {measurements.shape}, should be ({N}, {S})")
-            print(f"  a.shape: {a.shape}, should be ({S},)")
-            print(f"  b.shape: {b.shape}, should be ({S},)")
+            print(f"Calculating AP for N={N} voxels and S={S} sensors.") if verbose else None
+            print(f"  measurements.shape: {measurements.shape}, should be ({N}, {S})") if verbose else None
+            print(f"  a.shape: {a.shape}, should be ({S},)") if verbose else None
+            print(f"  b.shape: {b.shape}, should be ({S},)") if verbose else None
 
             bs_t = b.repeat(measurements.shape[0], 1).to(device) # a is (S,), so we need to repeat it N times and transpose it to (N, S)
             as_t = a.repeat(measurements.shape[0], 1).to(device) # b is (S,), so we need to repeat it N times and transpose it to (N, S)
 
-            print(f"  as_t.shape: {as_t.shape}, should be ({N}, {S})")
-            print(f"  bs_t.shape: {bs_t.shape}, should be ({N}, {S})")
+            print(f"  as_t.shape: {as_t.shape}, should be ({N}, {S})") if verbose else None
+            print(f"  bs_t.shape: {bs_t.shape}, should be ({N}, {S})") if verbose else None
         
             # ap = a * ln_m + b
             ap = as_t * torch.log(measurements) + bs_t
 
             # Transpose and clamp AP to valid range
             ap = torch.clamp(ap.T, min=0.001, max=0.999)
-            print(f"  ap.shape: {ap.shape}, should be ({N}, {S})")
+            print(f"  ap.shape: {ap.shape}, should be ({N}, {S})") if verbose else None
             
             return ap
         
@@ -1159,12 +1242,14 @@ class Bot3D:
             # Calculate the entropy for each voxel using the formula
             # H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
             # H(S|m,q) = 2 * torch.log(uncertainties) + 1 + torch.log(torch.tensor(2 * np.pi))
-            print(f"Calculating entropy for {uncertainties.shape[0]} voxels.")
-            print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]},)")
+            print(f"Calculating entropy for {uncertainties.shape[0]} voxels.") if verbose else None
+            print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]},)") if verbose else None
 
             ln2pi_p_1 = torch.tensor(1 + 2 * np.log(np.pi)).to(device)
             entropy = 2 * torch.log(uncertainties) + ln2pi_p_1.repeat(uncertainties.shape[0], 1).T.to(device) # repeat for each voxel
-            print(f"  entropy.shape: {entropy.shape}, should be ({uncertainties.shape[0]},)")
+
+            print(f"  entropy.shape: {entropy.shape}, should be ({uncertainties.shape[0]},)") if verbose else None
+
             # Reshape the entropy tensor to (N,) where N is the number of voxels
             entropy = entropy.view(-1)
 
@@ -1188,7 +1273,7 @@ class Bot3D:
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
             sensor_m = perception_space.batch_ray_voxel_intersections(o, d)
-            print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")
+            print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
 
             # Add the sensor measurements to the tensor for the sensor type
             if name not in sensor_ms or sensor_ms[name].numel() == 0:
@@ -1202,16 +1287,17 @@ class Bot3D:
         ap_bs = torch.Tensor([])
         for name, sensor_m_tensor in sensor_ms.items():
             sensors = self.get_sensors_by_name(name)
-            if len(sensors) > 1:
-                print(f" Multiple ({len(sensors)}) sensors '{name}'s found, using AP constants of the first one!")
-            elif len(sensors) == 0:
-                print(f" No sensors '{name}'s found, using default AP constants!")
-            else:
-                print(f" Found {len(sensors)} sensor '{name}'s, using AP constants of the first one!")
+            if verbose:
+                if len(sensors) > 1:
+                    print(f" Multiple ({len(sensors)}) sensors '{name}'s found, using AP constants of the first one!")
+                elif len(sensors) == 0:
+                    print(f" No sensors '{name}'s found, using default AP constants!")
+                else:
+                    print(f" Found {len(sensors)} sensor '{name}'s, using AP constants of the first one!")
             sensor = sensors[0].sensor
-            print(f"  a: {sensor.ap_constants['a']}, b: {sensor.ap_constants['b']}")
+            print(f"  a: {sensor.ap_constants['a']}, b: {sensor.ap_constants['b']}")  if verbose else None
             m = _apply_early_fusion(sensor_m_tensor).to(device)
-            print(f"  m.shape: {m.shape}, should be (N,)")
+            print(f"  m.shape: {m.shape}, should be (N,)")  if verbose else None
 
             early_fusion_ms.append(m.unsqueeze(1))  # shape (N, 1)
             ap_as = torch.cat((ap_as, torch.Tensor([sensor.ap_constants['a']])), dim=0)
@@ -1220,7 +1306,7 @@ class Bot3D:
             # Each element is the number of rays that intersect with the voxel for that sensor type.
         
         early_fusion_ms = torch.cat(early_fusion_ms, dim=1)  # shape (N, S_types)
-        print(f"early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S_types)")
+        print(f"early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S_types)")  if verbose else None
         
         # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
         # This is a tensor of shape (N, S) where N is the number of voxels, and S is the number of sensors.
@@ -1242,6 +1328,7 @@ class Bot3D:
         entropy = torch.sum(entropies * weights, dim=0)
 
         print(f"{self.name} perception entropy calculated in {time.time() - start_time:.2f} seconds!!")
+        print(f"  entropy: {entropy}")
 
         return entropy
     
@@ -1259,8 +1346,25 @@ class Bot3D:
             cost += sensor.sensor.cost
         return cost
 
-    def get_design_validity(self, verbose=False):
-        #TODO Implement this the rest of the way. This code was generated by OpenAI's GPT 4.1 Preview as inspo.
+    def get_design_validity(self, aabb_sensor_collision=True, aabb_sensor_constraints=True, verbose=False) -> float:
+        """ Returns the validity of the constraint mesh. A valid design meets the following criteria:
+        1. All sensor meshes are within the sensor pose constraints mesh.
+        2. No sensor meshes are in collision with each other.
+        3. NOTE: the third constraint (No sensors in collision with the bot body) is implied by constraint 1, because we assume that the bot body has been subtracted from the sensor pose constraints mesh.
+        
+        Args:
+            aabb_sensor_collision (bool): If True, check for AABB collision between sensors.
+            aabb_sensor_constraints (bool): If True, check for AABB collision between sensors and sensor pose constraints.
+            verbose (bool): If True, print debug information.
+        Returns:
+            float: from 0.0 to 1.0, where 0.0 is a completely invalid design and 1.0 is a completely valid design.
+        """
+        
+        print("Checking design validity...") if verbose else None
+        print("WARNING: Design validity check is not yet implemented! Returns True.") 
+        
+        #TODO Implement this the rest of the way. Much of this code was generated by OpenAI's GPT 4.1 Preview as inspo.
+        return True
 
         def get_mesh_aabb_torch(mesh, device="cpu"):
             # Get points (vertices) as numpy, then convert to torch
@@ -1276,7 +1380,7 @@ class Bot3D:
             max_xyz = torch.max(points_world, dim=0).values
             return min_xyz, max_xyz
 
-        def sensors_not_in_collision_torch(self, device="cuda"):
+        def sensors_not_in_collision_torch_aabb(self, device="cuda"):
             # Get AABBs for all sensor bodies
             aabbs = []
             for sensor in self.sensors:
@@ -1298,7 +1402,7 @@ class Bot3D:
                         return False
             return True
         
-        def all_sensors_within_constraint_torch(self, device="cuda"):
+        def all_sensors_within_constraint_torch_aabb(self, device="cuda"):
             # Assume single constraint mesh for simplicity
             constraint_mesh = self.sensor_pose_constraint[0] if isinstance(self.sensor_pose_constraint, list) else self.sensor_pose_constraint
             c_min, c_max = get_mesh_aabb_torch(constraint_mesh, device=device)
@@ -1311,7 +1415,33 @@ class Bot3D:
                     return False
             return True
         
-        return sensors_not_in_collision_torch(device=device) and all_sensors_within_constraint_torch(device=device)
+        # Check if all sensors are within the sensor pose constraints
+        if aabb_sensor_constraints:
+            if verbose:
+                print("Using AABB to check if all sensors are within the sensor pose constraints...")
+            sensor_constraints_validity = all_sensors_within_constraint_torch_aabb(device=device)
+        else:
+            if verbose:
+                print("Using mesh to check if all sensors are within the sensor pose constraints...")
+            raise NotImplementedError("Mesh-based sensor pose constraint check is not yet implemented.")
+        
+        # Check if all sensors are in collision with each other
+        if aabb_sensor_collision:
+            if verbose:
+                print("Using AABB to check for sensor collision...")
+            sensors_collision_validity = sensors_not_in_collision_torch_aabb(device=device)
+        else:
+            if verbose:
+                print("Using mesh to check for sensor collision...")
+            raise NotImplementedError("Mesh-based sensor collision check is not yet implemented.")
+
+        # Combine the two validity checks
+        if verbose:
+            print(f"Sensor pose constraints validity: {sensor_constraints_validity}")
+            print(f"Sensor collision validity: {sensors_collision_validity}")
+
+        validity = sensor_constraints_validity and sensors_collision_validity
+        return validity
 
     # def add_sensor_valid_pose(self, sensor:Sensor3D, max_tries:int=25, verbose=False):
     #     """

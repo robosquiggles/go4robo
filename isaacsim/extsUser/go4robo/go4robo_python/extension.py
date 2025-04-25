@@ -13,7 +13,7 @@ import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
 from isaacsim.sensors.physx import _range_sensor
 
-import asyncio # Used to run sample asynchronously to not block rendering thread
+import asyncio
 
 from collections import Counter
 import numpy as np
@@ -32,6 +32,9 @@ import os, sys
 
 from .bot_3d_rep import *
 from .bot_3d_problem import *
+
+import webbrowser
+from . import render as dash_app
 
 sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
@@ -244,6 +247,7 @@ class GO4RExtension(omni.ext.IExt):
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
                                 self.optimize_btn = ui.Button("Optimize", clicked_fn=self._optimize_robot, height=36)
+                                self.results_pg_btn = ui.Button("Results", clicked_fn=self.on_results_pg_btn_clicked, height=36)
                                 self.optimize_btn.set_style({"color": ui.color("#FF0000")})
                                 self.optimize_btn.set_tooltip("Reset all settings to default values")
                             # self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
@@ -2164,3 +2168,31 @@ class GO4RExtension(omni.ext.IExt):
     def _optimize_robot():
         """Optimize the robot's sensor poses"""
         raise NotImplementedError("Robot optimization is not implemented yet.")
+    
+    def on_results_pg_btn_clicked(self):
+        """Open the results page"""
+        self._log_message("Opening results page...")
+
+        def _run_dash_app():
+            dash_app.app.run(debug=False, use_reloader=False)
+        
+        async def _launch_dash():
+            """Render the dash app webpage"""
+            import urllib.request
+
+            # Check if the server is running
+            try:
+                with urllib.request.urlopen(dash_app.url, timeout=1) as response:
+                    if response.status == 200:
+                        self._log_message(f"Dash app is already running at {dash_app.url}")
+            except Exception:
+                # If the server is not running, start it
+                self._log_message(f"Starting Dash app at {dash_app.url}")
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, _run_dash_app)
+
+        asyncio.ensure_future(_launch_dash())
+
+        webbrowser.open(dash_app.url, new=1, autoraise=True)
+        self._log_message(f"Openned results page in browser {dash_app.url} (if not already open)")
+        
