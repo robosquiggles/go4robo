@@ -850,7 +850,7 @@ class GO4RExtension(omni.ext.IExt):
                                         aspect_ratio=aspect_ratio,
                                         h_res=resolution[0] if resolution else None,
                                         v_res=resolution[1] if resolution else None,
-                                        body=_find_sensor_body(prim),
+                                        body=_find_sensor_body(prim) if not has_stereo_role(prim) else None,
                                         cost=1.0,
                                         focal_point=(0, 0, 0)
                                         )
@@ -909,44 +909,91 @@ class GO4RExtension(omni.ext.IExt):
             return lidar_instance
         
 
-        def _find_sensor_body(prim:Usd.Prim) -> Usd.Prim:
-            """Find the body of the sensor, which is the first mesh encountered in the local tree ancestry of the given prim"""
-            def _recurse_find_sensor_body(prim):
-                
-                # First check at the most likely place
-                prim_path = prim.GetPath()
-                parent_path = prim_path.GetParentPath()
-                likely_body_path = str(parent_path) + "GO4R_BODY"
-                likely_body = get_current_stage().GetPrimAtPath(likely_body_path)
-                if likely_body and likely_body.IsA(UsdGeom.Mesh):
-                    return likely_body
+        def _find_sensor_body(prim:Usd.Prim, default_box_size=1) -> Usd.Prim:
+            """Find the body of the sensor, Which is the mesh that is a child of the sensor's main XForm. Prim you pass here should be the main XForm"""
 
-                # Traverse the parent tree, looking for a mesh.
-                # If no mesh in the children of the parent, go up a level and check again.
-                # Do this recursively until we find meshes.
+            prim_path = prim.GetPath()
+            prim_name = prim.GetName()
 
-                if prim.IsA(UsdGeom.Mesh):
-                    return prim
-                else:
-                    # Check if this is a mesh
-                    for child in prim.GetChildren():
-                        if child.IsA(UsdGeom.Mesh):
-                            return child
-                    # If not, check the parent
-                    parent = prim.GetParent()
-                    if parent:
-                        return _recurse_find_sensor_body(parent)
-                
-                # If no mesh found, return None
-                return None
-
+            for child in prim.GetChildren():
+                print(f"DEBUG: Checking child {child.GetName()} of type {child.GetTypeName()}")
+                if child.IsA(UsdGeom.Mesh):
+                    # Check if the child is a mesh
+                    self._log_message(f"Found sensor body: {child.GetName()} for sensor {prim_name}")
+                    return child 
             
-            body = _recurse_find_sensor_body(prim)
-            if body is None:
-                self._log_message(f"Warning: No body found for sensor {prim.GetPath()}")
-            return body
+            self._log_message(f"No sensor body found for sensor {prim_name}, using a small {default_box_size}m box as a placeholder")
+            # If no mesh is found, Create a small box as a placeholder
 
+            min_x = - default_box_size / 2
+            min_y = - default_box_size / 2
+            min_z = - default_box_size / 2
+            max_x = min_x + default_box_size
+            max_y = min_y + default_box_size
+            max_z = min_z + default_box_size
+            
+            # Define voxel as a cube
+            voxel_points = [
+                Gf.Vec3f(min_x, min_y, min_z),
+                Gf.Vec3f(max_x, min_y, min_z),
+                Gf.Vec3f(max_x, max_y, min_z),
+                Gf.Vec3f(min_x, max_y, min_z),
+                Gf.Vec3f(min_x, min_y, max_z),
+                Gf.Vec3f(max_x, min_y, max_z),
+                Gf.Vec3f(max_x, max_y, max_z),
+                Gf.Vec3f(min_x, max_y, max_z)
+            ]
 
+            # Define the faces (6 faces, each with 4 vertices)
+            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
+            face_vertex_indices = Vt.IntArray([
+                0, 1, 2, 3,  # bottom
+                4, 5, 6, 7,  # top
+                0, 1, 5, 4,  # front
+                1, 2, 6, 5,  # right
+                2, 3, 7, 6,  # back
+                3, 0, 4, 7   # left
+            ])
+                
+            # Create voxel mesh using USD API directly
+            voxel_path = f"{prim_path}/GO4R_BODY_{prim_name}"
+            mesh_def = UsdGeom.Mesh.Define(stage, voxel_path)
+            mesh_def.CreatePointsAttr().Set(voxel_points)
+            mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
+            mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            
+            # Set the voxel's transform at its center
+            xform = UsdGeom.Xformable(mesh_def)
+            xform.AddTranslateOp().Set(prim_path.GetTranslation(Usd.TimeCode.Default()))
+            xform.AddRotateXYZOp().Set(prim_path.GetRotation(Usd.TimeCode.Default()))
+            
+            # Define or get the transparent material
+            mat_path = Sdf.Path(f"/World/GO4R_PerceptionVolume/Looks/{prim_name}_body_material")
+            mat_prim = stage.GetPrimAtPath(mat_path)
+            if not mat_prim:
+                mat_prim = UsdShade.Material.Define(stage, mat_path)
+                shader_path = mat_path.AppendPath("Shader")
+                shader = UsdShade.Shader.Define(stage, shader_path)
+                shader.CreateIdAttr("UsdPreviewSurface")
+                shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.1, 0.5, 0.0)) # Orange
+                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.0) # Set transparency
+                mat_prim.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+
+            # Bind the material to the voxel mesh
+            UsdShade.MaterialBindingAPI(mesh_def.GetPrim()).Bind(UsdShade.Material(mat_prim))
+
+            return mesh_def.GetPrim()
+        
+        def has_stereo_role(prim:Usd.Prim, name) -> str|None:
+            """Checks if the prim is part of a stereo camera pair. If so, returns the 
+            role ('left' or 'right'), otherwise returns None."""
+            for role in ["left", "right"]:
+                if (role in name.lower() or 
+                    (prim.HasAttribute("stereoRole") and 
+                        prim.GetAttribute("stereoRole").Get() and 
+                        prim.GetAttribute("stereoRole").Get().lower() == role)):
+                    this_cam_role = role
+                    this_cam_name = name
 
         def _assign_sensors_to_robot(prim, bot, processed_camera_paths=None):
             """Search a level for sensors and add them to the specified robot"""
