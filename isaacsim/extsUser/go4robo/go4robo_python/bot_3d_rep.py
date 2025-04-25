@@ -1032,7 +1032,7 @@ class Bot3D:
             elif sensor_measurements.ndim == 2:
                 # If the tensor is 2D, we need to sum along the first axis (axis 0)
                 # This will give us a tensor of shape (N,) where N is the number of voxels.
-                return torch.sum(sensor_measurements, dim=0)
+                return torch.sum(sensor_measurements, dim=1)
         
         def _apply_late_fusion(uncertainties: torch.Tensor) -> torch.Tensor:
             """Apply late fusion strategy to combine uncertainties (σ's)from different sensor types per voxel
@@ -1050,7 +1050,8 @@ class Bot3D:
             torch.Tensor
                 A tensor of shape (N, S) where N is the number of voxels and S is the number of sensors.
             """
-
+            print(f"Calculating fused uncertainty for {uncertainties.shape[0]} voxels.")
+            print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]}, {uncertainties.shape[1]})")
             # Calculate the fused uncertainty using the formula
             # σ_fused = sqrt(1 / Σ(1/σ_i²))
             fused_uncertainty = torch.sqrt(1 / torch.sum(1 / (uncertainties ** 2), dim=0))
@@ -1091,14 +1092,17 @@ class Bot3D:
             print(f"  a.shape: {a.shape}, should be ({S},)")
             print(f"  b.shape: {b.shape}, should be ({S},)")
 
-            bs_t = b.repeat(measurements.shape[0], 1).T.to(device) # a is (S,), so we need to repeat it for each voxel. Also make sure to move to device
-            as_t = a.repeat(measurements.shape[0], 1).T.to(device) # b is (S,), so we need to repeat it for each voxel. Also make sure to move to device
+            bs_t = b.repeat(measurements.shape[0], 1).to(device) # a is (S,), so we need to repeat it N times and transpose it to (N, S)
+            as_t = a.repeat(measurements.shape[0], 1).to(device) # b is (S,), so we need to repeat it N times and transpose it to (N, S)
+
+            print(f"  as_t.shape: {as_t.shape}, should be ({N}, {S})")
+            print(f"  bs_t.shape: {bs_t.shape}, should be ({N}, {S})")
         
             # ap = a * ln_m + b
             ap = as_t * torch.log(measurements) + bs_t
 
             # Transpose and clamp AP to valid range
-            ap = torch.clamp(ap, min=0.001, max=0.999)
+            ap = torch.clamp(ap.T, min=0.001, max=0.999)
             print(f"  ap.shape: {ap.shape}, should be ({N}, {S})")
             
             return ap
@@ -1141,10 +1145,12 @@ class Bot3D:
             # Calculate the entropy for each voxel using the formula
             # H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
             # H(S|m,q) = 2 * torch.log(uncertainties) + 1 + torch.log(torch.tensor(2 * np.pi))
+            print(f"Calculating entropy for {uncertainties.shape[0]} voxels.")
+            print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]},)")
 
             ln2pi_p_1 = torch.tensor(1 + 2 * np.log(np.pi)).to(device)
             entropy = 2 * torch.log(uncertainties) + ln2pi_p_1.repeat(uncertainties.shape[0], 1).T.to(device) # repeat for each voxel
-
+            print(f"  entropy.shape: {entropy.shape}, should be ({uncertainties.shape[0]},)")
             # Reshape the entropy tensor to (N,) where N is the number of voxels
             entropy = entropy.view(-1)
 
@@ -1163,37 +1169,48 @@ class Bot3D:
         for sensor_inst in self.sensors:
             o,d = sensor_inst.get_rays()
 
+            name = sensor_inst.sensor.name
+
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
             sensor_m = perception_space.batch_ray_voxel_intersections(o, d)
             print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")
 
             # Add the sensor measurements to the tensor for the sensor type
-            if sensor_inst.sensor not in sensor_ms.keys():
-                sensor_ms.update({sensor_inst.sensor: torch.Tensor([]).to(device)})
-            sensor_ms[sensor_inst.sensor] = torch.cat((sensor_ms[sensor_inst.sensor], sensor_m), dim=0)
+            if name not in sensor_ms or sensor_ms[name].numel() == 0:
+                sensor_ms[name] = sensor_m.unsqueeze(1)
+            else:
+                sensor_ms[name] = torch.cat((sensor_ms[name], sensor_m.unsqueeze(1)), dim=1)
 
         # Apply early fusion to combine measurements of the same sensor per voxel
-        early_fusion_ms = torch.Tensor([]).to(device)
+        early_fusion_ms = []
         ap_as = torch.Tensor([])
         ap_bs = torch.Tensor([])
-        for sensor, sensor_m_tensor in sensor_ms.items():
+        for name, sensor_m_tensor in sensor_ms.items():
+            sensors = self.get_sensors_by_name(name)
+            if len(sensors) > 1:
+                print(f" Multiple ({len(sensors)}) sensors '{name}'s found, using AP constants of the first one!")
+            elif len(sensors) == 0:
+                print(f" No sensors '{name}'s found, using default AP constants!")
+            else:
+                print(f" Found {len(sensors)} sensor '{name}'s, using AP constants of the first one!")
+            sensor = sensors[0].sensor
+            print(f"  a: {sensor.ap_constants['a']}, b: {sensor.ap_constants['b']}")
             m = _apply_early_fusion(sensor_m_tensor).to(device)
-            print(f"m.shape: {m.shape}, should be (N,)")
+            print(f"  m.shape: {m.shape}, should be (N,)")
 
-            early_fusion_ms = torch.cat((early_fusion_ms, m), dim=0)
+            early_fusion_ms.append(m.unsqueeze(1))  # shape (N, 1)
             ap_as = torch.cat((ap_as, torch.Tensor([sensor.ap_constants['a']])), dim=0)
             ap_bs = torch.cat((ap_bs, torch.Tensor([sensor.ap_constants['b']])), dim=0)
             # This is a tensor of shape (N, S) where N is the number of voxels and S is the number of sensors.
             # Each element is the number of rays that intersect with the voxel for that sensor type.
-        print(f"early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S)")
+        
+        early_fusion_ms = torch.cat(early_fusion_ms, dim=1)  # shape (N, S_types)
+        print(f"early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S_types)")
         
         # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
         # This is a tensor of shape (N, S) where N is the number of voxels, and S is the number of sensors.
         aps = _calc_aps(early_fusion_ms, ap_as, ap_bs)
-        print(f"aps.shape: {aps.shape}, should be (N,S)")
-        print(f"  max of aps: {aps.max()} (should be <=0.999)")
-        print(f"  min of aps: {aps.min()} (should be >=0.001)")
 
         us = _calc_uncertainties(aps)
         

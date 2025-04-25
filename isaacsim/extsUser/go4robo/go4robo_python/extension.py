@@ -957,6 +957,7 @@ class GO4RExtension(omni.ext.IExt):
             lidar = _find_lidar(prim)
             if lidar is not None:
                 self._log_message(f"Adding LiDAR: {lidar.name} to robot {bot.name}")
+                bot.sensors.append(lidar)
                 # Don't return, continue searching in case there are other sensors
 
             # Check for camera
