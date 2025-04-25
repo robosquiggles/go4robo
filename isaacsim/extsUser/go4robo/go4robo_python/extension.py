@@ -850,7 +850,7 @@ class GO4RExtension(omni.ext.IExt):
                                         aspect_ratio=aspect_ratio,
                                         h_res=resolution[0] if resolution else None,
                                         v_res=resolution[1] if resolution else None,
-                                        body=_find_sensor_body(prim) if not has_stereo_role(prim) else None,
+                                        body=_find_sensor_body(prim) if not has_stereo_role(prim, name) else None,
                                         cost=1.0,
                                         focal_point=(0, 0, 0)
                                         )
@@ -894,7 +894,7 @@ class GO4RExtension(omni.ext.IExt):
                                     v_res=self._get_prim_attribute(prim, "verticalResolution"),
                                     max_range=self._get_prim_attribute(prim, "maxRange"),
                                     min_range=self._get_prim_attribute(prim, "minRange"),
-                                    body=_find_sensor_body(prim),
+                                    body=_find_sensor_body(prim.GetParent()),
                                     cost=1.0,
                                     )
                     lidar_instance = Sensor3D_Instance(lidar, 
@@ -920,6 +920,7 @@ class GO4RExtension(omni.ext.IExt):
                 if child.IsA(UsdGeom.Mesh):
                     # Check if the child is a mesh
                     self._log_message(f"Found sensor body: {child.GetName()} for sensor {prim_name}")
+                    print(f"DEBUG: Found sensor body: {child.GetName()} for sensor {prim_name}")
                     return child 
             
             self._log_message(f"No sensor body found for sensor {prim_name}, using a small {default_box_size}m box as a placeholder")
@@ -964,8 +965,10 @@ class GO4RExtension(omni.ext.IExt):
             
             # Set the voxel's transform at its center
             xform = UsdGeom.Xformable(mesh_def)
-            xform.AddTranslateOp().Set(prim_path.GetTranslation(Usd.TimeCode.Default()))
-            xform.AddRotateXYZOp().Set(prim_path.GetRotation(Usd.TimeCode.Default()))
+            translate = UsdGeom.Xformable(prim).GetLocalTransformation()[0].ExtractTranslation()
+            rotate = UsdGeom.Xformable(prim).GetLocalTransformation()[0].ExtractRotation().GetEulerAngles()
+            xform.AddTranslateOp().Set(translate)
+            xform.AddRotateXYZOp().Set(rotate)
             
             # Define or get the transparent material
             mat_path = Sdf.Path(f"/World/GO4R_PerceptionVolume/Looks/{prim_name}_body_material")
@@ -992,8 +995,8 @@ class GO4RExtension(omni.ext.IExt):
                     (prim.HasAttribute("stereoRole") and 
                         prim.GetAttribute("stereoRole").Get() and 
                         prim.GetAttribute("stereoRole").Get().lower() == role)):
-                    this_cam_role = role
-                    this_cam_name = name
+                    return role
+            return None
 
         def _assign_sensors_to_robot(prim, bot, processed_camera_paths=None):
             """Search a level for sensors and add them to the specified robot"""
@@ -1059,7 +1062,7 @@ class GO4RExtension(omni.ext.IExt):
                                         tf_sensor1=sensor_instance.tf if this_cam_role == "left" else camera.tf,
                                         tf_sensor2=sensor_instance.tf if this_cam_role == "right" else camera.tf,
                                         cost=sensor_instance.sensor.cost + camera.sensor.cost,
-                                        body=prim
+                                        body=_find_sensor_body(prim)
                                     )
                                     stereo_instance = Sensor3D_Instance(stereo_cam, 
                                                                         path=common_parent_path, 

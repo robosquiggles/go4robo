@@ -797,11 +797,25 @@ class Sensor3D_Instance:
         ray_origins_list = []
         ray_directions_list = []
 
-        for ray_caster in self.ray_casters:
-            hfov = ray_caster.GetAttribute("horizontalFov").Get() # degrees
-            vfov = ray_caster.GetAttribute("verticalFov").Get() # degrees
-            hres = int(hfov / ray_caster.GetAttribute("horizontalResolution").Get())
-            vres = int(vfov / ray_caster.GetAttribute("verticalResolution").Get())
+        for i, ray_caster in enumerate(self.ray_casters, start=1):
+            # # Get the ray information from the ray caster object
+            # hfov = ray_caster.GetAttribute("horizontalFov").Get() # degrees
+            # vfov = ray_caster.GetAttribute("verticalFov").Get() # degrees
+            # hres = int(hfov / ray_caster.GetAttribute("horizontalResolution").Get()) # number of rays, horizontal
+            # vres = int(vfov / ray_caster.GetAttribute("verticalResolution").Get()) # Number of rays, vertical
+
+            # Get the ray information from the sensor object
+            if hasattr(self.sensor, f"sensor{i}") and len(self.ray_casters) > 1:
+                # Stereo camera case
+                sensor = getattr(self.sensor, f"sensor{i}")
+            else:
+                # Mono camera or lidar case
+                sensor = self.sensor
+            hfov = sensor.h_fov
+            vfov = sensor.v_fov
+            hres = int(sensor.h_fov / sensor.h_res) # number of rays, horizontal
+            vres = int(sensor.v_fov / sensor.v_res) # number of rays, vertical
+
             world_tf = self.get_world_transform()
             position = torch.tensor(world_tf.ExtractTranslation(), dtype=torch.float32, device=device)
             rotation = torch.tensor(world_tf.ExtractRotationMatrix(), dtype=torch.float32, device=device)
@@ -1155,7 +1169,7 @@ class Bot3D:
             entropy = entropy.view(-1)
 
             # Normalize the entropy to be between 0 and 1
-            entropy = (entropy - torch.min(entropy)) / (torch.max(entropy) - torch.min(entropy))
+            # entropy = (entropy - torch.min(entropy)) / (torch.max(entropy) - torch.min(entropy))
             
             return entropy
             
