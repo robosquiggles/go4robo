@@ -790,52 +790,50 @@ class Sensor3D_Instance:
         return world_transform
 
     def get_rays(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns (ray_origins, ray_directions) for this sensor instance.
-
-        Returns
-        -------
-            ray_origins: (N, 3) numpy array of world-space ray origins.
-            ray_directions: (N, 3) numpy array of world-space ray directions.
-        """
-        # TODO: Write this with torch with cuda for performance
+        """Returns (ray_origins, ray_directions) for this sensor instance, vectorized with torch."""
 
         start_time = time.time()
 
-        ray_origins = np.zeros((0, 3))
-        ray_directions = np.zeros((0, 3))
-        # ray_distances = np.zeros((0,))
+        ray_origins_list = []
+        ray_directions_list = []
 
         for ray_caster in self.ray_casters:
-            hfov = ray_caster.GetAttribute("horizontalFov").Get() #degrees
-            vfov = ray_caster.GetAttribute("verticalFov").Get() #degrees
+            hfov = ray_caster.GetAttribute("horizontalFov").Get() # degrees
+            vfov = ray_caster.GetAttribute("verticalFov").Get() # degrees
             hres = int(hfov / ray_caster.GetAttribute("horizontalResolution").Get())
             vres = int(vfov / ray_caster.GetAttribute("verticalResolution").Get())
             world_tf = self.get_world_transform()
-            position = np.array(world_tf.ExtractTranslation())
-            rotation = np.array(world_tf.ExtractRotationMatrix())
-            
-            # The ray distances are the same for all rays, just max_range
-            # ray_distances = np.append(ray_distances, np.full((hres*vres,), max_range), axis=0)
-            # The origin is the World space origin of the ray caster
-            ray_origins = np.append(ray_origins, np.tile(position, (hres*vres, 1)), axis=0)
+            position = torch.tensor(world_tf.ExtractTranslation(), dtype=torch.float32, device=device)
+            rotation = torch.tensor(world_tf.ExtractRotationMatrix(), dtype=torch.float32, device=device)
 
-            # The direction is the ray direction in world space are a bit more complicated
-            h_angles = np.linspace(-hfov/2, hfov/2, hres)
-            v_angles = np.linspace(-vfov/2, vfov/2, vres)
-            rays = []
-            for v in v_angles:
-                for h in h_angles:
-                    # Spherical coordinates to direction vector
-                    x = np.cos(v) * np.sin(h)
-                    y = np.sin(v)
-                    z = np.cos(v) * np.cos(h)
-                    dir_vec = np.array([x, y, z])
-                    dir_vec = dir_vec / np.linalg.norm(dir_vec)
-                    rays.append(dir_vec)
-            rotated_directions = (rotation @ np.array(rays).T).T
-            ray_directions = np.append(ray_directions, rotated_directions, axis=0)
+            # Generate grid of angles
+            h_angles = torch.linspace(-hfov/2, hfov/2, hres, device=device) #* (np.pi/180)
+            v_angles = torch.linspace(-vfov/2, vfov/2, vres, device=device) #* (np.pi/180)
+            v_grid, h_grid = torch.meshgrid(v_angles, h_angles, indexing='ij')
+            v_flat = v_grid.flatten()
+            h_flat = h_grid.flatten()
 
-        print(f"Ray origins and directions for {self.name} calculated in {time.time() - start_time:.2f} seconds.")
+            # Spherical to Cartesian (vectorized)
+            x = torch.cos(v_flat) * torch.sin(h_flat)
+            y = torch.sin(v_flat)
+            z = torch.cos(v_flat) * torch.cos(h_flat)
+            dirs = torch.stack([x, y, z], dim=1)
+            dirs = dirs / torch.norm(dirs, dim=1, keepdim=True)
+
+            # Rotate directions
+            rotated_dirs = torch.matmul(dirs, rotation.T)
+
+            # Repeat origins
+            origins = position.expand_as(rotated_dirs)
+
+            ray_origins_list.append(origins)
+            ray_directions_list.append(rotated_dirs)
+
+        # Concatenate all rays from all ray_casters
+        ray_origins = torch.cat(ray_origins_list, dim=0).to(device)
+        ray_directions = torch.cat(ray_directions_list, dim=0).to(device)
+
+        print(f"Ray origins and directions for {self.name} calculated in {time.time() - start_time:.2f} sec.")
 
         return ray_origins, ray_directions
 
@@ -946,17 +944,7 @@ class Bot3D:
 
         self.perception_entropy = 0.0
         self.perception_coverage_percentage = 0.0
-
-        # set the device to GPU if available
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-            self.device = "cuda"
-        else:
-            self.device = "cpu"
-        print(f"Using {self.device} for all calucations for robot: {self.name}.")
         
-
         # TODO Remove self.body from any of the sensor_coverage_requirement meshes
 
     def get_sensors_by_type(self, sensor_type:Type[Sensor3D]) -> list[Sensor3D_Instance]:
@@ -1177,7 +1165,7 @@ class Bot3D:
 
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
-            sensor_m = perception_space.batch_ray_voxel_intersections(torch.Tensor(o).to(device), torch.Tensor(d).to(device))
+            sensor_m = perception_space.batch_ray_voxel_intersections(o, d)
             print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")
 
             # Add the sensor measurements to the tensor for the sensor type
