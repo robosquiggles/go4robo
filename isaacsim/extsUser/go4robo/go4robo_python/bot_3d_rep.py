@@ -53,6 +53,10 @@ except ImportError:
             class Vector3dVector:
                 pass
 
+# Set the device to GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.set_default_device(device)
+
 
 class TF:
     def translation_matrix(tx, ty, tz):
@@ -109,25 +113,28 @@ class PerceptionSpace:
     class VoxelGroup:
         def __init__(self, 
                     name:str,
-                    voxels:torch.Tensor[str]|None,
-                    voxel_centers:torch.Tensor[Gf.Vec3d]|None,
-                    voxel_sizes:float|torch.Tensor[float]|None):
+                    voxels:list[str]|None,
+                    voxel_centers:torch.Tensor|None,
+                    voxel_sizes:float|torch.Tensor|None):
             """
             Initialize a new instance of the class.
             Args:
                 name (str): The name of the voxel group.
-                voxels (torch.Tensor[str]): List of paths to voxels in the stage.
-                voxel_centers (torch.Tensor[Gf.Vec3d]): The centers of the voxels.
-                voxel_sizes (torch.Tensor[float]): The sizes of the voxels.
+                voxels (list[str]): List of paths to voxels in the stage.
+                voxel_centers (torch.Tensor): The centers of the voxels.
+                voxel_sizes (torch.Tensor): The sizes of the voxels.
             """
             self.name = name
-            # all the tensors must be the same size
-            if torch.shape(voxels) != torch.shape(voxel_centers) or torch.shape(voxels) != torch.shape(voxel_sizes):
-                raise ValueError("All tensors must be the same size.")
-            self.voxels = voxels if voxels is not None else torch.tensor([])
+            self.voxels = voxels if voxels is not None else []
             self.voxel_centers = voxel_centers if voxel_centers is not None else torch.tensor([])
             if voxel_sizes is float:
+                self.voxel_sizes = torch.tensor([voxel_sizes] * len(voxels))
+            else:
                 self.voxel_sizes = voxel_sizes if voxel_sizes is not None else torch.tensor([])
+
+            # all the tensors must be the same size
+            if len(voxels) != voxel_centers.shape[0] or len(voxels) != voxel_sizes.shape[0]:
+                raise ValueError("All tensors must be the same size.")
 
         def add_voxel(self, voxel:str, center:Gf.Vec3d, size:float):
             """
@@ -137,7 +144,7 @@ class PerceptionSpace:
                 center (Gf.Vec3d): The center of the voxel.
                 size (float): The size of the voxel.
             """
-            self.voxels = torch.cat((self.voxels, torch.tensor([voxel])))
+            self.voxels = self.voxels + [voxel]
             self.voxel_centers = torch.cat((self.voxel_centers, torch.tensor([center])))
             self.voxel_sizes = torch.cat((self.voxel_sizes, torch.tensor([size])))
 
@@ -147,11 +154,11 @@ class PerceptionSpace:
             Args:
                 voxel (str): The voxel to be removed.
             """
-            index = torch.where(self.voxels == voxel)[0]
-            if index.size(0) > 0:
-                self.voxels = torch.cat((self.voxels[:index], self.voxels[index+1:]))
-                self.voxel_centers = torch.cat((self.voxel_centers[:index], self.voxel_centers[index+1:]))
-                self.voxel_sizes = torch.cat((self.voxel_sizes[:index], self.voxel_sizes[index+1:]))
+            indices = [i for i, v in enumerate(self.voxels) if v == voxel]
+            if len(indices) > 0:
+                self.voxels = [v for i, v in enumerate(self.voxels) if i not in indices]
+                self.voxel_centers = torch.cat((self.voxel_centers[:indices], self.voxel_centers[indices+1:]))
+                self.voxel_sizes = torch.cat((self.voxel_sizes[:indices], self.voxel_sizes[indices+1:]))
 
         def remove_voxel_by_center(self, center:Gf.Vec3d):
             """
@@ -161,15 +168,15 @@ class PerceptionSpace:
             """
             index = torch.where(self.voxel_centers == center)[0]
             if index.size(0) > 0:
-                self.voxels = torch.cat((self.voxels[:index], self.voxels[index+1:]))
+                self.voxels = [v for i, v in enumerate(self.voxels) if i != index]
                 self.voxel_centers = torch.cat((self.voxel_centers[:index], self.voxel_centers[index+1:]))
                 self.voxel_sizes = torch.cat((self.voxel_sizes[:index], self.voxel_sizes[index+1:]))
 
 
     def __init__(self,
                  usd_context:omni.usd.UsdContext,
-                 voxel_groups:torch.Tensor[VoxelGroup]=None, 
-                 weights:torch.Tensor[float]=None):
+                 voxel_groups:list[VoxelGroup]|np.ndarray[VoxelGroup]=None, 
+                 weights:list[float]|np.ndarray[float]=None):
         """Initialize a new instance of the class.
         Args:
             usd_context (omni.usd.UsdContext): The USD context.
@@ -178,19 +185,19 @@ class PerceptionSpace:
         """
         self.usd_context = usd_context
         self.stage = self.usd_context.get_stage()
-        self.voxel_groups = voxel_groups
-        self.weights = weights
+        self.voxel_groups = voxel_groups if voxel_groups is not None else np.array([])
+        self.weights = weights if weights is not None else np.array([])
 
-    def add_voxel_group(self, voxel_group:VoxelGroup):
+    def add_voxel_group(self, voxel_group:VoxelGroup, weight:float):
         """
         Add a voxel group to the perception space.
         Args:
             voxel_group (VoxelGroup): The voxel group to be added.
+            weight (float): The weight of the voxel group.
         """
-        if self.voxel_groups is None:
-            self.voxel_groups = torch.tensor([voxel_group])
-        else:
-            self.voxel_groups = torch.cat((self.voxel_groups, torch.tensor([voxel_group])))
+        
+        self.voxel_groups = np.append(self.voxel_groups, voxel_group)
+        self.weights = np.append(self.weights, weight)
 
     def remove_voxel_group(self, voxel_group:VoxelGroup):
         """
@@ -198,10 +205,10 @@ class PerceptionSpace:
         Args:
             voxel_group (VoxelGroup): The voxel group to be removed.
         """
-        index = torch.where(self.voxel_groups == voxel_group)[0]
+        index = np.where(self.voxel_groups == voxel_group)[0]
         if index.size(0) > 0:
-            self.voxel_groups = torch.cat((self.voxel_groups[:index], self.voxel_groups[index+1:]))
-            self.weights = torch.cat((self.weights[:index], self.weights[index+1:]))
+            self.voxel_groups = np.delete(self.voxel_groups, index)
+            self.weights = np.delete(self.weights, index)
 
     def get_voxel_group(self, name:str) -> VoxelGroup:
         """
@@ -211,24 +218,47 @@ class PerceptionSpace:
         Returns:
             VoxelGroup: The voxel group.
         """
-        index = torch.where(self.voxel_groups == name)[0]
+        index = np.where(self.voxel_groups == name)[0]
         if index.size(0) > 0:
             return self.voxel_groups[index]
         else:
             raise ValueError(f"Voxel group {name} not found.")
         
-    def get_vozel_paths(self) -> torch.Tensor[str]:
+    def get_group_names(self) -> list[str]:
+        """
+        Get the names of the voxel groups.
+        Returns:
+            list[str]: The names of the voxel groups.
+        """
+        group_names = []
+        for voxel_group in self.voxel_groups:
+            group_names.append(voxel_group.name)
+        return group_names
+        
+    def get_voxel_paths(self) -> list[str]:
         """
         Get the paths of the voxels in the voxel groups.
         Returns:
-            torch.Tensor[str]: The paths of the voxels.
+            list[str]: The paths of the voxels.
         """
         voxel_paths = []
         for voxel_group in self.voxel_groups:
             voxel_paths.append(voxel_group.voxels)
-        return torch.cat(voxel_paths)
+        return voxel_paths
     
-    def get_voxel_centers(self) -> torch.Tensor[Gf.Vec3d]:
+    def get_voxel_weights(self) -> torch.Tensor:
+        """
+        Get the weights of the voxel groups.
+        Returns:
+            torch.Tensor[float]: The weights of the voxel groups, shape (N,) where N is the number of voxels.
+        """
+        voxel_weights = torch.tensor([])
+        for i, w in enumerate(self.weights):
+            ws_tensor = torch.tensor([w]).repeat(len(self.voxel_groups[i].voxels))
+            voxel_weights = torch.cat((voxel_weights, ws_tensor), dim=0)
+        return voxel_weights
+    
+    def get_voxel_centers(self) -> torch.Tensor:
         """
         Get the centers of the voxels in the voxel groups.
         Returns:
@@ -239,7 +269,7 @@ class PerceptionSpace:
             voxel_centers.append(voxel_group.voxel_centers)
         return torch.cat(voxel_centers)
     
-    def get_voxel_sizes(self) -> torch.Tensor[float]:
+    def get_voxel_sizes(self) -> torch.Tensor:
         """
         Get the sizes of the voxels in the voxel groups.
         Returns:
@@ -250,7 +280,7 @@ class PerceptionSpace:
             voxel_sizes.append(voxel_group.voxel_sizes)
         return torch.cat(voxel_sizes)
     
-    def get_voxel_mins(self) -> torch.Tensor[Gf.Vec3d]:
+    def get_voxel_mins(self) -> torch.Tensor:
         """
         Get the minimum coordinates of the voxels in the voxel groups.
         Returns:
@@ -260,7 +290,7 @@ class PerceptionSpace:
         voxel_sizes = self.get_voxel_sizes()
         return voxel_centers - (voxel_sizes / 2)
     
-    def get_voxel_maxs(self) -> torch.Tensor[Gf.Vec3d]:
+    def get_voxel_maxs(self) -> torch.Tensor:
         """
         Get the maximum coordinates of the voxels in the voxel groups.
         Returns:
@@ -293,34 +323,73 @@ class PerceptionSpace:
                     meshes.append(mesh)
             return meshes
         
-
+    def set_voxel_group_weight(self, voxel_group_name:str, weight:float):
+        """
+        Set the weight of the voxel group.
+        Args:
+            voxel_group_name (str): The name of the voxel group.
+            weight (float): The weight of the voxel group.
+        """
+        index = torch.where(self.voxel_groups == voxel_group_name)[0]
+        if index.size(0) > 0:
+            self.weights[index] = weight
+        else:
+            raise ValueError(f"Voxel group {voxel_group_name} not found.")
+        
     
-    def batch_ray_voxel_intersections(self, ray_origins, ray_directions):
+    def batch_ray_voxel_intersections(self, ray_origins:torch.Tensor, ray_directions:torch.Tensor, batch_size:int=1000) -> torch.Tensor:
+        """
+        Check if the rays intersect with the voxels in the voxel groups.
+        Args:
+            ray_origins (torch.Tensor): The origins of the rays.
+            ray_directions (torch.Tensor): The directions of the rays.
+        Returns:
+            torch.Tensor: A tensor of shape (N,) where N is the number of voxels. Each element is the number of rays that intersect with the voxel.
+        """
+        start_time = time.time()
+        # Use the GPU if available to make this quick
+        
+        ray_origins = ray_origins                     # Shape: (R, 3)
+        ray_directions = ray_directions               # Shape: (R, 3)
+        voxel_mins = self.get_voxel_mins().to(device) # Shape: (N, 3)
+        voxel_maxs = self.get_voxel_maxs().to(device) # Shape: (N, 3)
+
         num_rays = ray_origins.shape[0]
-        voxel_mins = self.get_voxel_mins()  # Shape: (N, 3)
-        voxel_maxs = self.get_voxel_maxs()  # Shape: (N, 3)
         num_voxels = voxel_mins.shape[0]
 
-        # Expand rays and voxels for broadcasting
-        rays_o = ray_origins.unsqueeze(1).expand(-1, num_voxels, -1)       # Shape: (R, N, 3)
-        rays_d = ray_directions.unsqueeze(1).expand(-1, num_voxels, -1)    # Shape: (R, N, 3)
-        boxes_min = voxel_mins.unsqueeze(0).expand(num_rays, -1, -1)       # Shape: (R, N, 3)
-        boxes_max = voxel_maxs.unsqueeze(0).expand(num_rays, -1, -1)       # Shape: (R, N, 3)
+        v_hits = torch.zeros(num_voxels)
 
-        inv_dir = 1.0 / rays_d
-        tmin = (boxes_min - rays_o) * inv_dir
-        tmax = (boxes_max - rays_o) * inv_dir
+        for start in range(0, num_rays, batch_size):
+            end = min(start + batch_size, num_rays)
+            # Expand rays and voxels for broadcasting
+            rays_o = ray_origins[start:end].unsqueeze(1).expand(-1, num_voxels, -1)     # Shape: (R, N, 3)
+            rays_d = ray_directions[start:end].unsqueeze(1).expand(-1, num_voxels, -1)  # Shape: (R, N, 3)
+            boxes_min = voxel_mins.unsqueeze(0).expand(end-start, -1, -1)               # Shape: (R, N, 3)
+            boxes_max = voxel_maxs.unsqueeze(0).expand(end-start, -1, -1)               # Shape: (R, N, 3)
 
-        t1 = torch.minimum(tmin, tmax)
-        t2 = torch.maximum(tmin, tmax)
+            inv_dir = 1.0 / rays_d
+            tmin = (boxes_min - rays_o) * inv_dir
+            tmax = (boxes_max - rays_o) * inv_dir
 
-        t_enter = torch.max(t1, dim=2).values
-        t_exit = torch.min(t2, dim=2).values
+            t1 = torch.minimum(tmin, tmax)
+            t2 = torch.maximum(tmin, tmax)
 
-        # A ray intersects a voxel if t_enter <= t_exit and t_exit >= 0
-        hits = (t_enter <= t_exit) & (t_exit >= 0)
+            t_enter = torch.max(t1, dim=2).values
+            t_exit = torch.min(t2, dim=2).values
 
-        return hits  # Shape: (R, N)
+            # A ray intersects a voxel if t_enter <= t_exit and t_exit >= 0
+            hits = (t_enter <= t_exit) & (t_exit >= 0)
+            # Shape: (R, N) where R is the number of rays and N is the number of voxels. 
+            # Each element is True if the ray intersects with the voxel, False otherwise.
+
+            # To get the number of rays that intersect with each voxel, we can sum along the first dimension
+            v_hits += hits.sum(dim=0)
+
+            # v_hits.cpu() # Move back to CPU if needed
+
+        print(f"Batch ray voxel intersectiontraversal took {time.time() - start_time:.2f} seconds for {num_rays} rays and {num_voxels} voxels.")
+
+        return v_hits  # Shape: (N,), hits for each voxel
 
 
 class Sensor3D:
@@ -720,7 +789,7 @@ class Sensor3D_Instance:
         
         return world_transform
 
-    def get_rays(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def get_rays(self) -> Tuple[np.ndarray, np.ndarray]:
         """Returns (ray_origins, ray_directions) for this sensor instance.
 
         Returns
@@ -728,7 +797,9 @@ class Sensor3D_Instance:
             ray_origins: (N, 3) numpy array of world-space ray origins.
             ray_directions: (N, 3) numpy array of world-space ray directions.
         """
-        import numpy as np
+        # TODO: Write this with torch with cuda for performance
+
+        start_time = time.time()
 
         ray_origins = np.zeros((0, 3))
         ray_directions = np.zeros((0, 3))
@@ -763,6 +834,8 @@ class Sensor3D_Instance:
                     rays.append(dir_vec)
             rotated_directions = (rotation @ np.array(rays).T).T
             ray_directions = np.append(ray_directions, rotated_directions, axis=0)
+
+        print(f"Ray origins and directions for {self.name} calculated in {time.time() - start_time:.2f} seconds.")
 
         return ray_origins, ray_directions
 
@@ -874,6 +947,16 @@ class Bot3D:
         self.perception_entropy = 0.0
         self.perception_coverage_percentage = 0.0
 
+        # set the device to GPU if available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
+        print(f"Using {self.device} for all calucations for robot: {self.name}.")
+        
+
         # TODO Remove self.body from any of the sensor_coverage_requirement meshes
 
     def get_sensors_by_type(self, sensor_type:Type[Sensor3D]) -> list[Sensor3D_Instance]:
@@ -930,6 +1013,219 @@ class Bot3D:
         world_transform = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         
         return world_transform
+    
+    def calculate_perception_entropy(self, perception_space:PerceptionSpace):
+        """
+        Calculate the perception entropy of the bot based on the sensors and the perception space.
+        Args:
+            perception_space (PerceptionSpace): The perception space to calculate the entropy for.
+
+        Returns:
+            float: The perception entropy of the bot. Lower entropy indicates better coverage.
+        """
+
+        def _apply_early_fusion(sensor_measurements: torch.Tensor) -> torch.Tensor:
+            """Apply early fusion strategy to combine measurements of the same sensor per voxel.
+            This is just a sum of the measurements on the voxel.
+            
+            Parameters
+            ----------
+            measurements : torch.Tensor
+                A tensor of shape (N, S) N is the number of voxels, and S is the sensors.
+
+            Returns
+            -------
+            torch.Tensor
+                A tensor of shape (N,) where N is the number of voxels.
+            """
+            if sensor_measurements.ndim == 1:
+                # If the tensor is 1D, it means we have a single sensor measurement per voxel
+                return sensor_measurements
+            elif sensor_measurements.ndim == 2:
+                # If the tensor is 2D, we need to sum along the first axis (axis 0)
+                # This will give us a tensor of shape (N,) where N is the number of voxels.
+                return torch.sum(sensor_measurements, dim=0)
+        
+        def _apply_late_fusion(uncertainties: torch.Tensor) -> torch.Tensor:
+            """Apply late fusion strategy to combine uncertainties (σ's)from different sensor types per voxel
+            This is based on the formula from the paper Ma et al. 2020 "Perception Entropy..."
+            
+            σ_fused = sqrt(1 / Σ(1/σ_i²))
+            
+            Parameters
+            ----------
+            measurements : torch.Tensor
+                The tensor of uncertainties (σ_i's) for each sensor type, where (N, S) where N is the number of voxels, and S is the number of sensors.
+
+            Returns
+            -------
+            torch.Tensor
+                A tensor of shape (N, S) where N is the number of voxels and S is the number of sensors.
+            """
+
+            # Calculate the fused uncertainty using the formula
+            # σ_fused = sqrt(1 / Σ(1/σ_i²))
+            fused_uncertainty = torch.sqrt(1 / torch.sum(1 / (uncertainties ** 2), dim=0))
+            
+            return fused_uncertainty
+        
+        def _calc_aps(measurements:torch.Tensor, a:torch.Tensor, b:torch.Tensor) -> torch.Tensor:
+            """Calculate the sensor AP for each voxel, where AP = a ln(m) + b
+            This is based on the formula from the paper Ma et al. 2020 "Perception Entropy..."
+            
+            Parameters
+            ----------
+            measurements : torch.Tensor
+                The tensor of measurements (m_i's) for each sensor type, of shape (N, S) where N is the number of voxels, and S is the number of sensors.
+            a : torch.Tensor
+                The tensor of sensor AP coefficient a, of shape (S) where S is the number of sensors.
+            b : torch.Tensor
+                The tensor of sensor AP coefficient b, of shape (S) where S is the number of sensors.
+
+            Returns
+            -------
+            torch.Tensor
+                A tensor of shape (N, S) where N is the number of voxels, and S is the number of sensors.
+            """
+            # Calculate the AP for each voxel using the formula
+            # AP = a ln(m) + b
+            shape = measurements.shape
+            if len(shape) == 1:
+                N = shape[0]
+                S = 1
+            elif len(shape) == 2:
+                N = shape[0]
+                S = shape[1]
+            else:
+                raise ValueError(f"Invalid shape for measurements: {measurements.shape}. Should be (N,) or (N, S).")
+            print(f"Calculating AP for N={N} voxels and S={S} sensors.")
+            print(f"  measurements.shape: {measurements.shape}, should be ({N}, {S})")
+            print(f"  a.shape: {a.shape}, should be ({S},)")
+            print(f"  b.shape: {b.shape}, should be ({S},)")
+
+            bs_t = b.repeat(measurements.shape[0], 1).T.to(device) # a is (S,), so we need to repeat it for each voxel. Also make sure to move to device
+            as_t = a.repeat(measurements.shape[0], 1).T.to(device) # b is (S,), so we need to repeat it for each voxel. Also make sure to move to device
+        
+            # ap = a * ln_m + b
+            ap = as_t * torch.log(measurements) + bs_t
+
+            # Transpose and clamp AP to valid range
+            ap = torch.clamp(ap, min=0.001, max=0.999)
+            print(f"  ap.shape: {ap.shape}, should be ({N}, {S})")
+            
+            return ap
+        
+        def _calc_uncertainties(aps: torch.Tensor) -> torch.Tensor:
+            """Calculate the uncertainties (σ_i's) for each sensor type, where σ_i = (1 / AP) - 1
+            This is based on the formula from the paper Ma et al. 2020 "Perception Entropy..."
+            
+            Parameters
+            ----------
+            aps : torch.Tensor
+                The tensor of sensor AP for each voxel, of shape (N,) where N is the number of voxels.
+
+            Returns
+            -------
+            torch.Tensor
+                A tensor of shape (N,) where N is the number of voxels.
+            """
+            # Calculate the uncertainty for each voxel using the formula
+            # σ_i = (1 / AP) - 1
+            
+            uncertainties = (1 / aps) - 1
+            
+            return uncertainties
+        
+        def _calc_entropies(uncertainties: torch.Tensor) -> torch.Tensor:
+            """Calculate the entropy for each voxel, where H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
+            This is based on the formula from the paper Ma et al. 2020 "Perception Entropy..."
+            
+            Parameters
+            ----------
+            uncertainties : torch.Tensor
+                The tensor of uncertainties (σ's) for each voxel, shape (N,) where N is the number of voxels.
+
+            Returns
+            -------
+            torch.Tensor
+                A tensor of shape (N,) where N is the number of voxels.
+            """
+            # Calculate the entropy for each voxel using the formula
+            # H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
+            # H(S|m,q) = 2 * torch.log(uncertainties) + 1 + torch.log(torch.tensor(2 * np.pi))
+
+            ln2pi_p_1 = torch.tensor(1 + 2 * np.log(np.pi)).to(device)
+            entropy = 2 * torch.log(uncertainties) + ln2pi_p_1.repeat(uncertainties.shape[0], 1).T.to(device) # repeat for each voxel
+
+            # Reshape the entropy tensor to (N,) where N is the number of voxels
+            entropy = entropy.view(-1)
+
+            # Normalize the entropy to be between 0 and 1
+            entropy = (entropy - torch.min(entropy)) / (torch.max(entropy) - torch.min(entropy))
+            
+            return entropy
+            
+        ###################################################################################################
+        
+        # Create one tensor per sensor type (R, N, S) where R is the number of rays, 
+        # N is the number of voxels, and S is the number of sensors.
+        start_time = time.time()
+
+        sensor_ms = {}
+        for sensor_inst in self.sensors:
+            o,d = sensor_inst.get_rays()
+
+            # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
+            # Each element is True if the ray intersects with the voxel, False otherwise.
+            sensor_m = perception_space.batch_ray_voxel_intersections(torch.Tensor(o).to(device), torch.Tensor(d).to(device))
+            print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")
+
+            # Add the sensor measurements to the tensor for the sensor type
+            if sensor_inst.sensor not in sensor_ms.keys():
+                sensor_ms.update({sensor_inst.sensor: torch.Tensor([]).to(device)})
+            sensor_ms[sensor_inst.sensor] = torch.cat((sensor_ms[sensor_inst.sensor], sensor_m), dim=0)
+
+        # Apply early fusion to combine measurements of the same sensor per voxel
+        early_fusion_ms = torch.Tensor([]).to(device)
+        ap_as = torch.Tensor([])
+        ap_bs = torch.Tensor([])
+        for sensor, sensor_m_tensor in sensor_ms.items():
+            m = _apply_early_fusion(sensor_m_tensor).to(device)
+            print(f"m.shape: {m.shape}, should be (N,)")
+
+            early_fusion_ms = torch.cat((early_fusion_ms, m), dim=0)
+            ap_as = torch.cat((ap_as, torch.Tensor([sensor.ap_constants['a']])), dim=0)
+            ap_bs = torch.cat((ap_bs, torch.Tensor([sensor.ap_constants['b']])), dim=0)
+            # This is a tensor of shape (N, S) where N is the number of voxels and S is the number of sensors.
+            # Each element is the number of rays that intersect with the voxel for that sensor type.
+        print(f"early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S)")
+        
+        # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
+        # This is a tensor of shape (N, S) where N is the number of voxels, and S is the number of sensors.
+        aps = _calc_aps(early_fusion_ms, ap_as, ap_bs)
+        print(f"aps.shape: {aps.shape}, should be (N,S)")
+        print(f"  max of aps: {aps.max()} (should be <=0.999)")
+        print(f"  min of aps: {aps.min()} (should be >=0.001)")
+
+        us = _calc_uncertainties(aps)
+        
+        # Apply late fusion to combine uncertainties (σ's) from different sensor types per voxel
+        late_fusion_Us = _apply_late_fusion(us)
+
+        # Calculate the entropies for each voxel, where H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
+        # This is a tensor of shape (N) where N is the number of voxels.
+        entropies = _calc_entropies(late_fusion_Us)
+
+        # Calculate the weighted average entropy for the bot
+        weights = perception_space.get_voxel_weights()
+        sum_weights = torch.sum(weights, dim=0) #this should be a float
+        weights = weights / sum_weights #normalize the weights
+        entropy = torch.sum(entropies * weights, dim=0)
+
+        print(f"{self.name} perception entropy calculated in {time.time() - start_time:.2f} seconds!!")
+
+        return entropy
+        
     
 
     # def add_sensor_valid_pose(self, sensor:Sensor3D, max_tries:int=25, verbose=False):

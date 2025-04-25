@@ -22,6 +22,8 @@ from typing import List, Dict, Tuple, Optional, Union
 import carb
 import time
 
+import torch
+
 import re
 
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
@@ -79,17 +81,17 @@ class GO4RExtension(omni.ext.IExt):
 
         self.ui_elements = []
 
-        self.selected_export_path=None
+        self.selected_export_path = None
 
         # A place to store the robots
-        self.robots = []
+        self.robots: list[Bot3D] = []
 
         # These just help handle the stage selection and structure
         self.previous_selection = []
         
         # Perception Space Voxels
         self.voxel_size = 0.1
-        self.weighted_voxels = {} # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
+        # self.weighted_voxels = {} # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
 
         self.percep_entr_results_data = {} # {"robot_name": {"Entropy By Voxel Group": {group_id: entropy, ...},
                                            #                 "Entropy By Sensor Type": {sensor_name: entropy, ...},
@@ -100,6 +102,7 @@ class GO4RExtension(omni.ext.IExt):
         self.max_log_messages = 100  # Default value
         
         # Add a property to track the selected perception area mesh
+        self.perception_space:PerceptionSpace = PerceptionSpace(self._usd_context)
         self.perception_mesh = None
         self.perception_mesh_path = None
         
@@ -109,6 +112,31 @@ class GO4RExtension(omni.ext.IExt):
         # Events
         events = self._usd_context.get_stage_event_stream()
         self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
+
+    def on_shutdown(self):
+        """Shutdown the extension"""
+
+        # Cleanup UI
+        self._cleanup_ui()
+
+        # Remove menu items
+        remove_menu_items(self._menu_items)
+
+        # Unregister action
+        action_registry = omni.kit.actions.core.get_action_registry()
+        action_registry.unregister_action(self.ext_id, f"CreateUIExtension:{EXTENSION_TITLE}")
+
+        # Cleanup stage event subscription
+        if self._stage_event_sub:
+            self._stage_event_sub = None
+
+        # Cleanup window
+        if self._window:
+            self._window.visible = False
+            self._window = None
+
+        # Force garbage collection
+        gc.collect()
 
     def _build_ui(self):
         """Build the UI for the extension"""
@@ -199,7 +227,7 @@ class GO4RExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5):
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
-                                self.analyze_btn = ui.Button("Analyze Perception Entropy", clicked_fn=self._calc_perception_entropies, width=120, height=36)
+                                self.analyze_btn = ui.Button("Analyze Perception Entropy", clicked_fn=self._batch_calc_perception_entropies, width=120, height=36)
                                 # Initially disable the button since no mesh is selected
                                 self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
                                 self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
@@ -335,6 +363,8 @@ class GO4RExtension(omni.ext.IExt):
 
     def _zero_gravity(self):
         """Disable gravity for all active prims in the stage"""
+        if not self.stage:
+            self.stage = get_current_stage()
         # Iterate over all prims in the stage
         for prim in self.stage.Traverse():
             # Check if the prim is active and not a prototype
@@ -387,8 +417,8 @@ class GO4RExtension(omni.ext.IExt):
         xform_groups = [child for child in parent_prim.GetChildren() 
                         if child.IsA(UsdGeom.Xform) and not child.IsA(UsdGeom.Mesh)]
         
-        # Map existing group IDs to maintain weights where possible
-        new_weighted_voxels = {}
+        # Clear the previously found voxel groups
+        self.perception_space = PerceptionSpace(self._usd_context)
         
         # Process XForm groups first
         for xform in xform_groups:
@@ -403,12 +433,37 @@ class GO4RExtension(omni.ext.IExt):
             
             # Find all mesh children (voxels) under this XForm
             voxel_meshes = []
+            voxel_sizes = []
+            voxel_paths = []
+            voxel_centers = []
+
             for child in xform.GetChildren():
                 if child.IsA(UsdGeom.Mesh):
                     voxel_meshes.append(child)
                     all_found_voxels.add(str(child.GetPath()))
+
+                    # Get the voxel size
+                    boundable = UsdGeom.Boundable(child.GetPrim())
+                    bbox = boundable.ComputeWorldBound(Usd.TimeCode.Default(), UsdGeom.Tokens.default_)
+                    box = bbox.ComputeAlignedBox()
+                    min_point = box.GetMin()
+                    max_point = box.GetMax()
+                    size = [max_point[i] - min_point[i] for i in range(3)]
+                    voxel_sizes.append(size)
+
+                    # Get the center of the voxel
+                    center = [(max_point[i] + min_point[i]) / 2 for i in range(3)]
+                    voxel_centers.append(center)
+
+                    # Get the path of the voxel
+                    path = str(child.GetPath())
+                    voxel_paths.append(path)
                 
-            new_weighted_voxels.update({group_id: (np.array(voxel_meshes), weight)})
+            vg = PerceptionSpace.VoxelGroup(group_id,
+                                            voxel_paths, 
+                                            torch.Tensor(voxel_centers), 
+                                            torch.Tensor(voxel_sizes))
+            self.perception_space.add_voxel_group(vg, weight)
         
         # Group ungrouped meshes to show the warning in the UI
         ungrouped_voxels = []
@@ -418,14 +473,17 @@ class GO4RExtension(omni.ext.IExt):
                 all_found_voxels.add(str(child.GetPath()))
         
         if ungrouped_voxels:
-            new_weighted_voxels.update({"UNGROUPED": (ungrouped_voxels, 0.0)})
+            # Create a new group for ungrouped voxels
+            group_id = "UNGROUPED"
+            voxel_paths = [str(mesh.GetPath()) for mesh in ungrouped_voxels]
+            voxel_sizes = [mesh.GetExtentAttr().Get()[1] for mesh in ungrouped_voxels]
+                
+            vg = PerceptionSpace.VoxelGroup(group_id, voxel_paths, voxel_sizes)
+            self.perception_space.add_voxel_group(vg, 0.0)
         
-        # Update member variables
-        self.weighted_voxels = new_weighted_voxels
         
         # Update the UI
         self._update_voxel_groups_ui()
-        # self._log_message(f"Updated {len(self.weighted_voxels)} voxel groups based on stage hierarchy")
 
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
@@ -465,7 +523,10 @@ class GO4RExtension(omni.ext.IExt):
         self.voxel_groups_container.clear()
         
         with self.voxel_groups_container:
-            for group_name, (voxels, weight) in self.weighted_voxels.items():
+            for i, voxel_group in enumerate(self.perception_space.voxel_groups):
+                group_name = voxel_group.name
+                voxels = voxel_group.voxels
+                weight = self.perception_space.weights[i]
                     
                 with ui.HStack(spacing=5):
 
@@ -482,8 +543,7 @@ class GO4RExtension(omni.ext.IExt):
                     def make_weight_changed_fn(g_id):
                         def on_weight_changed(value):
                             # Update the weight for this group
-                            voxels, _ = self.weighted_voxels[g_id]
-                            self.weighted_voxels[g_id] = (voxels, value.get_value_as_float())
+                            self.perception_space.set_voxel_group_weight(g_id, value.get_value_as_float())
 
                             # Update the custom weight data for the XForm
                             xform_path = f"/World/GO4R_PerceptionVolume/{g_id}"
@@ -510,7 +570,8 @@ class GO4RExtension(omni.ext.IExt):
                         ui.Label(f"{len(voxels)}", width=120, style={"color": ui.color("#FF0000")})
         
         # Finally, if there are voxel groups, and robots to analyze, enable the analyze perception button
-        if len(self.weighted_voxels) > 0 and "UNGROUPED" not in self.weighted_voxels and len(self.robots) > 0:
+        names = list(self.perception_space.get_group_names())
+        if len(names) > 0 and "UNGROUPED" not in names and len(self.robots) > 0:
             self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
 
     def _add_voxel_group(self):
@@ -1094,6 +1155,27 @@ class GO4RExtension(omni.ext.IExt):
                                                                 with ui.VStack(spacing=2):
                                                                     self._display_sensor_instance_properties(sensor_instance)
 
+    def _batch_calc_perception_entropies(self):
+        """Batch calculate perception entropies for all robots and sensors"""
+        self._log_message("Batch calculating perception entropies...")
+        
+        results = {}
+        for robot in self.robots:
+            # Call the perception entropy calculation for each robot
+            results[robot.name] = robot.calculate_perception_entropy(self.perception_space)
+
+        print("Batch calculation results:")
+        print(results)
+
+        # Update the UI with the results
+        self._update_percep_entr_results_ui()
+        
+        # Re-enable the analyze button
+        self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+
+        self._log_message("Batch calculation complete.")
+
+
     def _calc_perception_entropies(self, disable_raycasters=True):
         """Main function to analyze all sensors on all the robots.
         
@@ -1110,14 +1192,15 @@ class GO4RExtension(omni.ext.IExt):
             self.analysis_progress_bar.model.set_value(0.0)
             return
         
+        vg_names = list(self.perception_space.get_group_names())
         # Check if we have voxel groups, throw an error if not
-        if not self.weighted_voxels:
+        if len(vg_names) == 0:
             self._log_message("Error: No voxel groups found. Please create a perception mesh first.")
             self.analysis_progress_bar.model.set_value(0.0)
             return
         
         # Check if there are ungrouped voxels, warn the user
-        if "UNGROUPED" in self.weighted_voxels:
+        if "UNGROUPED" in vg_names:
             self._log_message("Warning: There are ungrouped voxels that will not be considered!")
 
         percep_entr_results_data = {}
@@ -1199,7 +1282,7 @@ class GO4RExtension(omni.ext.IExt):
                 vg_m_early_fusion_per_type.update({name: self._apply_early_fusion(measurements_for_sensor)})
         
         sum_normalized_voxel_entropy = 0.0
-        for voxel_group, voxels in self.weighted_voxels.items():
+        for voxel_group in list(self.perception_space.get_voxel_group_names()): # TODO Parallelize this as much as possible
             if voxel_group == "UNGROUPED":
                 self._log_message(f"Warning: Skipping {voxel_group} voxels")
                 continue
