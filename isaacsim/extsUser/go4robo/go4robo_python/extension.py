@@ -94,7 +94,6 @@ class GO4RExtension(omni.ext.IExt):
         
         # Perception Space Voxels
         self.voxel_size = 0.1
-        # self.weighted_voxels = {} # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
 
         self.percep_entr_results_data = {} # {"robot_name": {"Entropy By Voxel Group": {group_id: entropy, ...},
                                            #                 "Entropy By Sensor Type": {sensor_name: entropy, ...},
@@ -115,6 +114,11 @@ class GO4RExtension(omni.ext.IExt):
         # Events
         events = self._usd_context.get_stage_event_stream()
         self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
+
+        self.optimization_problem:SensorPkgOptimization = None
+        self.optimization_algorithm = None
+        self.sensor_options:set[Sensor3D] = set()
+        self.optimization_max_sensors = 5
 
     def on_shutdown(self):
         """Shutdown the extension"""
@@ -230,7 +234,7 @@ class GO4RExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5):
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
-                                self.analyze_btn = ui.Button("Analyze Perception Entropy", clicked_fn=self._batch_calc_perception_entropies, width=120, height=36)
+                                self.analyze_btn = ui.Button("Analyze As-Is Perception Entropy", clicked_fn=self._batch_calc_perception_entropies, width=120, height=36)
                                 # Initially disable the button since no mesh is selected
                                 self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
                                 self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
@@ -244,16 +248,17 @@ class GO4RExtension(omni.ext.IExt):
                     
                     with ui.CollapsableFrame("Optimization", height=0, collapsed=False):
                         with ui.VStack(spacing=5):
+                            self.sensor_options_list = ui.ScrollingFrame(height=250)
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
-                                self.optimize_btn = ui.Button("Optimize", clicked_fn=self._optimize_robot, height=36)
-                                self.results_pg_btn = ui.Button("Results", clicked_fn=self.on_results_pg_btn_clicked, height=36)
-                                self.optimize_btn.set_style({"color": ui.color("#FF0000")})
-                                self.optimize_btn.set_tooltip("Reset all settings to default values")
-                            # self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
+                                self.optimize_btn = ui.Button("Optimize", clicked_fn=self._optimize_robot, height=36, width=0)
+                                self.optimization_progress_bar = ui.ProgressBar(height=36, val=0.0)
+                                self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+                            self.results_pg_btn = ui.Button("Results", clicked_fn=self.on_results_pg_btn_clicked, height=36)
+                            self.disable_ui_element(self.results_pg_btn, text_color=ui.color("#FF0000"))
                             # Initialize with empty results
-                            with self.results_list:
-                                ui.Label("Run analysis to see results")
+                            with self.sensor_options_list:
+                                ui.Label("Refresh Robots & Sensors")
                     
                     ui.Spacer(height=20)
                     
@@ -285,7 +290,7 @@ class GO4RExtension(omni.ext.IExt):
         """Enable a button and restore its normal style"""
         ui_element.enabled = True
         if text_color is not None:
-            ui_element.set_style({"color": text_color})
+            ui_element.set_style({"color": ui.color("#00ff00") if text_color is None else text_color})
         else:
             ui_element.set_style({})  # Reset to default style
 
@@ -294,7 +299,7 @@ class GO4RExtension(omni.ext.IExt):
         ui_element.enabled = False
         ui_element.set_style({
             "background_color": ui.color("#555555"),
-            "color": ui.color("#AAAAAA") if text_color is None else text_color,
+            "color": ui.color("#ff0000") if text_color is None else text_color,
             "opacity": 0.7
         })
 
@@ -548,7 +553,7 @@ class GO4RExtension(omni.ext.IExt):
                         def on_weight_changed(value):
                             # Update the weight for this group
                             self.perception_space.set_voxel_group_weight(g_id, value.get_value_as_float())
-
+                            
                             # Update the custom weight data for the XForm
                             xform_path = f"/World/GO4R_PerceptionVolume/{g_id}"
                             xform_prim = get_current_stage().GetPrimAtPath(xform_path)
@@ -800,7 +805,7 @@ class GO4RExtension(omni.ext.IExt):
             """Remove trailing underscore+digits from a name, if they are present, using re"""
             return re.sub(r'(_\d+)?$', '', name)
 
-        def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
+        def _find_camera(prim:Usd.Prim, sensor_list=None) -> Sensor3D_Instance:
             """Find cameras that are descendants of the selected robot"""
 
             # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
@@ -858,6 +863,12 @@ class GO4RExtension(omni.ext.IExt):
                                         cost=1.0,
                                         focal_point=(0, 0, 0)
                                         )
+                    # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
+                    if cam3d in self.sensor_options:
+                        cam3d = next((s for s in self.sensor_options if s == cam3d), cam3d)
+                    else:
+                        self.sensor_options.add(cam3d)
+
                     cam3d_instance = Sensor3D_Instance(cam3d, 
                                                        path=prim.GetPath(), 
                                                        name=_remove_trailing_digits(name), 
@@ -901,6 +912,12 @@ class GO4RExtension(omni.ext.IExt):
                                     body=_find_sensor_body(prim.GetParent()),
                                     cost=1.0,
                                     )
+                    # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
+                    if lidar in self.sensor_options:
+                        lidar = next((s for s in self.sensor_options if s == lidar), lidar)
+                    else:
+                        self.sensor_options.add(lidar)
+                    
                     lidar_instance = Sensor3D_Instance(lidar, 
                                                        path=prim.GetPath(), 
                                                        name=_remove_trailing_digits(name), 
@@ -912,7 +929,6 @@ class GO4RExtension(omni.ext.IExt):
             
             return lidar_instance
         
-
         def _find_sensor_body(prim:Usd.Prim, default_box_size=1) -> Usd.Prim:
             """Find the body of the sensor, Which is the mesh that is a child of the sensor's main XForm. Prim you pass here should be the main XForm"""
 
@@ -920,11 +936,9 @@ class GO4RExtension(omni.ext.IExt):
             prim_name = prim.GetName()
 
             for child in prim.GetChildren():
-                print(f"DEBUG: Checking child {child.GetName()} of type {child.GetTypeName()}")
                 if child.IsA(UsdGeom.Mesh):
                     # Check if the child is a mesh
                     self._log_message(f"Found sensor body: {child.GetName()} for sensor {prim_name}")
-                    print(f"DEBUG: Found sensor body: {child.GetName()} for sensor {prim_name}")
                     return child 
             
             self._log_message(f"No sensor body found for sensor {prim_name}, using a small {default_box_size}m box as a placeholder")
@@ -1002,7 +1016,7 @@ class GO4RExtension(omni.ext.IExt):
                     return role
             return None
 
-        def _assign_sensors_to_robot(prim, bot, processed_camera_paths=None):
+        def _assign_sensors_to_robot(prim, bot:Bot3D, processed_camera_paths=None):
             """Search a level for sensors and add them to the specified robot"""
             # Check if this node contains a sensor, regardless of whether it's a leaf
             # This allows finding sensors at any level of the hierarchy
@@ -1036,7 +1050,7 @@ class GO4RExtension(omni.ext.IExt):
                         other_cam_name = pattern.sub(other_cam_role, camera.name)
                         other_cam_path_str = pattern.sub(other_cam_role, str(this_cam_path_str))
 
-                        # Check if the other camera is already in the sensors list
+                        # Check if the other camera is already in the bot's sensors
                         for i, sensor_instance in enumerate(bot.sensors):
                             if isinstance(sensor_instance.sensor, MonoCamera3D):
                                 # Case-insensitive comparison
@@ -1044,9 +1058,9 @@ class GO4RExtension(omni.ext.IExt):
                                     # Found the other camera, create a stereo camera
                                     self._log_message(f"Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
                                     self._log_message(f"  Path 1: {this_cam_path_str}")
-                                    self._log_message(f"  Path 2: {sensor_instance.path.pathString}")
+                                    self._log_message(f"  Path 2: {sensor_instance.path}")
                                     # Find the common parent of the two cameras based on the paths
-                                    common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path.pathString])
+                                    common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path])
                                     # self._log_message(f"  Common: {common_parent_path}")
                                     common_parent_prim = get_current_stage().GetPrimAtPath(common_parent_path)
                                     if not common_parent_prim:
@@ -1068,6 +1082,17 @@ class GO4RExtension(omni.ext.IExt):
                                         cost=sensor_instance.sensor.cost + camera.sensor.cost,
                                         body=_find_sensor_body(prim)
                                     )
+                                    # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
+                                    if stereo_cam in self.sensor_options:
+                                        stereo_cam = next((s for s in self.sensor_options if s == stereo_cam), stereo_cam)
+                                        # Also remove both mono cameras from the list of unique sensors options
+                                        self.sensor_options.remove(sensor_instance.sensor)
+                                        self.sensor_options.remove(camera.sensor)
+                                    else:
+                                        # Add the stereo camera to the list of unique sensor options
+                                        self.sensor_options.add(stereo_cam)
+                                        # Remove the mono camera from the list of unique sensors options
+                                        self.sensor_options.remove(sensor_instance.sensor)
                                     stereo_instance = Sensor3D_Instance(stereo_cam, 
                                                                         path=common_parent_path, 
                                                                         name=_remove_trailing_digits(common_parent_name), 
@@ -1093,7 +1118,8 @@ class GO4RExtension(omni.ext.IExt):
 
         stage = get_current_stage()
 
-        self.robots = []
+        self.robots = []            # Clear the list of robots
+        self.sensor_options = set() # Clear the set of sensor options
         
         total_sensors = dict.fromkeys(sensor_types, 0)
         for bot_prim in self.selected_prims:
@@ -1110,6 +1136,9 @@ class GO4RExtension(omni.ext.IExt):
                 
             # Search for sensors in this robot (with a new empty processed_camera_paths set)
             _assign_sensors_to_robot(robot_prim, bot)
+
+            for s in bot.get_unique_sensor_options():
+                self.sensor_options.add(s)
             
             found_sensors = {}
             for type in sensor_types:
@@ -1122,6 +1151,8 @@ class GO4RExtension(omni.ext.IExt):
         # Update the UI
         self._update_sensor_list_ui()
         self._update_voxel_groups_ui()
+        self._update_sensor_options_ui()
+        return self.robots
 
 
     def _display_sensor_instance_properties(self, sensor_instance:Sensor3D_Instance):
@@ -1179,7 +1210,7 @@ class GO4RExtension(omni.ext.IExt):
                                                                         'b': default_sensor_aps[sensor_instance.sensor.__class__.__name__]["b"]}
                                                         sensor_instance.sensor.ap_constants = ap_constants
                                                         
-                                                    with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
+                                                    with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#c94a00")}, collapsed=True):
                                                         with ui.VStack(spacing=2):
                                                             # Add average precision input directly at the top level
                                                             with ui.HStack(spacing=5):
@@ -1210,17 +1241,144 @@ class GO4RExtension(omni.ext.IExt):
                                                                 with ui.VStack(spacing=2):
                                                                     self._display_sensor_instance_properties(sensor_instance)
 
+    def _update_sensor_options_ui(self):
+        """Udpate the sensor options UI with the detected unique sensors for all the robots analyzed
+        For each sensor, list its name, type, FOV (HxV), Resolution (HxV), AP constants, and Cost
+        AP constants a and b and cost are adjustable and link back to the Robot sensor instance"""
+
+        # Clear the current sensor options list
+        self.sensor_options_list.clear()
+        
+        with self.sensor_options_list:
+            ################## ROBOT OPTIONS ##################
+            with ui.VStack(spacing=5):
+                if not self.robots:
+                    ui.Label("No robots selected")
+                else:
+                    with ui.CollapsableFrame(
+                            f"Robot/Perception System Options",
+                            height=0,
+                            style={"border_width": 2, "border_color": ui.color("#0059ff")},
+                            collapsed=False
+                        ):
+                        header = {"Robot Name": 120,
+                                  "Max Sensors": 20,
+                                  "Sensor Constraint Mesh Path": 200}
+                        # Just use the first robot #TODO: Make this work for multiple robots
+                        robot = self.robots[0]
+                        with ui.HStack(spacing=5):
+                            for key, width in header.items():
+                            # Create a header row
+                                with ui.VStack(spacing=5):
+                                    ui.Label(key, width=width, style={"color": ui.color("#0059ff")})
+                                    match key:
+                                        case "Robot Name":
+                                            ui.Label(robot.name, width=width)
+                                        case "Max Sensors":
+                                            max_sensors_field = ui.IntField(width=width)
+                                            max_sensors_field.model.set_value(self.optimization_max_sensors)
+
+                                            def on_max_sensors_val_changed(new_value):
+                                                max_sensors = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                self.optimization_max_sensors = max_sensors
+                                            
+                                            max_sensors_field.model.add_value_changed_fn(on_max_sensors_val_changed)
+                                        case "Sensor Constraint Mesh Path":
+                                            ui.Label("!!TODO!!", width=width)
+
+
+            ######################## SENSOR OPTIONS ########################
+                    with ui.CollapsableFrame(
+                            f"Sensor Options", 
+                            height=0, 
+                            style={"border_width": 2, "border_color": ui.color("#c94a00")}, 
+                            collapsed=False
+                        ):
+                        header = {"Sensor Name": 120, 
+                                  "Type": 120, 
+                                  "FOV (HxV)": 30, 
+                                  "Res (HxV)": 30, 
+                                  "AP Constants": 150, 
+                                  "Cost": 50}
+                        # For each sensor, list its name, type, FOV (HxV), Resolution (HxV), AP constants, and Cost
+                        with ui.HStack(spacing=5):
+                            for key, width in header.items():
+                                with ui.VStack(spacing=5):
+                                    # Create a header row
+                                    ui.Label(key, width=width, style={"color": ui.color("#c94a00")})
+                                    for sensor in self.sensor_options:
+                                        match key:
+                                            case "Sensor Name":
+                                                ui.Label(sensor.name, width=width)
+                                            case "Type":
+                                                ui.Label(sensor.__class__.__name__, width=width)
+                                            case "FOV (HxV)":
+                                                ui.Label(f"{sensor.h_fov:.0f}x{sensor.v_fov:.0f}", width=width)
+                                            case "Res (HxV)":
+                                                ui.Label(f"{sensor.h_fov/sensor.h_res:.0f}x{sensor.v_fov/sensor.v_res:.0f}", width=width)
+                                            case "Cost":
+                                                cost_field = ui.FloatField(width=width)
+                                                cost_field.model.set_value(sensor.cost)
+                                                
+                                                def on_cost_val_changed(new_value, sensor=sensor):
+                                                    cost = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                    sensor.cost = cost
+                                                
+                                                cost_field.model.add_value_changed_fn(on_cost_val_changed)
+                                            case "AP Constants":
+                                                # Set default average precision if not set
+                                                if not hasattr(sensor, 'ap_constants') or sensor.ap_constants is None:
+                                                    ap_constants = {'a': default_sensor_aps[sensor.__class__.__name__]["a"],
+                                                                    'b': default_sensor_aps[sensor.__class__.__name__]["b"]}
+                                                    sensor.ap_constants = ap_constants
+                                                with ui.HStack(spacing=5):
+                                                    ui.Label("a:", width=0)
+                                                    a_field = ui.FloatField(width=width/2-30)
+                                                    a_field.model.set_value(sensor.ap_constants['a'])
+                                                    
+                                                    def on_a_val_changed(new_value, sensor=sensor):
+                                                        a = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                        sensor.sensor.ap_constants['a'] = a
+                                                        self._log_message(f"Set {sensor.name} average precision to {a:.2f}")
+                                                    
+                                                    a_field.model.add_value_changed_fn(on_a_val_changed)
+
+                                                    ui.Label("   b:", width=0)
+                                                    b_field = ui.FloatField(width=width/2-30)
+                                                    b_field.model.set_value(sensor.ap_constants['b'])
+
+                                                    def on_b_val_changed(new_value, sensor=sensor):
+                                                        b = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                        sensor.sensor.ap_constants['b'] = b
+                                                        self._log_message(f"Set {sensor.name} average precision to {b:.2f}")
+                                            
+                                                    b_field.model.add_value_changed_fn(on_b_val_changed)
+
+        try:
+            self.optimization_problem = SensorPkgOptimization(bot=self.robots[0],
+                                                              perception_space=self.perception_space,
+                                                              sensor_options=self.sensor_options,
+                                                              max_n_sensors=self.optimization_max_sensors)
+        except Exception as e:
+            self._log_message(f"Error creating optimization problem: {e}")
+            self.optimization_problem = None
+            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+            raise e
+            
+        if self.optimization_problem is not None:
+            self.enable_ui_element(self.optimize_btn, text_color=ui.color("#00FF00"))
+        else:
+            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+                                                                
+
     def _batch_calc_perception_entropies(self):
         """Batch calculate perception entropies for all robots and sensors"""
         self._log_message("Batch calculating perception entropies...")
         
-        results = {}
+        self.percep_entr_results_data = {}
         for robot in self.robots:
             # Call the perception entropy calculation for each robot
-            results[robot.name] = robot.calculate_perception_entropy(self.perception_space)
-
-        print("Batch calculation results:")
-        print(results)
+            self.percep_entr_results_data[robot.name] = robot.calculate_perception_entropy(self.perception_space)
 
         # Update the UI with the results
         self._update_percep_entr_results_ui()
@@ -1259,7 +1417,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message("Warning: There are ungrouped voxels that will not be considered!")
 
         percep_entr_results_data = {}
-        percep_entr_results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
+        percep_entr_results_data.update({robot.name: None for robot in self.robots})
 
         # Calculate total number of sensors for progress tracking
         total_sensors_to_process = sum(len(robot.sensors) for robot in self.robots)
@@ -1402,38 +1560,46 @@ class GO4RExtension(omni.ext.IExt):
         """Update the results UI with entropy results for each robot"""
         # Clear existing results
         self.results_list.clear()
-        
-        with self.results_list:
-            with ui.VStack(spacing=5):
-                if not self.robots:
-                    ui.Label("No robots selected")
-                elif not self.percep_entr_results_data:
-                    ui.Label("Run analysis to see results")
-                else:
-                    # For each robot, create a collapsible frame with its results
-                    for robot_name, robot_results in self.percep_entr_results_data.items():
-                        
-                        with ui.CollapsableFrame(
-                            f"Robot: {robot_name}", 
-                            height=0,
-                            style={"border_width": 2, "border_color": ui.color("#0059ff")},
-                            collapsed=False
-                        ):
-                            with ui.VStack(spacing=5):
-                                
-                                for result_type, result_value in robot_results.items():
-                                    if isinstance(result_value, dict):
-                                        with ui.CollapsableFrame(
-                                            result_type, 
-                                            height=0,
-                                            style={"border_color": ui.color("#00c3ff")},
-                                            collapsed=False
-                                        ):
-                                            with ui.VStack(spacing=2):
-                                                for key, entropy in result_value.items():
-                                                    ui.Label(f"{key}: {entropy:.4f}")
-                                    else:
-                                        ui.Label(f"{result_type}: {result_value:.4f}")
+        for robot in self.robots:
+            with self.results_list:
+                with ui.VStack(spacing=5):
+                    if not self.robots:
+                        ui.Label("No robots selected")
+                    elif not self.percep_entr_results_data:
+                        ui.Label("Run analysis to see results")
+                    else:
+                        # For each robot, create a collapsible frame with its results
+                        for robot_name, robot_results in self.percep_entr_results_data.items():
+                            with ui.CollapsableFrame(
+                                    f"Robot: {robot_name}", 
+                                    height=0,
+                                    style={"border_width": 2, "color": ui.color("#0059ff"), "border_color": ui.color("#0059ff")},
+                                    collapsed=False
+                                ):
+                                # Check the type of the results, dict or float
+                                if isinstance(robot_results, float):
+                                    # If it's a float, just list the total entropy
+                                    ui.Label(f"Total Entropy: {robot_results:.4f}")
+                                elif isinstance(robot_results, tuple):
+                                    entropy, percent_coverage = robot_results
+                                    ui.Label(f"Total Entropy: {entropy:.4f}")
+                                    ui.Label(f"Total Entropy: {entropy:.4f}")
+                                elif isinstance(robot_results, dict):
+                                    # If it's a dict, iterate through the keys and values
+                                    with ui.VStack(spacing=5):
+                                        for result_type, result_value in robot_results.items():
+                                            if isinstance(result_value, dict):
+                                                with ui.CollapsableFrame(
+                                                    result_type, 
+                                                    height=0,
+                                                    style={"color": ui.color("#00c3ff"), "border_color": ui.color("#00c3ff")},
+                                                    collapsed=False
+                                                ):
+                                                    with ui.VStack(spacing=2):
+                                                        for key, entropy in result_value.items():
+                                                            ui.Label(f"{key}: {entropy:.4f}")
+                                            else:
+                                                ui.Label(f"{result_type}: {result_value:.4f}")
 
 
     def _get_prim_attribute(self, prim, attr_name, default_value=None):
@@ -2165,9 +2331,32 @@ class GO4RExtension(omni.ext.IExt):
         return measurements
 
 
-    def _optimize_robot():
+    def _optimize_robot(self):
         """Optimize the robot's sensor poses"""
-        raise NotImplementedError("Robot optimization is not implemented yet.")
+        if self.optimization_problem is None:
+            self._log_message("No optimization problem to solve.")
+            self.disable_ui_element(self.optimize_btn)
+            return
+        self._log_message("Optimizing robot...")
+
+        self.optimization_algorithm = MixedVariableGA(
+            pop_size=50,
+            n_offsprings=100,
+            sampling=CustomSensorPkgRandomSampling(),
+            survival=RankAndCrowdingSurvival(),
+            eliminate_duplicates=MixedVariableDuplicateElimination(),
+        )
+
+        res = minimize(self.optimization_problem,
+                       self.optimization_algorithm,
+                       ('n_gen', 300),
+                       seed=1,
+                       verbose=True)
+        self._log_message(f"Optimization result: {res}")
+        self._log_message(f"Best solution: {res.X}")
+        self._log_message(f"Best fitness: {res.F}")
+        self._log_message(f"Best objective: {res.CV}")
+        self._log_message("Optimization complete.")
     
     def on_results_pg_btn_clicked(self):
         """Open the results page"""

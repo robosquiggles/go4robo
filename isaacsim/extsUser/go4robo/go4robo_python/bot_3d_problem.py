@@ -8,19 +8,20 @@ import plotly.express as px
 import copy
 
 from pymoo.core.problem import ElementwiseProblem, Problem
-from pymoo.algorithms.moo.nsga2 import NSGA2
+from pymoo.algorithms.moo.nsga2 import NSGA2, RankAndCrowdingSurvival
 from pymoo.core.variable import Real, Integer, Choice, Binary
 from pymoo.core.mixed import MixedVariableMating, MixedVariableGA, MixedVariableSampling, MixedVariableDuplicateElimination
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.operators.sampling.rnd import Sampling, FloatRandomSampling
-from pymoo.operators.crossover.sbx import SBX
-from pymoo.operators.mutation.pm import PolynomialMutation
+from pymoo.operators.crossover.sbx import SBX #, MixedVariableTwoPointsCrossover
+from pymoo.operators.mutation.pm import PolynomialMutation #, MixedVariableGaussianMutation
 from pymoo.optimize import minimize
 from pymoo.indicators.hv import HV
 
+
 class SensorPkgOptimization(ElementwiseProblem):
 
-    def __init__(self, bot:Bot3D, sensor_options:list[Sensor3D|None], max_n_sensors:int=5, **kwargs):
+    def __init__(self, bot:Bot3D, sensor_options:list[Sensor3D|None], perception_space:PerceptionSpace, max_n_sensors:int=5, **kwargs):
         """
         Initializes the sensor package optimization problem.
 
@@ -44,17 +45,40 @@ class SensorPkgOptimization(ElementwiseProblem):
         self.bot.clear_sensors()
 
         # SENSORS
+        if isinstance(sensor_options, set):
+            sensor_options = list(sensor_options)
         if None not in sensor_options:
             sensor_options.insert(0, None)                    # This makes sure that we have a None option for the sensor
         self.sensor_options = dict(enumerate(sensor_options)) # This is the mapping of sensor type (enum) to sensor object
         self.max_n_sensors = max_n_sensors
 
+        # PERCEPTION SPACE
+        assert isinstance(perception_space, PerceptionSpace), "perception_space must be a PerceptionSpace object"
+        self.perception_space = perception_space
+
+        # SENSOR POSE CONSTRAINTS
+        if bot.sensor_pose_constraint is None:
+            print("WARNING: No sensor pose constraint provided. Defaulting to a 1m cube.")
+            self.s_bounds = np.array([[0, 1], [0, 1], [0, 1], [0, 1], [0, 1], [0, 1]]) # Default to a 1m cube
+        else:
+            if isinstance(bot.sensor_pose_constraint.bounds, list):
+                self.s_bounds = np.array(bot.sensor_pose_constraint.bounds)
+            elif isinstance(bot.sensor_pose_constraint.bounds, tuple):
+                self.s_bounds = np.array(bot.sensor_pose_constraint.bounds)
+            elif isinstance(bot.sensor_pose_constraint.bounds, np.ndarray):
+                self.s_bounds = bot.sensor_pose_constraint.bounds
+            elif isinstance(bot.sensor_pose_constraint.bounds, UsdGeom.Mesh):
+                self.s_bounds = np.array(bot.sensor_pose_constraint.bounds.GetExtent())
+            else:
+                raise ValueError("Invalid sensor pose constraint bounds type:", type(bot.sensor_pose_constraint.bounds))
+
+
         # PROBLEM VARIABLES
-        self.variables = dict()
-        self.s_bounds = np.array(bot.sensor_pose_constraint.bounds) 
+        variables = dict()
         for i in range(self.max_n_sensors):
             variables[f"s{i}_type"] = Integer(bounds=(0,len(self.sensor_options)-1))
-            variables[f"s{i}_tf"] = Real(bounds=(0, 1), shape=(3, 4)) 
+            for j in range(12):  # 3*4 = 12
+                variables[f"s{i}_tf_{j}"] = Real(bounds=(0, 1))
         self.n_var = len(variables)
 
         super().__init__(vars=variables, n_obj=2, **kwargs)
@@ -77,13 +101,13 @@ class SensorPkgOptimization(ElementwiseProblem):
         flat = flat[:12]  # Take only the first 12 elements (3x4 matrix)
         
         if dtype == dict:
-            return {f"tf_{i}": tf[i] for i in range(len(tf))}
+            return {f"tf_{i}": tf[i] for i in range(12)}
         elif dtype == np.ndarray or dtype == np.array or dtype == list:
             return tf
         else:
             raise ValueError("Invalid dtype:", dtype)
         
-    def convert_1D_to_4dtf(self, tf_1D:np.ndarray|list|tuple, dtype=np.ndarray):
+    def convert_1D_to_4dtf(self, tf_1D:np.ndarray|list|tuple):
         """
         Converts a 1D representation of a transformation matrix back to a 4x4 matrix.
         The translation portion of the matrix is denormalized using the bounds of the sensor pose constraint.
@@ -91,18 +115,13 @@ class SensorPkgOptimization(ElementwiseProblem):
         The last row (containing only the scaling information) is added back to get a 4x4 matrix.
         Parameters:
             tf_1D (np.ndarray|list|tuple): The 1D representation of the transformation matrix.
-            dtype (type): The desired output type (e.g., np.ndarray, list).
         Returns:
             A 4x4 transformation matrix.
         """
-        tf = TF.unflatten_matrix(tf_1D)
-        
-        if dtype == dict:
-            return {f"tf_{i}": tf[i] for i in range(len(tf))}
-        elif dtype == np.ndarray or dtype == np.array or dtype == list:
-            return tf
-        else:
-            raise ValueError("Invalid dtype:", dtype)
+        if isinstance(tf_1D, dict):
+            tf_1D = np.array(list(tf_1D.values()))
+        assert len(tf_1D) == 12, "tf_1D must be of length 12"
+        return TF.unflatten_matrix(tf_1D)
 
     def convert_sensor_instance_to_1D(self, sensor_instance:Sensor3D_Instance|None, idx:int, dtype=np.ndarray, verbose=False):
         """
@@ -134,14 +153,18 @@ class SensorPkgOptimization(ElementwiseProblem):
         
         if sensor_instance is not None:
             x = {
-                f"s{idx}_type": get_sensor_key(sensor_instance),
-                f"s{idx}_tf": self.convert_4dtf_to_1D(sensor_instance.get_transform(), dtype=dtype),
+                f"s{idx}_type": get_sensor_key(sensor_instance)
             }
+
+            tf_to_1D = self.convert_4dtf_to_1D(sensor_instance.get_transform(), dtype=dict)
+            for k, v in tf_to_1D.items():
+                x[f"s{idx}_{k}"] = v
         else:
             x = {
-                f"s{idx}_type": 0,
-                f"s{idx}_tf": 0,
+                f"s{idx}_type": 0
             }
+            for j in range(12):
+                x[f"s{idx}_tf_{j}"] = 0.0
 
         if dtype == dict:
             return x
@@ -150,7 +173,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         else:
             raise ValueError("Invalid dtype:", dtype)
     
-    def convert_1D_to_sensor(self, x:dict|np.ndarray|list, idx:int, verbose=False) -> Sensor3D_Instance|None:
+    def convert_1D_to_sensor_instance(self, x:dict|np.ndarray|list, idx:int, verbose=False) -> Sensor3D_Instance|None:
         """
         Converts a 1D representation of a sensor to a sensor object.
         Args:
@@ -166,7 +189,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         if type(x) is dict:
             sensor_type = x[f"s{idx}_type"]
-            tf = x[f"s{idx}_tf"]
+            tf = {k: v for k, v in x.items() if k.startswith(f"s{idx}_tf_")}
         else:
             sensor_type = x[idx * 2]
             tf = x[idx * 2 + 1]
@@ -240,7 +263,7 @@ class SensorPkgOptimization(ElementwiseProblem):
             xs = [{k: v for k, v in x.items() if k.startswith(f"s{i}_")} for i in range(0, self.max_n_sensors)]
         if verbose:
             print("Convert 1d->bot (xs):", xs)
-        bot.add_sensors_2d([self.convert_1D_to_sensor(x, i) for i, x in enumerate(xs)])
+        bot.sensors = [self.convert_1D_to_sensor_instance(x, i) for i, x in enumerate(xs)]
         return bot
 
 
@@ -249,7 +272,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         bot = self.convert_1D_to_bot(x)
         if bot.get_design_validity():
             out["F"] = [
-                bot.calculate_perception_entropy(),  # minimize perception entropy
+                bot.calculate_perception_entropy(self.perception_space),  # minimize perception entropy
                 bot.calculate_cost()              # minimize cost as is
                 ]
         else:
@@ -295,7 +318,8 @@ class CustomSensorPkgRandomSampling(Sampling):
             sample_dict = {}
             for j in range(n_sensors):
                 sample_dict[f"s{j}_type"] = sensor_types[i, j]
-                sample_dict[f"s{j}_tf"] = sensor_tfs[i, j]
+                for k in range(12):
+                    sample_dict[f"s{j}_tf_{k}"] = sensor_tfs[i, j, k]
             X.append(sample_dict)
 
         # TODO batch convert to bots and filter down to valid ones

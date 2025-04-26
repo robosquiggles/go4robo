@@ -184,6 +184,8 @@ class TF:
     def unflatten_matrix(flat_matrix):
         """Unflatten a 1D array to a 4x4 transformation matrix. Matrix must be 12 or 16 elements.
         If 12 elements, the last row is assumed to be [0 0 0 1], and it is added to the matrix."""
+        if isinstance(flat_matrix, dict):
+            flat_matrix = np.array(list(flat_matrix.values()))
         if not isinstance(flat_matrix, np.ndarray):
             flat_matrix = np.array(flat_matrix)
         if len(flat_matrix) == 12:
@@ -413,9 +415,11 @@ class PerceptionSpace:
             voxel_group_name (str): The name of the voxel group.
             weight (float): The weight of the voxel group.
         """
-        index = torch.where(self.voxel_groups == voxel_group_name)[0]
-        if index.size(0) > 0:
-            self.weights[index] = weight
+        indices = np.where(self.voxel_groups == voxel_group_name)
+        if len(indices) > 1:
+            raise ValueError(f"Multiple voxel groups with the same name {voxel_group_name} found.")
+        elif len(indices) == 1:
+            self.weights[indices[0]] = weight
         else:
             raise ValueError(f"Voxel group {voxel_group_name} not found.")
         
@@ -513,8 +517,7 @@ class Sensor3D:
         self.min_range = min_range
         self.cost = cost
         self.name = name
-        self.type = type
-        self.body = body
+        self.body = body # The body of the sensor is saved relative to the xform
         if isinstance(focal_point, (list, tuple)):
             self.focal_point = np.array([[1, 0, 0, focal_point[0]],
                                          [0, 1, 0, focal_point[1]],
@@ -524,6 +527,21 @@ class Sensor3D:
             self.focal_point = focal_point
 
         self.ap_constants = ap_constants
+
+    def __eq__(self, other) -> bool:
+        """Check if two Sensor3D objects are equal based on just their subclass type and their name."""
+        if not isinstance(other, self.__class__):
+            # don't attempt to compare against unrelated types
+            return NotImplemented
+
+        return self.name == other.name and self.h_fov == self.h_fov and self.h_res == self.h_res and self.v_fov == self.v_fov and self.v_res == self.v_res and self.max_range == self.max_range and self.min_range == self.min_range and self.cost == self.cost
+    
+    def __hash__(self):
+        # Hash by class and name (customize as needed)
+        return hash((self.__class__, self.name, self.h_fov, self.h_res, self.v_fov, self.v_res, self.max_range, self.min_range, self.cost))
+    
+    def __repr__(self):
+        return f"{self.__class__.__name__}(name={self.name}, h_fov={self.h_fov}, h_res={self.h_res}, v_fov={self.v_fov}, v_res={self.v_res}, max_range={self.max_range}, min_range={self.min_range}, cost={self.cost})"
 
     def get_properties_dict(self):
         properties = {}
@@ -698,8 +716,8 @@ class Sensor3D_Instance:
     def __init__(self,
                  sensor:Sensor3D,
                  path:str,
-                 usd_context:omni.usd.UsdContext,
                  tf:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 usd_context:omni.usd.UsdContext=None,
                  name:str|None=None,
                  ):
         """Initialize a new instance of the class.
@@ -714,12 +732,25 @@ class Sensor3D_Instance:
         self.tf = tf
 
         self.usd_context = usd_context
-        self.stage = self.usd_context.get_stage()
-        self.path = path
+        if self.usd_context is not None:
+            self.stage = usd_context.get_stage()
+        else:
+            self.stage = None
+        self.path = str(path)
 
         self.ray_casters = []
-        self.ray_casters = self.create_ray_casters()
-        self.body = self.create_sensor_body(sensor.body)
+        self.body = None
+
+        if self.usd_context is not None:
+            self.ray_casters = self.create_ray_casters()
+            self.body = self.create_sensor_body(sensor.body)
+
+
+    def replace_sensor(self, sensor:Sensor3D):
+        """Replace the sensor in the instance with a new sensor. This will also replace the ray casters."""
+        self.sensor = sensor
+        # self.ray_casters = self.create_ray_casters() # Don't replace the ray casters because they should be the same
+        # self.body = self.create_sensor_body(sensor.body) # Don't replace the body because isaac sim needs it
         
 
     def create_sensor_body(self, body:UsdGeom.Mesh):
@@ -1044,6 +1075,34 @@ class Bot3D:
         
         # TODO Remove self.body from any of the sensor_coverage_requirement meshes
 
+    def __deepcopy__(self, memo):
+        # Helper to shallow-copy lists/dicts containing USD objects
+        def safe_copy(obj):
+            # Always shallow-copy USD objects
+            if isinstance(obj, (Sdf.Path, Usd.Prim, Usd.Stage)):
+                return obj
+            # If it's a list, shallow-copy any USD objects inside
+            elif isinstance(obj, list):
+                return [safe_copy(item) for item in obj]
+            # If it's a dict, shallow-copy any USD objects inside
+            elif isinstance(obj, dict):
+                return {safe_copy(k): safe_copy(v) for k, v in obj.items()}
+            # If it's a tuple, shallow-copy any USD objects inside
+            elif isinstance(obj, tuple):
+                return tuple(safe_copy(item) for item in obj)
+            # Otherwise, use deepcopy
+            else:
+                try:
+                    return copy.deepcopy(obj, memo)
+                except Exception:
+                    return obj  # fallback: shallow copy if deepcopy fails
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            setattr(result, k, safe_copy(v))
+        return result
+
     def get_sensors_by_type(self, sensor_type:Type[Sensor3D]) -> list[Sensor3D_Instance]:
         sensor_instances = []
         for sensor_instance in self.sensors:
@@ -1057,6 +1116,19 @@ class Bot3D:
             if sensor_instance.sensor.name == name:
                 sensor_instances.append(sensor_instance)
         return sensor_instances
+    
+    def get_unique_sensor_options(self):
+        """Returns a list of all the unique sensors in the bot. These can be used as discreet sensor options in an optimization.
+        This list is determined by the object type, and the sensor name.
+        For example, if the bot has a Lidar3D sensor and a MonoCamera3D sensor, the list will contain two options: Lidar3D and MonoCamera3D.
+        If the bot has two Lidar3D sensors with the same name, the list will only contain one option: a Lidar3D with the name."""
+        
+        return set([s.sensor for s in self.sensors])
+
+    def clear_sensors(self):
+        """Clears all the sensors from the bot."""
+        self.sensors = []
+        self.ray_casters = []
     
     def get_ray_casters(self):
         """Returns a list of all the ray casters in the bot."""
@@ -1307,6 +1379,11 @@ class Bot3D:
         
         early_fusion_ms = torch.cat(early_fusion_ms, dim=1)  # shape (N, S_types)
         print(f"early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S_types)")  if verbose else None
+
+        # Calculate the percent of the voxels that are covered by any sensor
+        covered_voxels = torch.sum(early_fusion_ms > 0, dim=1) # shape (N,)
+        num_voxels = early_fusion_ms.shape[0]
+        self.perception_coverage_percentage = torch.sum(covered_voxels > 0).item() / num_voxels
         
         # Calculate the sensor AP for each voxel, where AP = a ln(m) + b
         # This is a tensor of shape (N, S) where N is the number of voxels, and S is the number of sensors.
@@ -1330,7 +1407,9 @@ class Bot3D:
         print(f"{self.name} perception entropy calculated in {time.time() - start_time:.2f} seconds!!")
         print(f"  entropy: {entropy}")
 
-        return entropy
+        self.perception_entropy = entropy.item()
+
+        return self.perception_entropy, self.perception_coverage_percentage
     
     def calculate_cost(self):
         """
@@ -1362,7 +1441,7 @@ class Bot3D:
         
         print("Checking design validity...") if verbose else None
         print("WARNING: Design validity check is not yet implemented! Returns True.") 
-        
+
         #TODO Implement this the rest of the way. Much of this code was generated by OpenAI's GPT 4.1 Preview as inspo.
         return True
 
