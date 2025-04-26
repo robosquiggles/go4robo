@@ -19,6 +19,17 @@ from pymoo.optimize import minimize
 from pymoo.indicators.hv import HV
 
 
+from tqdm import tqdm
+
+class ProgressBarCallback:
+    def __init__(self, n_gen):
+        self.pbar = tqdm(total=n_gen, desc="Optimization Progress")
+    def notify(self, algorithm):
+        self.pbar.update(1)
+    def close(self):
+        self.pbar.close()
+
+
 class SensorPkgOptimization(ElementwiseProblem):
 
     def __init__(self, bot:Bot3D, sensor_options:list[Sensor3D|None], perception_space:PerceptionSpace, max_n_sensors:int=5, **kwargs):
@@ -273,9 +284,10 @@ class SensorPkgOptimization(ElementwiseProblem):
         # print("In EVALUATE, eavulating:", x)
         bot = self.convert_1D_to_bot(x)
         if bot.get_design_validity():
+            pe, cov = bot.calculate_perception_entropy(self.perception_space)
             out["F"] = [
-                bot.calculate_perception_entropy(self.perception_space),  # minimize perception entropy
-                bot.calculate_cost()              # minimize cost as is
+                pe,                  # minimize perception entropy
+                bot.calculate_cost() # minimize cost as is
                 ]
         else:
             out["F"] = [

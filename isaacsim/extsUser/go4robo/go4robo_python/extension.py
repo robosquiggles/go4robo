@@ -2352,23 +2352,29 @@ class GO4RExtension(omni.ext.IExt):
         self._log_message("Optimizing robot...")
 
         self.optimization_algorithm = MixedVariableGA(
-            pop_size=50,
-            n_offsprings=100,
+            pop_size=5,
+            n_offsprings=5,
             sampling=CustomSensorPkgRandomSampling(),
             survival=RankAndCrowdingSurvival(),
             eliminate_duplicates=MixedVariableDuplicateElimination(),
         )
 
+        n_gen = 5
+
+        progress_callback = ProgressBarCallback(n_gen)
+
         res = minimize(self.optimization_problem,
                        self.optimization_algorithm,
-                       ('n_gen', 300),
+                       ('n_gen', n_gen),
                        seed=1,
+                       callback=progress_callback.notify,
                        verbose=True)
         self._log_message(f"Optimization result: {res}")
         self._log_message(f"Best solution: {res.X}")
         self._log_message(f"Best fitness: {res.F}")
         self._log_message(f"Best objective: {res.CV}")
         self._log_message("Optimization complete.")
+        progress_callback.close()
     
     def on_results_pg_btn_clicked(self):
         """Open the results page"""

@@ -34,5 +34,5 @@ entry_point = "go4robo_python.extension:PerceptionEntropyExtension"
 name = "go4robo_python"
 
 [python.pipapi]
-requirements = ["pymoo", "scipy", "pandas", "dash", "dash_bootstrap_components"]
+requirements = ["pymoo", "scipy", "pandas", "dash", "dash_bootstrap_components", "tqdm"]
 use_online_index = true
