@@ -479,7 +479,7 @@ class PerceptionSpace:
             # v_hits.cpu() # Move back to CPU if needed
 
         torch.cuda.empty_cache()
-        print(f"Batch ray voxel intersectiontraversal took {time.time() - start_time:.2f} seconds for {num_rays} rays and {num_voxels} voxels.")
+        print(f"Batch ray voxel intersection traversal took {time.time() - start_time:.2f} seconds for {num_rays} rays and {num_voxels} voxels.")
 
         return v_hits  # Shape: (N,), hits for each voxel
 

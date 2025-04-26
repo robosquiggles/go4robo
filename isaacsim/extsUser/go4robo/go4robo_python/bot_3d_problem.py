@@ -197,7 +197,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         if verbose:
             print("Convert 1d->sensor X:", x)
         
-        if sensor_type in self.sensor_options:
+        if sensor_type > 0 and sensor_type in self.sensor_options: # 0 is None
             sensor = self.sensor_options[sensor_type]
             sensor_instance = Sensor3D_Instance(sensor=sensor,
                                                 name=f"sensor_{idx}",
@@ -264,6 +264,8 @@ class SensorPkgOptimization(ElementwiseProblem):
         if verbose:
             print("Convert 1d->bot (xs):", xs)
         bot.sensors = [self.convert_1D_to_sensor_instance(x, i) for i, x in enumerate(xs)]
+        while None in bot.sensors:
+            bot.sensors.remove(None)
         return bot
 
 
