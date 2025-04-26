@@ -24,9 +24,13 @@ import torch
 from scipy.optimize import minimize as scipy_minimize
 from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearConstraint
 
+from scipy.spatial.transform import Rotation as R
+
 import omni
 import omni.physx as physx
 import omni.isaac.core.utils.prims as prim_utils
+import isaacsim.core.utils.transformations as tf_utils
+
 
 
 try:
@@ -424,7 +428,7 @@ class PerceptionSpace:
             raise ValueError(f"Voxel group {voxel_group_name} not found.")
         
     
-    def batch_ray_voxel_intersections(self, ray_origins:torch.Tensor, ray_directions:torch.Tensor, batch_size:int=1000) -> torch.Tensor:
+    def batch_ray_voxel_intersections(self, ray_origins:torch.Tensor, ray_directions:torch.Tensor, batch_size:int=20000) -> torch.Tensor:
         """
         Check if the rays intersect with the voxels in the voxel groups.
         Args:
@@ -474,6 +478,7 @@ class PerceptionSpace:
 
             # v_hits.cpu() # Move back to CPU if needed
 
+        torch.cuda.empty_cache()
         print(f"Batch ray voxel intersectiontraversal took {time.time() - start_time:.2f} seconds for {num_rays} rays and {num_voxels} voxels.")
 
         return v_hits  # Shape: (N,), hits for each voxel
@@ -778,7 +783,6 @@ class Sensor3D_Instance:
     def create_ray_casters(self, disable=False):
         """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
         import omni.kit.commands
-        import isaacsim.core.utils.transformations as tf_utils
         import isaacsim.core.utils.xforms as xforms_utils
 
         def tree_search(prim, name):
@@ -907,32 +911,32 @@ class Sensor3D_Instance:
         """Returns (ray_origins, ray_directions) for this sensor instance, vectorized with torch."""
 
         start_time = time.time()
+        torch.cuda.empty_cache()
+
+        sensors = [self.sensor] if not isinstance(self.sensor, StereoCamera3D) else [self.sensor.sensor1, self.sensor.sensor2]
+        tfs = [self.tf] if not isinstance(self.sensor, StereoCamera3D) else [self.sensor.tf_1, self.sensor.tf_2]
 
         ray_origins_list = []
         ray_directions_list = []
 
-        for i, ray_caster in enumerate(self.ray_casters, start=1):
+        for i, sensor in enumerate(sensors):
             # # Get the ray information from the ray caster object
             # hfov = ray_caster.GetAttribute("horizontalFov").Get() # degrees
             # vfov = ray_caster.GetAttribute("verticalFov").Get() # degrees
             # hres = int(hfov / ray_caster.GetAttribute("horizontalResolution").Get()) # number of rays, horizontal
             # vres = int(vfov / ray_caster.GetAttribute("verticalResolution").Get()) # Number of rays, vertical
 
-            # Get the ray information from the sensor object
-            if hasattr(self.sensor, f"sensor{i}") and len(self.ray_casters) > 1:
-                # Stereo camera case
-                sensor = getattr(self.sensor, f"sensor{i}")
-            else:
-                # Mono camera or lidar case
-                sensor = self.sensor
             hfov = sensor.h_fov
             vfov = sensor.v_fov
             hres = int(sensor.h_fov / sensor.h_res) # number of rays, horizontal
             vres = int(sensor.v_fov / sensor.v_res) # number of rays, vertical
 
-            world_tf = self.get_world_transform()
-            position = torch.tensor(world_tf.ExtractTranslation(), dtype=torch.float32, device=device)
-            rotation = torch.tensor(world_tf.ExtractRotationMatrix(), dtype=torch.float32, device=device)
+            position, rotation_q = tf_utils.pose_from_tf_matrix(tfs[i]) # position is simple x,y,z, rotation_q is w,x,y,z QUATERNION
+
+            rotation = R.from_quat(rotation_q).as_matrix() # Convert quaternion to rotation matrix
+            
+            position = torch.tensor(position, dtype=torch.float32, device=device) # Simple x,y,z
+            rotation = torch.tensor(rotation, dtype=torch.float32, device=device) # Rotation matrix
 
             # Generate grid of angles
             h_angles = torch.linspace(-hfov/2, hfov/2, hres, device=device) #* (np.pi/180)
@@ -961,7 +965,9 @@ class Sensor3D_Instance:
         ray_origins = torch.cat(ray_origins_list, dim=0).to(device)
         ray_directions = torch.cat(ray_directions_list, dim=0).to(device)
 
-        print(f"Ray origins and directions for {self.name} calculated in {time.time() - start_time:.2f} sec.")
+        torch.cuda.empty_cache()
+
+        print(f"Ray origins and directions for {self.name} calculated in {time.time() - start_time:.3f} sec.")
 
         return ray_origins, ray_directions
 
@@ -1165,7 +1171,7 @@ class Bot3D:
         return self.stage.GetPrimAtPath(self.path)
 
     def get_world_transform(self) -> Tuple[Gf.Vec3d, Gf.Rotation]:
-        """Get the world transform (position and rotation) of a prim"""
+        """Get the world transform of a prim"""
         xform = UsdGeom.Xformable(self.get_prim())
         world_transform = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         

@@ -11,6 +11,7 @@ from omni.kit.menu.utils import add_menu_items, remove_menu_items
 from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade, PhysxSchema
 import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
+import isaacsim.core.utils.transformations as tf_utils
 from isaacsim.sensors.physx import _range_sensor
 
 import asyncio
@@ -23,6 +24,7 @@ import carb
 import time
 
 import torch
+torch.cuda.empty_cache()
 
 import re
 
@@ -805,7 +807,7 @@ class GO4RExtension(omni.ext.IExt):
             """Remove trailing underscore+digits from a name, if they are present, using re"""
             return re.sub(r'(_\d+)?$', '', name)
 
-        def _find_camera(prim:Usd.Prim, sensor_list=None) -> Sensor3D_Instance:
+        def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find cameras that are descendants of the selected robot"""
 
             # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
@@ -872,7 +874,7 @@ class GO4RExtension(omni.ext.IExt):
                     cam3d_instance = Sensor3D_Instance(cam3d, 
                                                        path=prim.GetPath(), 
                                                        name=_remove_trailing_digits(name), 
-                                                       tf=self._get_robot_to_sensor_transform(prim, robot_prim),
+                                                       tf=tf_utils.get_relative_transform(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
                                                        usd_context=self._usd_context)
                     # self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
@@ -921,7 +923,7 @@ class GO4RExtension(omni.ext.IExt):
                     lidar_instance = Sensor3D_Instance(lidar, 
                                                        path=prim.GetPath(), 
                                                        name=_remove_trailing_digits(name), 
-                                                       tf=self._get_robot_to_sensor_transform(prim, robot_prim),
+                                                       tf=tf_utils.get_relative_transform(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
                                                        usd_context=self._usd_context)
                     # self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
@@ -1056,7 +1058,7 @@ class GO4RExtension(omni.ext.IExt):
                                 # Case-insensitive comparison
                                 if sensor_instance.name.lower() == other_cam_name.lower():
                                     # Found the other camera, create a stereo camera
-                                    self._log_message(f"Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
+                                    self._log_message(f" Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
                                     self._log_message(f"  Path 1: {this_cam_path_str}")
                                     self._log_message(f"  Path 2: {sensor_instance.path}")
                                     # Find the common parent of the two cameras based on the paths
@@ -1073,12 +1075,22 @@ class GO4RExtension(omni.ext.IExt):
                                     if common_parent_name.endswith("_XX"):
                                         common_parent_name = common_parent_name[:-3]
 
+                                    # Get the prims to get all the transforms
+                                    bot_prim = prim_utils.get_prim_at_path(prim_path=bot.path)
+                                    s1_prim = prim_utils.get_prim_at_path(prim_path=this_cam_path_str if this_cam_role == "left" else sensor_instance.path)
+                                    s2_prim = prim_utils.get_prim_at_path(prim_path=sensor_instance.path if this_cam_role == "left" else this_cam_path_str)
+
+                                    # Get the transforms: robot --> common parent --> cameras
+                                    tf_parent = tf_utils.get_relative_transform(source_prim=bot_prim, target_prim=common_parent_prim) # This is the transform from the robot to the common parent to be used for the stereo camera INSTANCE
+                                    tf_sensor1 = tf_utils.get_relative_transform(source_prim=common_parent_prim, target_prim=s1_prim) # This is the relative transform from the common parent to the left camera
+                                    tf_sensor2 = tf_utils.get_relative_transform(source_prim=common_parent_prim, target_prim=s2_prim) # This is the relative transform from the common parent to the right camera
+
                                     stereo_cam = StereoCamera3D(
                                         name=_remove_trailing_digits(common_parent_name),
-                                        sensor1=sensor_instance.sensor if this_cam_role == "left" else camera.sensor,
-                                        sensor2=sensor_instance.sensor if this_cam_role == "right" else camera.sensor,
-                                        tf_sensor1=sensor_instance.tf if this_cam_role == "left" else camera.tf,
-                                        tf_sensor2=sensor_instance.tf if this_cam_role == "right" else camera.tf,
+                                        sensor1=camera.sensor, # Set both to the same camera instance because the only difference is the transform
+                                        sensor2=camera.sensor,
+                                        tf_sensor1=tf_sensor1, # This is the transform from the common parent to the left camera
+                                        tf_sensor2=tf_sensor2, # This is the transform from the common parent to the right camera
                                         cost=sensor_instance.sensor.cost + camera.sensor.cost,
                                         body=_find_sensor_body(prim)
                                     )
@@ -1096,7 +1108,7 @@ class GO4RExtension(omni.ext.IExt):
                                     stereo_instance = Sensor3D_Instance(stereo_cam, 
                                                                         path=common_parent_path, 
                                                                         name=_remove_trailing_digits(common_parent_name), 
-                                                                        tf=camera.tf,
+                                                                        tf=tf_parent,
                                                                         usd_context=self._usd_context)
                                     # Move the ray casters from the MonoCamera3D instance to the StereoCamera3D instance
                                     stereo_instance.ray_casters = sensor_instance.ray_casters + camera.ray_casters
