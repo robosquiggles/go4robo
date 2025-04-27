@@ -1395,7 +1395,7 @@ class GO4RExtension(omni.ext.IExt):
                         
                         def _update_total_designs():
                                 self.total_possible_designs = self.optimization_population_size + self.optimization_offspring * self.optimization_generations
-                                self.total_designs_field.text = f"(Generates up to {self.total_possible_designs} total designs)"
+                                self.total_designs_field.text = f"(Generates ~{self.total_possible_designs} total designs)"
 
                         with ui.VStack(spacing=5):
                             for key, width in header.items():
@@ -1436,7 +1436,7 @@ class GO4RExtension(omni.ext.IExt):
 
                                             self.pop_size_field.model.add_value_changed_fn(on_pop_size_val_changed)
 
-                            self.total_designs_field = ui.Label(f"(Generates up to {self.total_possible_designs} total designs)")
+                            self.total_designs_field = ui.Label(f"(Generates ~{self.total_possible_designs} total designs)")
                             _update_total_designs()
 
                             
@@ -2441,40 +2441,50 @@ class GO4RExtension(omni.ext.IExt):
         
         progress_callback.close()
 
-        pareto_front = get_pareto_front(pop_df)
+        self.on_optimization_results(res, pop_df)
 
-        # Make the df and the plot available to the dash app
-        pop_df_json = pop_df.to_json(orient='split')
-        dash_app.app.layout['pop-df-store'].data = pop_df_json #TODO does this work?
-        # dash_app.app.callback_map['pop-df-store.data']['callback'](pop_df_json)
+        pareto_front = get_pareto_front(pop_df)
 
         self._log_message("Optimization complete.")
         self._log_message(f"{len(pareto_front)} Pareto optimal designs found.")
-        self.on_optimization_results()
+        
 
     
-    def on_optimization_results(self):
+    def on_optimization_results(self, res, pop_df):
         """Open the results page"""
-        self._log_message("Opening results page...")
-        self.enable_ui_element(self.results_pg_btn)
 
         def _run_dash_app():
             dash_app.app.run(debug=True, use_reloader=False)
+            self._log_message("Dash app running...")
+
+        def _update_dash_app():
+            # Update the dash app with the new data
+            dash_app.app.layout['pop-df-store'].data = pop_df.to_json(orient='split')
+            dash_app.app.layput = dash_app.build_layout()
+            self._log_message("Dash app updated with new data.")
+
+        def _stop_dash_app():
+            import psutil
+            import subprocess
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                if 'python' in proc.info['name'] and 'dash' in ' '.join(proc.info['cmdline']):
+                    proc.terminate()
+                    proc.wait()
+            self._log_message("Dash app stopped.")
         
         async def _launch_dash():
             """Render the dash app webpage"""
-            import urllib.request
+            _update_dash_app()
 
-            # Check if the server is running
+            import urllib.request
             try:
                 with urllib.request.urlopen(dash_app.url, timeout=1) as response:
                     if response.status == 200:
-                        self._log_message(f"Dash app is already running at {dash_app.url}")
-            except Exception:
-                # If the server is not running, start it
-                self._log_message(f"Starting Dash app at {dash_app.url}")
+                        self._log_message(f"Dash app is reachable at {dash_app.url}")
+            except urllib.error.URLError as e:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, _run_dash_app)
+                self._log_message(f"Dash app is now reachable at {dash_app.url}")
 
         asyncio.ensure_future(_launch_dash())
 

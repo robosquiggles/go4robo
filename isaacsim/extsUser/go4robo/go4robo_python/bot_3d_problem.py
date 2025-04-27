@@ -594,7 +594,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
         height=height, width=width,
         legend=dict(
             # orientation="h",
-            yanchor="Top",
+            yanchor="top",
             y=0,
             xanchor="right",
             x=1
