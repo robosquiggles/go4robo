@@ -31,6 +31,7 @@ plt.style.use('ggplot')
 plt.rcParams['axes.facecolor'] = 'white'
 plt.rcParams['font.family'] = 'Arial' 
 
+df = pd.DataFrame()
 
 dbc_css = "https://cdn.jsdelivr.net/gh/AnnMarieW/dash-bootstrap-templates/dbc.min.css"
 app = Dash(__name__, 
@@ -63,6 +64,35 @@ def update_results(pop_df_json):
     
     return data, columns, figure
 
+@app.callback(
+    Output("download", "data"),
+    Input("btn_csv", "n_clicks"),
+    State("dropdown", "value"),
+    State("pop-df-store", "data"),
+    prevent_initial_call=True,
+)
+def download_results(n_clicks_btn, download_type, pop_df_json):
+    if pop_df_json is None:
+        return None  # No data to download
+
+    # Deserialize the DataFrame from the JSON store
+    df = pd.read_json(StringIO(pop_df_json), orient='split')
+
+    # Convert the DataFrame to the requested format
+    filename = "generated_designs"
+    match download_type:
+        case "csv":
+            return dcc.send_data_frame(df.to_csv, f"{filename}.csv")
+        case "excel":
+            return dcc.send_data_frame(df.to_excel, f"{filename}.xlsx")
+        case "json":
+            return dcc.send_data_frame(df.to_json, f"{filename}.json")
+        case "npy":
+            return dcc.send_data_frame(df.to_numpy, f"{filename}.npy")
+        case "pickle":
+            return dcc.send_data_frame(df.to_pickle, f"{filename}.pkl")
+    
+
 def build_layout():
     return  html.Div([
         dbc.Container([
@@ -87,7 +117,7 @@ def build_layout():
                 id='tradespace-plot',
                 figure=go.Figure()
             ),
-            html.H2("Population DataFrame"),
+            html.H2("Design Population"),
             dcc.Store(id='pop-df-store', data=None),  # Store for the DataFrame
             dash_table.DataTable(
                 id='pop-df-table',
@@ -96,6 +126,22 @@ def build_layout():
                 page_size=25,
                 style_table={'overflowX': 'auto'},
             ),
+            dcc.Download(id="download"),
+            dbc.Col([
+                dcc.Dropdown(options=[
+                                {"label": "Numpy file", "value": "npy"},
+                                # {"label": "Pickle file", "value": "pickle"},
+                                {"label": "JSON file", "value": "json"},
+                                # {"label": "Excel file", "value": "xlsx"},
+                                {"label": "CSV file", "value": "csv"},
+                            ],
+                            id="dropdown",
+                            placeholder="Choose download file type. Default is CSV format!",
+                ),
+                dbc.Button(
+                            "Download Data", id="btn_csv"
+                        ),
+            ])
         #     dbc.Accordion(
         #     [
         #         dbc.AccordionItem(

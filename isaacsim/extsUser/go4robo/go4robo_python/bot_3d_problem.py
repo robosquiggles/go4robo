@@ -54,8 +54,9 @@ class ProgressBar:
 import pandas as pd
 
 class DesignRecorder:
-    def __init__(self):
+    def __init__(self, max_sensors:int=5):
         self.records = []
+        self.max_sensors = max_sensors
 
     def notify(self, algorithm):
         # Get the current population's variables and objectives
@@ -76,33 +77,31 @@ class DesignRecorder:
     def to_dataframe(self):
         # Convert to DataFrame for analysis/plotting
         df = pd.DataFrame(self.records)
-        df = self.expand_designs_into_df(df)
         df["Index"] = df.index
         df["Name"] = df["Index"].map(lambda x: f"Design {x}")
         # Reorder columns to put Index and Name at the beginning
         cols = ["Index", "Name"] + [col for col in df.columns if col not in ["Index", "Name"]]
         df = df[cols]
+        df = self.expand_designs_into_df(df)
         return df
     
-    def expand_designs_into_df(self, df):
-
-        def expand_design(row):
-            # Convert the design dict into a list of values
-            # For each sensor, we have a type and a tf (3x4 matrix)
-
-            # For now just show the number of sensor in the design
-            
-            return [row["design"][f"s{i}_type"] for i in range(n_sensors)]
+    def expand_designs_into_df(self, df, sensor_list=None):
 
         # Expand the design dict into separate columns
-        a_design_dict = df["design"].iloc[0]
-        n_sensors = int(len(a_design_dict.keys()) / 13)
-        for i in range(1, n_sensors + 1):
-            df[f"Sensor {i}"] = df.apply(lambda row: row["design"].get(f"s{i-1}_type", None), axis=1)
-            # for j in range(12):
-            #     df[f"Sensor {i} tf_{j}"] = df.apply(lambda row: row["design"].get(f"s{i-1}_tf_{j}", None), axis=1)
+        for i in range(0, self.max_sensors):
+            df[f"s{i}"] = df.apply(lambda row: row["design"].get(f"s{i}_type", None), axis=1)
+            for j in range(12):
+                df[f"s{i}_tf_{j}"] = df.apply(lambda row: row["design"].get(f"s{i}_tf_{j}", None), axis=1)
         # Drop the original design column
         df = df.drop(columns=["design"])
+        return df
+    
+    def squash_df_into_designs(self, df):
+        sensors = [f"s{i}" for i in range(0, self.max_sensors)]
+        # Squash the design dict into a single column
+        df["design"] = df.apply(lambda row: {k: row[k] for k in row.keys() if any([k.startswith(s) for s in sensors])}, axis=1)
+        # Drop the individual sensor columns
+        df = df.drop(columns=[col for col in df.columns if any([k.startswith(s) for s in sensors])])
         return df
 
 
@@ -375,8 +374,8 @@ class SensorPkgOptimization(ElementwiseProblem):
                 np.inf,
                 np.inf
                 ]
-        if hasattr(self, "recorder_callback"):
-            self.recorder_callback.notify_single(x, out["F"], out["G"] if "G" in out else None)
+        # if hasattr(self, "recorder_callback"):
+        #     self.recorder_callback.notify_single(x, out["F"], out["G"] if "G" in out else None)
         self.n_evals += 1
 
         if 'verbose' in kwargs and kwargs['verbose']:
@@ -428,28 +427,61 @@ class CustomSensorPkgRandomSampling(Sampling):
         return X
         
 
-def get_pareto_front(df, x='Cost', y='Perception Entropy'):
+def get_pareto_front(df, x='Cost', y='Perception Entropy', x_minimize=True, y_minimize=True):
+    """
+    Get the Pareto front for a given DataFrame, considering whether to minimize or maximize each objective.
+
+    Args:
+        df (pd.DataFrame): The DataFrame containing the data.
+        x (str): The column name for the first objective.
+        y (str): The column name for the second objective.
+        x_minimize (bool): Whether to minimize the first objective (True) or maximize it (False).
+        y_minimize (bool): Whether to minimize the second objective (True) or maximize it (False).
+
+    Returns:
+        np.ndarray: The Pareto front points.
+        list: The indices of the Pareto front points in the original DataFrame.
+        tuple: The utopia point in (x, y).
+    """
     # Extract the relevant columns for the Pareto front
     points = df[[x, y]].values
-    
-    # Sort the points by the first objective (Perception Coverage)
+
+    # Adjust the points based on the minimization/maximization direction
+    if not x_minimize:
+        points[:, 0] = -points[:, 0]
+    if not y_minimize:
+        points[:, 1] = -points[:, 1]
+
+    # Sort the points by the first objective
     sorted_points = points[np.argsort(points[:, 0])]
-    
+
     # Initialize the Pareto front with the first point
     pareto_front = [sorted_points[0]]
-    indices = [0]
-    
+    indices = [df.index[np.where((df[[x, y]].values == sorted_points[0]).all(axis=1))[0][0]]]
+
     # Iterate through the sorted points and add to Pareto front if it dominates the previous point
     for point in sorted_points[1:]:
-        if point[1] > pareto_front[-1][1]:
+        if point[1] < pareto_front[-1][1]:  # Check for dominance
             pareto_front.append(point)
-            indices.append(df.loc[df[[x, y]].eq(point).all(axis=1)].index[0])
-    
-    return np.array(pareto_front), indices
+            indices.append(df.index[np.where((df[[x, y]].values == point).all(axis=1))[0][0]])
+
+    # Revert the points back to their original scale
+    pareto_front = np.array(pareto_front)
+    if not x_minimize:
+        pareto_front[:, 0] = -pareto_front[:, 0]
+    if not y_minimize:
+        pareto_front[:, 1] = -pareto_front[:, 1]
+
+    # Calculate the utopia point
+    utopia_x = pareto_front[:, 0].min() if x_minimize else pareto_front[:, 0].max()
+    utopia_y = pareto_front[:, 1].min() if y_minimize else pareto_front[:, 1].max()
+    utopia_point = (utopia_x, utopia_y)
+
+    return pareto_front, indices, utopia_point
 
 
 def get_hypervolume(df, ref_point, x='Cost', y='Perception Coverage', x_minimize=True, y_minimize=False):
-    pareto, idx = get_pareto_front(df, x=x, y=y)
+    pareto, idx, u = get_pareto_front(df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
     if not x_minimize:
         pareto[:, 0] = -pareto[:, 0]
     if not y_minimize:
@@ -507,6 +539,8 @@ def run_moo(problem:SensorPkgOptimization,
 def plot_tradespace(combined_df:pd.DataFrame, 
                     x=('Cost', '$'), 
                     y=('Perception Entropy', '-'), 
+                    x_minimize=True,
+                    y_minimize=True,
                     hover_name='Name',
                     show_pareto=True, 
                     show=False, 
@@ -563,22 +597,23 @@ def plot_tradespace(combined_df:pd.DataFrame,
                             f"{y[0]} [{y[1]}]: "+"%{y:.2f} ",
                             ])
                       )
+    
+    pareto, idx, ut = get_pareto_front(combined_df, x="Cost", y="Perception Entropy", x_minimize=x_minimize, y_minimize=y_minimize)
 
-    fig.add_scatter(x=[0], 
-                    y=[min(combined_df[y[0]])], 
+    fig.add_scatter(x=[ut[0]], 
+                    y=[ut[1]], 
                     mode='markers', 
                     marker=dict(symbol='star', size=12*(width/600), color='gold'), 
                     name='Ideal',
                     hoverinfo='none',  # Disable hover data
                     )
-    
+
     if show_pareto:
-        pareto, idx = get_pareto_front(combined_df, x="Cost", y="Perception Entropy")
         fig.add_scatter(x=pareto[:, 0],
                         y=pareto[:, 1],
                         mode='lines+markers', 
                         line=dict(color='orange', width=1*(width/600)), 
-                        marker=dict(size=10*(width/600), color='grey', symbol='circle-open'),
+                        marker=dict(size=10*(width/600), color='orange', symbol='circle-open'),
                         name='Pareto Front',
                         hoverinfo='none',  # Disable hover data
                         )
@@ -590,7 +625,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
         )
     
     fig.update_layout(
-        hovermode='x unified',
+        hovermode='closest',
         height=height, width=width,
         legend=dict(
             # orientation="h",
