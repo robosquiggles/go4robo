@@ -1,7 +1,8 @@
 from .bot_3d_rep import *
 
 import numpy as np
-import pandas as pd
+
+import sys
 
 import plotly.express as px
 
@@ -21,13 +22,88 @@ from pymoo.indicators.hv import HV
 
 from tqdm import tqdm
 
-class ProgressBarCallback:
-    def __init__(self, n_gen):
-        self.pbar = tqdm(total=n_gen, desc="Optimization Progress")
-    def notify(self, algorithm):
+class ProgressBar:
+    def __init__(self, n_gen, update_fn=None):
+        self.pbar = tqdm(
+            total=n_gen,
+            desc="MOO Progress",
+            unit="gen",
+            dynamic_ncols=True,
+            leave=True,
+            file=sys.stdout  # Ensure tqdm writes to stdout
+        )
+        self.update_fn = update_fn  # Callback function to update the Isaac Sim progress bar
+
+    def notify(self, algorithm, problem):
         self.pbar.update(1)
+        self.pbar.set_postfix({
+            "Designs": problem.n_evals,
+            "Best Cost": algorithm.pop.get("F").min(axis=0)[1],
+            "Best PE": algorithm.pop.get("F").min(axis=0)[0]
+        })
+        self.pbar.refresh()  # Force immediate update to the terminal
+
+        # Update the Isaac Sim progress bar
+        if self.update_fn:
+            progress = self.pbar.n / self.pbar.total  # Calculate progress as a fraction
+            self.update_fn(progress)
+
     def close(self):
         self.pbar.close()
+
+import pandas as pd
+
+class DesignRecorder:
+    def __init__(self):
+        self.records = []
+
+    def notify(self, algorithm):
+        # Get the current population's variables and objectives
+        X = algorithm.pop.get("X")
+        F = algorithm.pop.get("F")
+        G = algorithm.pop.get("G") if algorithm.pop.has("G") else None
+        for x, f, g in zip(X, F, G):
+            self.notify_single(x, f, g)
+    
+    def notify_single(self, x, f, g=None):
+        # Store as dict for easy DataFrame conversion
+        self.records.append({
+            "design": x.copy(),
+            "Cost": float(f[1]),
+            "Perception Entropy": float(f[0])
+        })
+
+    def to_dataframe(self):
+        # Convert to DataFrame for analysis/plotting
+        df = pd.DataFrame(self.records)
+        df = self.expand_designs_into_df(df)
+        df["Index"] = df.index
+        df["Name"] = df["Index"].map(lambda x: f"Design {x}")
+        # Reorder columns to put Index and Name at the beginning
+        cols = ["Index", "Name"] + [col for col in df.columns if col not in ["Index", "Name"]]
+        df = df[cols]
+        return df
+    
+    def expand_designs_into_df(self, df):
+
+        def expand_design(row):
+            # Convert the design dict into a list of values
+            # For each sensor, we have a type and a tf (3x4 matrix)
+
+            # For now just show the number of sensor in the design
+            
+            return [row["design"][f"s{i}_type"] for i in range(n_sensors)]
+
+        # Expand the design dict into separate columns
+        a_design_dict = df["design"].iloc[0]
+        n_sensors = int(len(a_design_dict.keys()) / 13)
+        for i in range(1, n_sensors + 1):
+            df[f"Sensor {i}"] = df.apply(lambda row: row["design"].get(f"s{i-1}_type", None), axis=1)
+            # for j in range(12):
+            #     df[f"Sensor {i} tf_{j}"] = df.apply(lambda row: row["design"].get(f"s{i-1}_tf_{j}", None), axis=1)
+        # Drop the original design column
+        df = df.drop(columns=["design"])
+        return df
 
 
 class SensorPkgOptimization(ElementwiseProblem):
@@ -91,6 +167,9 @@ class SensorPkgOptimization(ElementwiseProblem):
             for j in range(12):  # 3*4 = 12
                 variables[f"s{i}_tf_{j}"] = Real(bounds=(0, 1))
         self.n_var = len(variables)
+
+        # ETCETERA
+        self.n_evals = 0
 
         super().__init__(vars=variables, n_obj=2, **kwargs)
 
@@ -282,7 +361,9 @@ class SensorPkgOptimization(ElementwiseProblem):
 
     def _evaluate(self, x, out, *args, **kwargs):
         # print("In EVALUATE, eavulating:", x)
+        start_time = time.time()
         bot = self.convert_1D_to_bot(x)
+        bot.name = f"Design {self.n_evals}"
         if bot.get_design_validity():
             pe, cov = bot.calculate_perception_entropy(self.perception_space)
             out["F"] = [
@@ -294,6 +375,12 @@ class SensorPkgOptimization(ElementwiseProblem):
                 np.inf,
                 np.inf
                 ]
+        if hasattr(self, "recorder_callback"):
+            self.recorder_callback.notify_single(x, out["F"], out["G"] if "G" in out else None)
+        self.n_evals += 1
+
+        if 'verbose' in kwargs and kwargs['verbose']:
+            print(f"{bot.name} eval took {time.time() - start_time:.2f} sec. PE: {bot.perception_entropy:.3f}, Cov: {bot.perception_coverage_percentage:.3f}")
     
 class CustomSensorPkgRandomSampling(Sampling):
     def __init__(self, p=None, **kwargs):
@@ -375,15 +462,63 @@ def get_hypervolume(df, ref_point, x='Cost', y='Perception Coverage', x_minimize
     
     return hypervolume
 
+def run_moo(problem:SensorPkgOptimization,
+            num_generations:int=10, 
+            num_offsprings:int=5,
+            population_size:int=10, 
+            # mutation_rate:float=0.1, 
+            # crossover_rate:float=0.5,
+            verbose:bool=False) -> Tuple[OptimizeResult, pd.DataFrame]:
+    """Run the mixed-variable multi-objective optimization algorithm on the bot.
+    Args:
+        num_generations (int): The number of generations to run.
+        population_size (int): The size of the population.
+        mutation_rate (float): The mutation rate.
+        crossover_rate (float): The crossover rate.
+        verbose (bool): If True, print debug information.
+    Returns:
+        Tuple[OptimizeResult, pd.DataFrame]: The optimization result and the design space DataFrame, including all the generated designs.
+    """
 
-def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, show=False, panzoom=False, **kwargs):
+    progress_callback = ProgressBar(num_generations)
+    problem.recorder_callback = DesignRecorder()
+
+    algorithm = MixedVariableGA(
+        pop_size=population_size,
+        n_offsprings=num_offsprings,
+        sampling=CustomSensorPkgRandomSampling(),
+        survival=RankAndCrowdingSurvival(),
+        eliminate_duplicates=MixedVariableDuplicateElimination(),
+    )
+
+    res = minimize( problem,
+                    algorithm,
+                    ('n_gen', num_generations),
+                    seed=1,
+                    callback=lambda algo: [progress_callback.notify(algo, problem), problem.recorder_callback.notify(algo)],
+                    verbose=verbose)
+
+    progress_callback.close()
+
+    all_bots_df = problem.recorder_callback.to_dataframe()
+
+    return res, all_bots_df
+
+def plot_tradespace(combined_df:pd.DataFrame, 
+                    x=('Cost', '$'), 
+                    y=('Perception Entropy', '-'), 
+                    hover_name='Name',
+                    show_pareto=True, 
+                    show=False, 
+                    panzoom=True, 
+                    **kwargs) -> px.scatter:
     """
     Plot the trade space of concepts based on Cost and Perception Entropy.
     Each point represents a concept, colored based on its optimization status. An ideal point is also marked on the plot.
     The plot can be displayed interactively with optional pan and zoom capabilities.
     Parameters:
-        combined_df (pd.DataFrame): DataFrame containing the data to plot, with columns 'Cost', 'Perception Coverage',
-                                     'Optimized', and 'Name'.
+        combined_df (pd.DataFrame): DataFrame containing the data to plot, with at least the columns 'Name', 'Cost',
+                                    'Perception Entropy'.
         num_results (int): The number of top concepts to include in the title of the plot.
         show (bool, optional): If True, display the plot. Defaults to False.
         panzoom (bool, optional): If False, disables panning and zooming by fixing the axis ranges. Defaults to False.
@@ -395,32 +530,42 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
     Returns:
         plotly.graph_objs._figure.Figure: The generated Plotly figure object.
     """
-    height = 600 if 'height' not in kwargs else kwargs['height']
-    width = 600 if 'width' not in kwargs else kwargs['width']
+
+    num_results = len(combined_df)
+
+    height = 800 if 'height' not in kwargs else kwargs['height']
+    width = 800 if 'width' not in kwargs else kwargs['width']
     opacity = 0.9 if 'opacity' not in kwargs else kwargs['opacity']
-    title = f"Objective Space (best of {num_results} concepts)" if 'title' not in kwargs else kwargs['title']
+    title = f"Objective Space ({num_results} concepts)" if 'title' not in kwargs else kwargs['title']
     
-    fig = px.scatter(combined_df, x='Cost', y='Perception Entropy', 
+    y_min = min(combined_df[y[0]])
+    y_max = max(combined_df[y[0]])
+    y_range = y_max - y_min
+    x_min = min(combined_df[x[0]])
+    x_max = max(combined_df[x[0]])
+    x_range = x_max - x_min
+
+    fig = px.scatter(combined_df, x=x[0], y=y[0], 
                     #  color='Optimized', 
                      color_discrete_sequence=['#1276a4', '#fc7114'], 
                      opacity=opacity,
                      title=title, 
                      template="plotly_white", 
-                     labels={'Cost': 'Cost ($)', 'Perception Entropy': 'Perception Entropy (-)'},
-                     hover_name='Name',
-                     hover_data=['Cost', 'Perception Entropy'],
-                     custom_data=['Index'])
+                     labels={x[0]: f'{x[0]} [{x[1]}]', y[0]: f'{y[0]} [{y[1]}]'},
+                     hover_name=hover_name,
+                     hover_data=[x[0], y[0]],
+                     custom_data=[hover_name])
     
     fig.update_traces(marker=dict(size=5*(width/600)),
                       hovertemplate="<br>".join([
-                            "Pkg: %{customdata[0]}",
-                            "Cost: $%{x:.2f}",
-                            "Perception Entropy: %{y:.2f}%",
+                            "%{customdata[0]}",
+                            f"{x[0]} [{x[1]}]: "+"%{x:.2f}",
+                            f"{y[0]} [{y[1]}]: "+"%{y:.2f} ",
                             ])
                       )
 
     fig.add_scatter(x=[0], 
-                    y=[100], 
+                    y=[min(combined_df[y[0]])], 
                     mode='markers', 
                     marker=dict(symbol='star', size=12*(width/600), color='gold'), 
                     name='Ideal',
@@ -432,7 +577,7 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
         fig.add_scatter(x=pareto[:, 0],
                         y=pareto[:, 1],
                         mode='lines+markers', 
-                        line=dict(color='grey', width=1*(width/600)), 
+                        line=dict(color='orange', width=1*(width/600)), 
                         marker=dict(size=10*(width/600), color='grey', symbol='circle-open'),
                         name='Pareto Front',
                         hoverinfo='none',  # Disable hover data
@@ -449,12 +594,13 @@ def plot_tradespace(combined_df:pd.DataFrame, num_results, show_pareto=True, sho
         height=height, width=width,
         legend=dict(
             # orientation="h",
-            yanchor="bottom",
+            yanchor="Top",
             y=0,
             xanchor="right",
             x=1
         ),
-        yaxis=dict(range=[0, 110])
+        yaxis=dict(range=[y_min-(0.1*y_range), y_max+(0.1*y_range)]),
+        xaxis=dict(range=[x_min-(0.1*x_range), x_max+(0.1*x_range)]),
     )
 
     fig.update_layout(clickmode='event+select')

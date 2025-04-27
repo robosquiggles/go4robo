@@ -36,7 +36,7 @@ from .bot_3d_rep import *
 from .bot_3d_problem import *
 
 import webbrowser
-from . import render as dash_app
+from . import dash_app
 
 sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
@@ -117,10 +117,25 @@ class GO4RExtension(omni.ext.IExt):
         events = self._usd_context.get_stage_event_stream()
         self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
 
+        # Multi-Objective Optimization
+        self.sensor_options:set[Sensor3D] = set()
+
         self.optimization_problem:SensorPkgOptimization = None
         self.optimization_algorithm = None
-        self.sensor_options:set[Sensor3D] = set()
-        self.optimization_max_sensors = 5
+        self.optimization_max_sensors:int = 5
+        self.optimization_generations:int = 5
+        self.optimization_offspring:int = 3
+        self.optimization_population_size:int = 8
+        self.total_possible_designs:int = self.optimization_population_size + self.optimization_generations * self.optimization_offspring 
+
+        # Results Viewer
+        pop_df_json = pd.DataFrame(data={"NO DATA":["NO DATA"]}).to_json(orient='split')
+
+        # Initialize the Dash app
+        dash_app.app.layout = dash_app.build_layout()
+    
+        # Update the Dash app's Store
+        dash_app.app.layout.children[1].children[2].data = pop_df_json
 
     def on_shutdown(self):
         """Shutdown the extension"""
@@ -241,7 +256,7 @@ class GO4RExtension(omni.ext.IExt):
                                 self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
                                 self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
                             # self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
-                            self.results_list = ui.ScrollingFrame(height=250)
+                            self.results_list = ui.ScrollingFrame(height=80)
                             # Initialize with empty results
                             with self.results_list:
                                 ui.Label("Run analysis to see results")
@@ -250,13 +265,13 @@ class GO4RExtension(omni.ext.IExt):
                     
                     with ui.CollapsableFrame("Optimization", height=0, collapsed=False):
                         with ui.VStack(spacing=5):
-                            self.sensor_options_list = ui.ScrollingFrame(height=250)
+                            self.sensor_options_list = ui.ScrollingFrame(height=450)
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
-                                self.optimize_btn = ui.Button("Optimize", clicked_fn=self._optimize_robot, height=36, width=0)
+                                self.optimize_btn = ui.Button("Generate Designs", clicked_fn=self._optimize_robot, height=36, width=0)
                                 self.optimization_progress_bar = ui.ProgressBar(height=36, val=0.0)
                                 self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
-                            self.results_pg_btn = ui.Button("Results", clicked_fn=self.on_results_pg_btn_clicked, height=36)
+                            self.results_pg_btn = ui.Button("Open Results Viewer", clicked_fn=self.on_optimization_results, height=36)
                             self.disable_ui_element(self.results_pg_btn, text_color=ui.color("#FF0000"))
                             # Initialize with empty results
                             with self.sensor_options_list:
@@ -1262,7 +1277,7 @@ class GO4RExtension(omni.ext.IExt):
         self.sensor_options_list.clear()
         
         with self.sensor_options_list:
-            ################## ROBOT OPTIONS ##################
+            ####################### ROBOT OPTIONS #######################
             with ui.VStack(spacing=5):
                 if not self.robots:
                     ui.Label("No robots selected")
@@ -1273,9 +1288,9 @@ class GO4RExtension(omni.ext.IExt):
                             style={"border_width": 2, "border_color": ui.color("#0059ff")},
                             collapsed=False
                         ):
-                        header = {"Robot Name": 120,
-                                  "Max Sensors": 20,
-                                  "Sensor Constraint Mesh Path": 200}
+                        header = {"Robot Name": 100,
+                                  "Max Sensors": 75,
+                                  "Sensor Constraint Mesh Path": 100}
                         # Just use the first robot #TODO: Make this work for multiple robots
                         robot = self.robots[0]
                         with ui.HStack(spacing=5):
@@ -1287,14 +1302,14 @@ class GO4RExtension(omni.ext.IExt):
                                         case "Robot Name":
                                             ui.Label(robot.name, width=width)
                                         case "Max Sensors":
-                                            max_sensors_field = ui.IntField(width=width)
-                                            max_sensors_field.model.set_value(self.optimization_max_sensors)
+                                            self.max_sensors_field = ui.IntField(width=50)
+                                            self.max_sensors_field.model.set_value(self.optimization_max_sensors)
 
                                             def on_max_sensors_val_changed(new_value):
-                                                max_sensors = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                max_sensors = max(0, new_value.get_value_as_int())
                                                 self.optimization_max_sensors = max_sensors
                                             
-                                            max_sensors_field.model.add_value_changed_fn(on_max_sensors_val_changed)
+                                            self.max_sensors_field.model.add_value_changed_fn(on_max_sensors_val_changed)
                                         case "Sensor Constraint Mesh Path":
                                             ui.Label("!!TODO!!", width=width)
 
@@ -1365,6 +1380,67 @@ class GO4RExtension(omni.ext.IExt):
                                                         self._log_message(f"Set {sensor.name} average precision to {b:.2f}")
                                             
                                                     b_field.model.add_value_changed_fn(on_b_val_changed)
+
+
+            ########################## MOO Options #########################
+                    with ui.CollapsableFrame(
+                            f"Multi-Objective Optimization Algorithm & Problem Options", 
+                            height=0, 
+                            style={"border_width": 2, "border_color": ui.color("#9900ff")}, 
+                            collapsed=False
+                        ):
+                        header = {"Generations": 50, 
+                                  "Offspring": 50,
+                                  "Population Size": 50}
+                        
+                        def _update_total_designs():
+                                self.total_possible_designs = self.optimization_population_size + self.optimization_offspring * self.optimization_generations
+                                self.total_designs_field.text = f"(Generates up to {self.total_possible_designs} total designs)"
+
+                        with ui.VStack(spacing=5):
+                            for key, width in header.items():
+                                with ui.HStack(spacing=5):
+                                    # Create a header row
+                                    ui.Label(key, width=100)
+                                    match key:
+                                        case "Generations":
+                                            self.generations_field = ui.IntField(width=width)
+                                            self.generations_field.model.set_value(self.optimization_generations)
+
+                                            def on_generations_val_changed(new_value):
+                                                generations = max(0, new_value.get_value_as_int())
+                                                self.optimization_generations = generations
+                                                _update_total_designs()
+                                            
+                                            self.generations_field.model.add_value_changed_fn(on_generations_val_changed)
+
+                                        case "Offspring":
+                                            self.offspring_field = ui.IntField(width=width)
+                                            self.offspring_field.model.set_value(self.optimization_offspring)
+
+                                            def on_offspring_val_changed(new_value):
+                                                offspring = max(0, new_value.get_value_as_int())
+                                                self.optimization_offspring = offspring
+                                                _update_total_designs()
+
+                                            self.offspring_field.model.add_value_changed_fn(on_offspring_val_changed)
+
+                                        case "Population Size":
+                                            self.pop_size_field = ui.IntField(width=width)
+                                            self.pop_size_field.model.set_value(self.optimization_population_size)
+
+                                            def on_pop_size_val_changed(new_value):
+                                                pop_size = max(0, new_value.get_value_as_int())
+                                                self.optimization_population_size = pop_size
+                                                _update_total_designs()
+
+                                            self.pop_size_field.model.add_value_changed_fn(on_pop_size_val_changed)
+
+                            self.total_designs_field = ui.Label(f"(Generates up to {self.total_possible_designs} total designs)")
+                            _update_total_designs()
+
+                            
+                            
 
         try:
             self.optimization_problem = SensorPkgOptimization(bot=self.robots[0],
@@ -2349,39 +2425,41 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message("No optimization problem to solve.")
             self.disable_ui_element(self.optimize_btn)
             return
-        self._log_message("Optimizing robot...")
+        self._log_message("Generating Pareto Optimal Designs...")
 
-        self.optimization_algorithm = MixedVariableGA(
-            pop_size=5,
-            n_offsprings=5,
-            sampling=CustomSensorPkgRandomSampling(),
-            survival=RankAndCrowdingSurvival(),
-            eliminate_duplicates=MixedVariableDuplicateElimination(),
-        )
+        def update_progress_bar(progress):
+            self.optimization_progress_bar.model.set_value(progress)
+            # Force UI update
+            asyncio.ensure_future(omni.kit.app.get_app().next_update_async())
+        
+        progress_callback = ProgressBar(self.optimization_generations, update_fn=update_progress_bar)
 
-        n_gen = 5
-
-        progress_callback = ProgressBarCallback(n_gen)
-
-        res = minimize(self.optimization_problem,
-                       self.optimization_algorithm,
-                       ('n_gen', n_gen),
-                       seed=1,
-                       callback=progress_callback.notify,
-                       verbose=True)
-        self._log_message(f"Optimization result: {res}")
-        self._log_message(f"Best solution: {res.X}")
-        self._log_message(f"Best fitness: {res.F}")
-        self._log_message(f"Best objective: {res.CV}")
-        self._log_message("Optimization complete.")
+        res, pop_df = run_moo(problem = self.optimization_problem,
+                              num_generations=self.optimization_generations,
+                              num_offsprings=self.optimization_offspring,
+                              population_size=self.optimization_population_size)
+        
         progress_callback.close()
+
+        pareto_front = get_pareto_front(pop_df)
+
+        # Make the df and the plot available to the dash app
+        pop_df_json = pop_df.to_json(orient='split')
+        dash_app.app.layout['pop-df-store'].data = pop_df_json #TODO does this work?
+        # dash_app.app.callback_map['pop-df-store.data']['callback'](pop_df_json)
+
+        self._log_message("Optimization complete.")
+        self._log_message(f"{len(pareto_front)} Pareto optimal designs found.")
+        self.on_optimization_results()
+
     
-    def on_results_pg_btn_clicked(self):
+    def on_optimization_results(self):
         """Open the results page"""
         self._log_message("Opening results page...")
+        self.enable_ui_element(self.results_pg_btn)
 
         def _run_dash_app():
-            dash_app.app.run(debug=False, use_reloader=False)
+            dash_app.app.run(debug=True, use_reloader=False)
         
         async def _launch_dash():
             """Render the dash app webpage"""

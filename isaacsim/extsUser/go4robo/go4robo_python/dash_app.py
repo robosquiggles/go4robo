@@ -1,0 +1,123 @@
+import sys
+import os
+
+import dash
+from dash import Dash, html, dcc, callback, Output, Input, State, dash_table
+import dash_bootstrap_components as dbc
+
+from . import bot_3d_problem
+
+import webbrowser
+
+import plotly.express as px
+import pandas as pd
+
+# import bot_3d_problem, bot_3d_rep
+import glob
+import os
+import subprocess
+import dill
+
+import matplotlib
+import matplotlib.pyplot as plt
+import plotly.graph_objs as go
+
+import base64
+from io import BytesIO, StringIO
+import sys
+
+matplotlib.use('agg')
+plt.style.use('ggplot')
+plt.rcParams['axes.facecolor'] = 'white'
+plt.rcParams['font.family'] = 'Arial' 
+
+
+dbc_css = "https://cdn.jsdelivr.net/gh/AnnMarieW/dash-bootstrap-templates/dbc.min.css"
+app = Dash(__name__, 
+           external_stylesheets=[dbc.themes.BOOTSTRAP, dbc_css],
+           )
+url = "http://127.0.0.1:8050/"
+server = app.server
+
+img_width = 400
+
+@app.callback(
+    Output('pop-df-table', 'data'),
+    Output('pop-df-table', 'columns'),
+    Output('tradespace-plot', 'figure'),
+    Input('pop-df-store', 'data')
+)
+def update_results(pop_df_json):
+    if pop_df_json is None:
+        return [], [], go.Figure()
+    
+    # Deserialize the DataFrame
+    df = pd.read_json(StringIO(pop_df_json), orient='split')
+    
+    # Update DataTable
+    columns = [{"name": i, "id": i} for i in df.columns]
+    data = df.to_dict('records')
+    
+    # Update Tradespace Plot
+    figure = bot_3d_problem.plot_tradespace(df)
+    
+    return data, columns, figure
+
+def build_layout():
+    return  html.Div([
+        dbc.Container([
+            # html.Div([
+            #     html.Img(
+            #         src="data:image/png;base64,{}".format(base64.b64encode(open(f"../data/icon.png", 'rb').read()).decode('ascii')), 
+            #         style={"height": 100, "marginRight": "10px"}
+            #     ),
+            #     html.H1("Generation and Selection of Sensor Packages for Mobile Robots"),
+            # ], style={"display": "flex", "alignItems": "center"}),
+            html.H1("Generation and Selection of Sensor Packages for Mobile Robots"),
+            html.Hr(className="my-2"),
+            html.P([
+                html.A("Rachael Putnam", href="https://www.linkedin.com/in/robosquiggles/"), 
+                html.P("MIT Thesis, 2025")], className="lead"),
+            html.P("The goal of this project was to generate, select, and optimize sensor packages for mobile robots."),
+        ], className="h-100 p-4 bg-light text-dark border rounded-3",),
+        dbc.Container([
+            html.H1("Optimization Results"),
+            html.H2("Tradespace"),
+            dcc.Graph(
+                id='tradespace-plot',
+                figure=go.Figure()
+            ),
+            html.H2("Population DataFrame"),
+            dcc.Store(id='pop-df-store', data=None),  # Store for the DataFrame
+            dash_table.DataTable(
+                id='pop-df-table',
+                # columns=[{"name": i, "id": i} for i in pop_df.columns] if pop_df is not None else [],
+                # data=pop_df.to_dict('records') if pop_df is not None else [],
+                page_size=25,
+                style_table={'overflowX': 'auto'},
+            ),
+        #     dbc.Accordion(
+        #     [
+        #         dbc.AccordionItem(
+        #             [create_abstract_section()], title=html.H2("Abstract")
+        #         ),
+        #         dbc.AccordionItem(
+        #             [create_motivation_section()], title=html.H2("Motivation")
+        #         ),
+        #         dbc.AccordionItem(
+        #             [create_methodology_section()], title=html.Span([html.H2("Methodology"), dbc.Badge("Video!", "99+", color="primary", pill=True, className="position-absolute top-0 start-100 translate-middle")])
+        #         ),
+        #         dbc.AccordionItem(
+        #             [create_results_section()], title=html.Span([html.H2("Results"), dbc.Badge("Interactive!", "99+", color="primary", pill=True, className="position-absolute top-0 start-100 translate-middle")])
+        #         ),
+        #     ],
+        #     start_collapsed=True,
+        # ),
+        ], className="h-100 p-4 bg-light text-dark border rounded-3",)
+    ])
+
+if __name__ == '__main__':
+    print("Starting Dash app...")
+    app.layout = build_layout()
+    app.run_server(debug=True, use_reloader=False)
+    # webbrowser.open(url, new=2, autoraise=True)
