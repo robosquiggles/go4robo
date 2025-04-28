@@ -64,6 +64,8 @@ def update_results(pop_df_json):
     
     return data, columns, figure
 
+# TODO: Add a callback to update the design variable table
+
 @app.callback(
     Output("download", "data"),
     Input("btn_csv", "n_clicks"),
@@ -107,8 +109,36 @@ def build_layout():
             html.Hr(className="my-2"),
             html.P([
                 html.A("Rachael Putnam", href="https://www.linkedin.com/in/robosquiggles/"), 
-                html.P("MIT Thesis, 2025")], className="lead"),
-            html.P("The goal of this project was to generate, select, and optimize sensor packages for mobile robots."),
+                html.P("MIT Thesis, Copyright 2025")], className="lead"),
+            html.P("The goal of this thesis is to generate, select, and optimize sensor packages for mobile robots."),
+        ], className="h-100 p-4 bg-light text-dark border rounded-3",),
+        dbc.Container([
+            html.H2("Problem Definition"),
+            html.P("The problem is defined as a multi-objective optimization problem with the following objectives:"),
+            html.Ul([
+                html.Li("Minimize Cost"),
+                html.Li("Maximize Coverage & Detection (Minimize Perception Entropy)"),
+            ]),
+            html.Hr(className="my-2"),
+            html.H3("Design Variables"),
+            dbc.Col([
+                html.H4("Sensor Types"),
+                dcc.Store(id='dv-df-store', data=None),  # Store for the DataFrame
+                dash_table.DataTable(
+                    id=('dv-df-table'),
+                    page_size=10,
+                    style_table={'overflowX': 'auto'},
+                ),
+                # html.H4("Sensor Config"),
+                # html.P("Each of N sensors can be placed anywhere in the 3D constraint space."),
+                # dash_table.DataTable(
+                #     id=('dv-df-table'),
+                #     page_size=10,
+                #     style_table={'overflowX': 'auto'},
+                # ),
+            ]),
+            html.Hr(className="my-2"),
+
         ], className="h-100 p-4 bg-light text-dark border rounded-3",),
         dbc.Container([
             html.H1("Optimization Results"),

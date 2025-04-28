@@ -34,7 +34,6 @@ import omni.isaac.core.utils.prims as prim_utils
 import isaacsim.core.utils.transformations as tf_utils
 
 
-
 try:
     from pxr import UsdGeom, Gf, Sdf, Usd, PhysicsSchemaTools
     print("USD found; USD-specific features will work.")
@@ -125,7 +124,7 @@ class TF:
             tf_matrix_np = tf_matrix
         return np.linalg.inv(tf_matrix_np)
 
-    def normalize_svd(tf_matrix:np.ndarray, bounds:None|list[tuple]=None, majority='column'):
+    def normalize_matrix_svd(tf_matrix:np.ndarray, bounds:None|list[tuple]=None, majority='column'):
         """
         Normalize the rotation part of a 4x4 transformation matrix.
         If bounds are provided, the translation part is also normalized to be from 0 to 1 in all directions.
@@ -198,6 +197,71 @@ class TF:
             flat_matrix = np.concatenate((flat_matrix, [0, 0, 0, 1]))
         assert len(flat_matrix) == 16, "Input array must have 12 or 16 elements."
         return flat_matrix.reshape(4, 4)
+    
+    def batch_quaternion_to_matrix(quats:torch.tensor, positions:torch.tensor) -> torch.tensor:
+        """Convert a batch of quaternions and positions to a batch of transformation matrices.
+        Args:
+            quats (torch.tensor): A tensor of shape (N, 4) representing N quaternions. Quaternions should be in the format (w, x, y, z).
+            positions (torch.tensor): A tensor of shape (N, 3) representing N positions. Positions should be in the format (x, y, z).
+        Returns:
+            torch.tensor: A tensor of shape (N, 4, 4) representing N transformation matrices.
+        """
+        assert quats.shape[1] == 4, "Quaternions must be of shape (N, 4)."
+        assert positions.shape[1] == 3, "Positions must be of shape (N, 3)."
+        assert quats.shape[0] == positions.shape[0], "Quaternions and positions must have the same number of elements."
+        
+        # Normalize the quaternions
+        quats = quats / torch.norm(quats, dim=1, keepdim=True)
+
+        # Extract the components of the quaternion
+        w = quats[:, 0]
+        x = quats[:, 1]
+        y = quats[:, 2]
+        z = quats[:, 3]
+
+        # Compute the rotation matrix
+        rotation_matrix = torch.zeros((quats.shape[0], 3, 3), device=quats.device)
+        rotation_matrix[:, 0, 0] = w * w + x * x - y * y - z * z
+        rotation_matrix[:, 0, 1] = 2 * (x * y - w * z)
+        rotation_matrix[:, 0, 2] = 2 * (x * z + w * y)
+        rotation_matrix[:, 1, 0] = 2 * (x * y + w * z)
+        rotation_matrix[:, 1, 1] = w * w - x * x + y * y - z * z
+        rotation_matrix[:, 1, 2] = 2 * (y * z - w * x)
+        rotation_matrix[:, 2, 0] = 2 * (x * z - w * y)
+        rotation_matrix[:, 2, 1] = 2 * (y * z + w * x)
+        rotation_matrix[:, 2, 2] = w * w - x * x - y * y + z * z
+
+        # Create the transformation matrices
+        transformation_matrices = torch.zeros((quats.shape[0], 4, 4), device=quats.device)
+        transformation_matrices[:, :3, :3] = rotation_matrix
+        transformation_matrices[:, :3, 3] = positions
+        transformation_matrices[:, 3, :] = torch.tensor([0.0, 0.0, 0.0, 1.0], device=quats.device).repeat(quats.shape[0], 1)
+
+        torch.cuda.empty_cache()
+
+        return transformation_matrices
+    
+    def batch_normalize_quaternion(quat:torch.Tensor):
+        """Normalize a quaternion."""
+        if isinstance(quat, torch.Tensor):
+            assert quat.shape == (4,), "Quaternion must be of shape (4,)."
+            return quat / torch.norm(quat)
+        elif isinstance(quat, np.ndarray):
+            assert quat.shape == (4,), "Quaternion must be of shape (4,)."
+            return quat / np.linalg.norm(quat)
+    
+    def batch_random_quaternions(batch_size:int, device=device) -> torch.Tensor:
+        """Generate a batch of random quaternions (w,x,y,z). Quaternions are normalized to unit length.
+        Args:
+            batch (int): The number of quaternions to generate.
+        Returns:
+            torch.Tensor: A tensor of shape (batch, 4) representing the quaternions."""
+        assert isinstance(batch_size, int), "Batch size must be an int."
+        
+        # Generate random quaternions
+        quats = torch.randn(batch_size, 4, device=device)
+        quats = quats / torch.norm(quats, dim=1, keepdim=True)  # Normalize to unit length
+        return quats
 
 class PerceptionSpace:
 
@@ -430,7 +494,7 @@ class PerceptionSpace:
             raise ValueError(f"Voxel group {voxel_group_name} not found.")
         
     
-    def batch_ray_voxel_intersections(self, ray_origins:torch.Tensor, ray_directions:torch.Tensor, batch_size:int=20000) -> torch.Tensor:
+    def batch_ray_voxel_intersections(self, ray_origins:torch.Tensor, ray_directions:torch.Tensor, batch_size:int=15000) -> torch.Tensor:
         """
         Check if the rays intersect with the voxels in the voxel groups.
         Args:
@@ -440,7 +504,8 @@ class PerceptionSpace:
             torch.Tensor: A tensor of shape (N,) where N is the number of voxels. Each element is the number of rays that intersect with the voxel.
         """
         start_time = time.time()
-        # Use the GPU if available to make this quick
+        
+        torch.cuda.empty_cache()
         
         ray_origins = ray_origins                     # Shape: (R, 3)
         ray_directions = ray_directions               # Shape: (R, 3)
@@ -648,8 +713,8 @@ class StereoCamera3D(Sensor3D):
                  name:str,
                  sensor1:MonoCamera3D,
                  sensor2:MonoCamera3D,
-                 tf_sensor1:tuple[Gf.Vec3d, Gf.Matrix3d],
-                 tf_sensor2:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 tf_sensor1:tuple[tuple[float, float, float], tuple[float, float, float, float]],
+                 tf_sensor2:tuple[tuple[float, float, float], tuple[float, float, float, float]],
                  cost:float=None,
                  body:UsdGeom.Mesh=None,
                  ap_constants:dict = {
@@ -723,7 +788,7 @@ class Sensor3D_Instance:
     def __init__(self,
                  sensor:Sensor3D,
                  path:str,
-                 tf:tuple[Gf.Vec3d, Gf.Matrix3d],
+                 tf:tuple[tuple[float], tuple[float]],
                  usd_context:omni.usd.UsdContext=None,
                  name:str|None=None,
                  ):
@@ -731,23 +796,37 @@ class Sensor3D_Instance:
         Args:
             sensor (Sensor3D): The sensor object.
             path (str): The path to the sensor in the USD stage.
-            tf (tuple[Gf.Vec3d, Gf.Matrix3d]): The transformation matrix for the sensor.
+            tf (tuple[tuple[float], tuple[float]]): The transformation of the sensor as a tuple of translation and rotation.
+                The translation is a tuple of 3 floats (x, y, z) and the rotation is a tuple of 4 floats (w, x, y, z).
+            usd_context (omni.usd.UsdContext): The USD context (if known).
             name (str|None): The name of the sensor instance. If None, use the sensor's name.
         """
+
+        assert isinstance(sensor, Sensor3D), "Sensor must be of type Sensor3D"
+        assert isinstance(path, str), "Path must be a string"
+        assert isinstance(tf, (tuple, np.ndarray, list)) and len(tf) == 2, "Transformation must be a tuple, list, or np.ndarray of length 2 (translation and rotation)"
+        assert isinstance(tf[0], (tuple, np.ndarray, list)) and len(tf[0]) == 3, "TF Translation must be a list or tuple of length 3 (x,y,z)"
+        assert isinstance(tf[1], (tuple, np.ndarray, list)) and len(tf[1]) == 4, "TF Rotation must be a list or tuple of length 4 (w, x, y, z)"
+        assert isinstance(usd_context, omni.usd.UsdContext) or usd_context is None, "USD context must be of type omni.usd.UsdContext or None"
+        assert isinstance(name, str) or name is None, "Name must be a string or None"
+
         self.name = name
         self.sensor = sensor
-        self.tf = tf
+
+        self.translation, self.quat_rotation = tf
 
         self.usd_context = usd_context
         if self.usd_context is not None:
             self.stage = usd_context.get_stage()
         else:
             self.stage = None
+
         self.path = str(path)
 
         self.ray_casters = []
         self.body = None
 
+        # If a usd_context is provided, create the sensor body and ray casters in isaac sim
         if self.usd_context is not None:
             self.ray_casters = self.create_ray_casters()
             self.body = self.create_sensor_body(sensor.body)
@@ -908,6 +987,22 @@ class Sensor3D_Instance:
         # rotation = world_transform.ExtractRotationMatrix()
         
         return world_transform
+    
+    def get_tfs(self) -> list[tuple[float, float, float], tuple[float, float, float, float]]:
+        """Get the translation and rotation of the sensor in world coordinates"""
+        tfs = []
+        if isinstance(self.sensor, StereoCamera3D):
+            # Calculate the transforms robot -> sensor1 and robot -> sensor2
+            for tf in [self.sensor.tf_1, self.sensor.tf_2]:
+                mat_parent_to_sensor = tf_utils.tf_matrix_from_pose(translation=tf[0], orientation=tf[1]) #tf from parent to sensor
+                mat_robot_to_parent = tf_utils.tf_matrix_from_pose(translation=self.translation, orientation=self.quat_rotation) #tf from robot to parent
+                mat_robot_to_sensor = mat_parent_to_sensor @ mat_robot_to_parent #tf from robot to sensor
+                pos, rot = tf_utils.pose_from_tf_matrix(mat_robot_to_sensor) #tf from robot to sensor
+                tfs.append((pos, rot))
+        else:
+            # Just return the transform of the sensor inside a list
+            tfs.append((self.translation, self.quat_rotation))
+        return tfs
 
     def get_rays(self) -> Tuple[np.ndarray, np.ndarray]:
         """Returns (ray_origins, ray_directions) for this sensor instance, vectorized with torch."""
@@ -916,7 +1011,7 @@ class Sensor3D_Instance:
         torch.cuda.empty_cache()
 
         sensors = [self.sensor] if not isinstance(self.sensor, StereoCamera3D) else [self.sensor.sensor1, self.sensor.sensor2]
-        tfs = [self.tf] if not isinstance(self.sensor, StereoCamera3D) else [self.sensor.tf_1, self.sensor.tf_2]
+        tfs = self.get_tfs()
 
         ray_origins_list = []
         ray_directions_list = []
@@ -933,11 +1028,9 @@ class Sensor3D_Instance:
             hres = int(sensor.h_fov / sensor.h_res) # number of rays, horizontal
             vres = int(sensor.v_fov / sensor.v_res) # number of rays, vertical
 
-            position, rotation_q = tf_utils.pose_from_tf_matrix(tfs[i]) # position is simple x,y,z, rotation_q is w,x,y,z QUATERNION
-
-            rotation = R.from_quat(rotation_q).as_matrix() # Convert quaternion to rotation matrix
+            rotation = R.from_quat(tfs[i][1]).as_matrix() # Convert quaternion to rotation matrix
             
-            position = torch.tensor(position, dtype=torch.float32, device=device) # Simple x,y,z
+            position = torch.tensor(tfs[i][0], dtype=torch.float32, device=device) # Simple x,y,z
             rotation = torch.tensor(rotation, dtype=torch.float32, device=device) # Rotation matrix
 
             # Generate grid of angles
@@ -1167,6 +1260,39 @@ class Bot3D:
         else:
             print("Sensor or Transform is None, not adding to bot.")
             return False
+        
+    def add_sensors_batch_quat(self, sensors:list, positions:torch.tensor, quaternions:torch.tensor) -> int:
+        """
+        Adds a batch of 3D sensors to the list of sensors. Only adds a sensor if it is not None.
+        Parameters:
+            sensors (list[Sensor3D]): The list of sensors to be added. lenght N
+            positions (torch.tensor): The positions of the sensors. shape (N, 3)
+            quaternions (torch.tensor): The quaternions of the sensors. shape (N, 4)
+        Returns:
+            int: The number of sensors successfully added.
+        """
+        assert len(sensors) == positions.shape[0] == positions.shape[0], "Sensors, positions, and quaternions must have the same length."
+        assert all([isinstance(sensor, (Sensor3D, type(None))) for sensor in sensors]), "All sensors must be of type Sensor3D."
+        assert positions.shape[1] == 3, "Positions must be of shape (N, 3)."
+        assert quaternions.shape[1] == 4, "Quaternions must be of shape (N, 4)."
+        assert positions.device == quaternions.device, "Positions and quaternions must be on the same device."
+
+        # Concat the positions and quaternions to create the transformation tuples
+        tfs = []
+        for i in range(len(sensors)):
+            translation = (positions[i, 0].item(), positions[i, 1].item(), positions[i, 2].item())
+            rotation = (quaternions[i, 0].item(), quaternions[i, 1].item(), quaternions[i, 2].item(), quaternions[i, 3].item())
+            tfs.append((translation, rotation))
+        
+        for i, sensor in enumerate(sensors):
+            if sensor is not None:
+                sensor_instance = Sensor3D_Instance(sensor=sensor, 
+                                                    tf=tfs[i],
+                                                    name=sensor.name,
+                                                    path=f"{self.path}/{sensor.name}/{sensor.name}_{i}",
+                                                    usd_context=self.usd_context)
+                self.sensors.append(sensor_instance)
+        
         
     def get_prim(self):
         """Get the USD prim for the bot"""

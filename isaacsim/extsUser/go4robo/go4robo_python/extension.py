@@ -886,10 +886,12 @@ class GO4RExtension(omni.ext.IExt):
                     else:
                         self.sensor_options.add(cam3d)
 
+                    tf = self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim)
+
                     cam3d_instance = Sensor3D_Instance(cam3d, 
-                                                       path=prim.GetPath(), 
+                                                       path=str(prim.GetPath()), 
                                                        name=_remove_trailing_digits(name), 
-                                                       tf=tf_utils.get_relative_transform(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
+                                                       tf=self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
                                                        usd_context=self._usd_context)
                     # self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
@@ -936,13 +938,14 @@ class GO4RExtension(omni.ext.IExt):
                         self.sensor_options.add(lidar)
                     
                     lidar_instance = Sensor3D_Instance(lidar, 
-                                                       path=prim.GetPath(), 
+                                                       path=str(prim.GetPath()), 
                                                        name=_remove_trailing_digits(name), 
-                                                       tf=tf_utils.get_relative_transform(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
+                                                       tf=self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
                                                        usd_context=self._usd_context)
                     # self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
+                    raise e
             
             return lidar_instance
         
@@ -1096,9 +1099,9 @@ class GO4RExtension(omni.ext.IExt):
                                     s2_prim = prim_utils.get_prim_at_path(prim_path=sensor_instance.path if this_cam_role == "left" else this_cam_path_str)
 
                                     # Get the transforms: robot --> common parent --> cameras
-                                    tf_parent = tf_utils.get_relative_transform(source_prim=bot_prim, target_prim=common_parent_prim) # This is the transform from the robot to the common parent to be used for the stereo camera INSTANCE
-                                    tf_sensor1 = tf_utils.get_relative_transform(source_prim=common_parent_prim, target_prim=s1_prim) # This is the relative transform from the common parent to the left camera
-                                    tf_sensor2 = tf_utils.get_relative_transform(source_prim=common_parent_prim, target_prim=s2_prim) # This is the relative transform from the common parent to the right camera
+                                    tf_parent = self._get_relative_trans_quat(bot_prim, common_parent_prim) # This is the transform from the robot to the common parent to be used for the stereo camera INSTANCE
+                                    tf_sensor1 = self._get_relative_trans_quat(source_prim=common_parent_prim, target_prim=s1_prim) # This is the relative transform from the common parent to the left camera
+                                    tf_sensor2 = self._get_relative_trans_quat(source_prim=common_parent_prim, target_prim=s2_prim) # This is the relative transform from the common parent to the right camera
 
                                     stereo_cam = StereoCamera3D(
                                         name=_remove_trailing_digits(common_parent_name),
@@ -1462,6 +1465,7 @@ class GO4RExtension(omni.ext.IExt):
     def _batch_calc_perception_entropies(self):
         """Batch calculate perception entropies for all robots and sensors"""
         self._log_message("Batch calculating perception entropies...")
+        start_time = time.time()
         
         self.percep_entr_results_data = {}
         for robot in self.robots:
@@ -1473,8 +1477,9 @@ class GO4RExtension(omni.ext.IExt):
         
         # Re-enable the analyze button
         self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+        torch.cuda.empty_cache() # Clear the GPU memory
 
-        self._log_message("Batch calculation complete.")
+        self._log_message(f"Batch calculation complete. Took {time.time()-start_time:.2f} seconds")
 
 
     def _calc_perception_entropies(self, disable_raycasters=True):
@@ -1707,6 +1712,19 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Error getting attribute {attr_name}: {str(e)}")
         
         return default_value
+    
+    def _get_relative_trans_quat(self, source_prim: Usd.Prim, target_prim: Usd.Prim) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """Get the relative translation and quaternion between two prims
+        Args:
+            source_prim (Usd.Prim): The source prim
+            target_prim (Usd.Prim): The target prim
+        Returns:
+            tuple: A tuple containing the translation (x,y,x) and quaternion (w,x,y,z)
+        """
+        tf_matrix = tf_utils.get_relative_transform(source_prim=source_prim, target_prim=target_prim)
+        translation, quaternion = tf_utils.pose_from_tf_matrix(transformation=tf_matrix)
+
+        return translation, quaternion
     
     def _get_world_transform(self, prim) -> Tuple[Gf.Vec3d, Gf.Rotation]:
         """Get the world transform (position and rotation) of a prim"""
