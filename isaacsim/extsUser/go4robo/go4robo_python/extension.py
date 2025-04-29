@@ -2483,7 +2483,7 @@ class GO4RExtension(omni.ext.IExt):
 
         def _update_dash_app():
             # Update the dash app with the new data
-            dash_app.app.layout['source-bot-plot'].figure = self.robots[0].plot_bot_3d(show=False)
+            dash_app.app.layout['source-bot-plot'].figure = self.robots[0].plot_bot_3d(perception_space=self.perception_space, show=False)
             dash_app.app.layout['pop-df-store'].data = pop_df.to_json(orient='split')
             dash_app.app.layput = dash_app.build_layout()
             self._log_message("Dash app updated with new data.")

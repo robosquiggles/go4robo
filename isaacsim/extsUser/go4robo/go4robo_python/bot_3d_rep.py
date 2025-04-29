@@ -1690,8 +1690,30 @@ class Bot3D:
             import hashlib
             hash_digest = hashlib.md5(name.encode()).hexdigest()
             return f"#{hash_digest[:6]}"
+        
+        def add_perception_space(fig):
+            """ Add the perception space as a point cloud of all the voxel centers."""
+            if perception_space is not None:
+                # Get the voxel centers
+                voxel_centers = perception_space.get_voxel_centers()
+                # Get the weights of the voxels
+                weights = perception_space.get_voxel_weights()
+                # Normalize the weights to be between 0 and 1
+                weights = (weights - torch.min(weights)) / (torch.max(weights) - torch.min(weights))
+                # Convert to numpy arrayslen
+                voxel_centers = voxel_centers.cpu().numpy()
+                weights = weights.cpu().numpy()
+                
+                fig.add_trace(go.Scatter3d(
+                    x=voxel_centers[:, 0],
+                    y=voxel_centers[:, 1],
+                    z=voxel_centers[:, 2],
+                    mode='markers',
+                    marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.5),
+                    name='Perception Space'
+                ))
 
-        def add_sensor_cones(fig):
+        def add_sensor_cones(fig, vec_length=0.1):
             """Add cones to the plot for each sensor in the bot."""
             # Get the translation and rotation of each sensor
             translations = [[],[],[]]
@@ -1708,10 +1730,10 @@ class Bot3D:
                 
                 # Get direction vector
                 rot_mat = R.from_quat(quat).as_matrix()
-                local_forward = np.array([0, 0, 1])  # Local forward direction in sensor's local space
+                local_forward = np.array([1, 0, 0])  # Local forward direction in sensor's local space
                 direction = rot_mat @ local_forward  # Transform to world space
                 # Normalize the direction vector
-                direction = direction / np.linalg.norm(direction)
+                direction = direction / np.linalg.norm(direction) * vec_length
 
                 directions[0].append(direction[0])
                 directions[1].append(direction[1])
@@ -1720,28 +1742,41 @@ class Bot3D:
                 color = random_color(sensor_instance.name)
                 colors.append(color)
 
+                # Add the first point as a marker
                 fig.add_trace(go.Scatter3d(
-                    x=[float(translation[0])],
+                    x=[float(translation[0])],  # Only the first point
                     y=[float(translation[1])],
                     z=[float(translation[2])],
                     mode='markers',  # Display as markers
-                    marker=dict(size=5, color='orange'),  # Marker size and color
-                    name='ORIGIN'  # Legend label
+                    marker=dict(size=5, color=color),  # Marker size and color
+                    name=sensor_instance.name,  # Legend label
+                    legendgroup=sensor_instance.name  # Group in the legend
+                ))
+
+                # Add a line between the two points
+                fig.add_trace(go.Scatter3d(
+                    x=[float(translation[0]), float(translation[0]) + float(direction[0])],  # Both points
+                    y=[float(translation[1]), float(translation[1]) + float(direction[1])],
+                    z=[float(translation[2]), float(translation[2]) + float(direction[2])],
+                    mode='lines',  # Display as a line
+                    line=dict(color=color, width=2),  # Line color and width
+                    showlegend=False,  # Hide legend for the line itself
+                    legendgroup=sensor_instance.name  # Group in the legend
                 ))
 
                 # Add Cone trace for this sensor
-                fig.add_trace(go.Cone(
-                    x=[float(translation[0])],
-                    y=[float(translation[1])],
-                    z=[float(translation[2])],
-                    u=[1],
-                    v=[0],
-                    w=[0],
-                    # name=sensor_instance.name,
-                    # colorscale=[[0, color], [1, color]],
-                    # cmin=0,
-                    # cmax=1
-                ))
+                # fig.add_trace(go.Cone(
+                #     x=[float(translation[0])],
+                #     y=[float(translation[1])],
+                #     z=[float(translation[2])],
+                #     u=[1],
+                #     v=[0],
+                #     w=[0],
+                #     # name=sensor_instance.name,
+                #     # colorscale=[[0, color], [1, color]],
+                #     # cmin=0,
+                #     # cmax=1
+                # ))
                 # fig.add_trace(go.Cone( # THIS WORKS
                 #     x=[1.0],
                 #     y=[1.0],
@@ -1759,8 +1794,6 @@ class Bot3D:
         # Create a plotly figure
         fig = go.Figure()
 
-        add_sensor_cones(fig)
-
         # Add a dot at the origin
         fig.add_trace(go.Scatter3d(
             x=[0.0],  # X-coordinate
@@ -1771,6 +1804,16 @@ class Bot3D:
             name='ORIGIN'  # Legend label
         ))
 
+        # Add the bot body to the plot
+        # TODO: Add the bot body to the plot
+
+        # Add the sensors to the plot
+        add_sensor_cones(fig)
+
+        # Add the perception space
+        add_perception_space(fig)
+
+        # Adjust the layout of the plot
         fig.update_layout(
             height=height,
             width=width,
@@ -1787,13 +1830,6 @@ class Bot3D:
                 aspectmode='data'  # Maintain the aspect ratio
             )
         )
-
-        # Add the bot body to the plot
-
-
-        # Add the perception space to the plot
-        # if perception_space is not None:
-        #     perception_space.plot_perception_space(fig)
 
         # Show or save the plot
         if show:

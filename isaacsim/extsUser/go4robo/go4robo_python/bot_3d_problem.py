@@ -394,8 +394,8 @@ class SensorPkgOptimization(ElementwiseProblem):
         bot.name = f"Design {self.n_designs_generated}"
 
 
-    def convert_1D_to_spq_tensors(self, X, device=None) -> tuple[list, torch.Tensor, torch.Tensor]:
-
+    def convert_1D_to_spq_tensors(self, X:dict, device=None) -> tuple[list, torch.Tensor, torch.Tensor]:
+        """Convert a 1D dictionary of sensor data into separate tensors for sensor types, positions, and quaternions."""
         sensor_types = []
         positions = []
         quaternions = []
