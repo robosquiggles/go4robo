@@ -743,7 +743,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
         text=prior_df[hover_name],
         # hover_name=hover_name,
         # hover_data=[x[0], y[0]],
-        custom_data=[hover_name]
+        customdata=[hover_name]
     )
     
     # Set the hover template for the designs

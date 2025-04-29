@@ -1725,17 +1725,41 @@ class GO4RExtension(omni.ext.IExt):
         Returns:
             tuple: A tuple containing the translation (x,y,x) and quaternion (w,x,y,z)
         """
-        tf_matrix = tf_utils.get_relative_transform(source_prim=source_prim, target_prim=target_prim)
-
-        translation, quaternion = tf_utils.pose_from_tf_matrix(transformation=tf_matrix)
-        #Remove the rounding error from the translation and quaternion
-        translation = np.round(translation, 6)
-        quaternion = np.round(quaternion, 6)
-
-        # tf_mat_check = tf_utils.tf_matrix_from_pose(translation=translation, orientation=quaternion)
+        import isaacsim.core.utils.xforms as xforms_utils
         
 
-        return translation, quaternion
+        # Verify that the source and target prims are both Xforms
+        if not (source_prim.IsA(UsdGeom.Xformable) and target_prim.IsA(UsdGeom.Xformable)):
+            self._log_message(f"Error: One or both prims are not Xforms. Source: {source_prim.GetPath()}, Target: {target_prim.GetPath()}")
+            return None, None
+
+        # Xform poses are stored as (translation, rotation) where translation is (x,y,z) and rotation is (qw,qx,qy,qz)
+        # A local pose is a transformation relative to the parent, while a world pose is a transformation relative to the stage origin
+
+        # xform_source_local_pose = xforms_utils.get_local_pose(prim_path=prim_utils.get_prim_path(source_prim))
+        xform_source_world_pose = xforms_utils.get_world_pose(prim_path=prim_utils.get_prim_path(source_prim))
+        
+        # xform_target_local_pose = xforms_utils.get_local_pose(prim_path=prim_utils.get_prim_path(target_prim))
+        xform_target_world_pose = xforms_utils.get_world_pose(prim_path=prim_utils.get_prim_path(target_prim))
+
+        # Get the transformation matrices for the source and target prims
+        source_mat = tf_utils.tf_matrix_from_pose(
+            translation=xform_source_world_pose[0],
+            orientation=xform_source_world_pose[1]
+        )
+
+        target_mat = tf_utils.tf_matrix_from_pose(
+            translation=xform_target_world_pose[0],
+            orientation=xform_target_world_pose[1]
+        )
+
+        # Compute the relative transforms using the matrices
+        rel_mat = np.linalg.inv(source_mat) @ target_mat
+
+        # Extract translation (x,y,z) and quaternion (qw,qx,qy,qz)
+        translation, rotation = tf_utils.pose_from_tf_matrix(rel_mat)
+
+        return translation, rotation
     
     def _get_world_transform(self, prim) -> Tuple[Gf.Vec3d, Gf.Rotation]:
         """Get the world transform (position and rotation) of a prim"""
