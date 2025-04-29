@@ -891,7 +891,7 @@ class GO4RExtension(omni.ext.IExt):
                     cam3d_instance = Sensor3D_Instance(cam3d, 
                                                        path=str(prim.GetPath()), 
                                                        name=_remove_trailing_digits(name), 
-                                                       tf=self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
+                                                       tf=tf, # This is the transform from the robot to the lidar INSTANCE
                                                        usd_context=self._usd_context)
                     # self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
@@ -1726,7 +1726,14 @@ class GO4RExtension(omni.ext.IExt):
             tuple: A tuple containing the translation (x,y,x) and quaternion (w,x,y,z)
         """
         tf_matrix = tf_utils.get_relative_transform(source_prim=source_prim, target_prim=target_prim)
+
         translation, quaternion = tf_utils.pose_from_tf_matrix(transformation=tf_matrix)
+        #Remove the rounding error from the translation and quaternion
+        translation = np.round(translation, 6)
+        quaternion = np.round(quaternion, 6)
+
+        # tf_mat_check = tf_utils.tf_matrix_from_pose(translation=translation, orientation=quaternion)
+        
 
         return translation, quaternion
     

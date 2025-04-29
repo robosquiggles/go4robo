@@ -1662,13 +1662,7 @@ class Bot3D:
             self, 
             perception_space:PerceptionSpace=None, 
             show=True, 
-            save_path:str=None, 
-            sensor_colors:tuple[tuple]=((255, 0, 0),
-                                        (0, 255, 0),
-                                        (0, 0, 255),
-                                        (255, 255, 0),
-                                        (0, 225, 225),
-                                        (255, 102, 0)),
+            save_path:str=None,
             **kwargs):
         """Plot the bot in 3D using plotly.
         
@@ -1709,35 +1703,32 @@ class Bot3D:
                     y=voxel_centers[:, 1],
                     z=voxel_centers[:, 2],
                     mode='markers',
-                    marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.5),
+                    marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.25),
                     name='Perception Space'
                 ))
 
-        def add_sensor_cones(fig, vec_length=0.1):
+        def add_sensors(fig, vec_length=0.1):
             """Add cones to the plot for each sensor in the bot."""
             # Get the translation and rotation of each sensor
-            translations = [[],[],[]]
-            directions = [[],[],[]]
             names = []
             colors = []
             for sensor_instance in self.sensors:
                 translation = sensor_instance.translation
-                translations[0].append(translation[0])
-                translations[1].append(translation[1])
-                translations[2].append(translation[2])
                 quat = sensor_instance.quat_rotation  # (w,x,y,z)
                 names.append(sensor_instance.name)
                 
                 # Get direction vector
                 rot_mat = R.from_quat(quat).as_matrix()
-                local_forward = np.array([1, 0, 0])  # Local forward direction in sensor's local space
-                direction = rot_mat @ local_forward  # Transform to world space
+                x_forward = np.array([1, 0, 0])  # Local forward direction in sensor's local space
+                y_forward = np.array([0, 1, 0])  # Local up direction in sensor's local space
+                z_forward = np.array([0, 0, 1])  # Local right direction in sensor's local space
+                x_direction = rot_mat @ x_forward  # Transform to world space
+                y_direction = rot_mat @ y_forward  # Transform to world space
+                z_direction = rot_mat @ z_forward  # Transform to world space
                 # Normalize the direction vector
-                direction = direction / np.linalg.norm(direction) * vec_length
-
-                directions[0].append(direction[0])
-                directions[1].append(direction[1])
-                directions[2].append(direction[2])
+                x_direction = x_direction / np.linalg.norm(x_direction) * vec_length
+                y_direction = y_direction / np.linalg.norm(y_direction) * vec_length
+                z_direction = z_direction / np.linalg.norm(z_direction) * vec_length
                 
                 color = random_color(sensor_instance.name)
                 colors.append(color)
@@ -1750,45 +1741,70 @@ class Bot3D:
                     mode='markers',  # Display as markers
                     marker=dict(size=5, color=color),  # Marker size and color
                     name=sensor_instance.name,  # Legend label
-                    legendgroup=sensor_instance.name  # Group in the legend
+                    legendgroup=sensor_instance.name,  # Group in the legend
+                    text=[f"Translation: (x={translation[0]:.2f}, y={translation[1]:.2f}, z={translation[2]:.2f})"],  # Hover text for the first point
+                    hoverinfo='text'  # Use custom hover text
                 ))
 
-                # Add a line between the two points
+                # Add a X+ line between the two points
                 fig.add_trace(go.Scatter3d(
-                    x=[float(translation[0]), float(translation[0]) + float(direction[0])],  # Both points
-                    y=[float(translation[1]), float(translation[1]) + float(direction[1])],
-                    z=[float(translation[2]), float(translation[2]) + float(direction[2])],
+                    x=[float(translation[0]), float(translation[0]) + float(x_direction[0])],  # Both points
+                    y=[float(translation[1]), float(translation[1]) + float(x_direction[1])],
+                    z=[float(translation[2]), float(translation[2]) + float(x_direction[2])],
                     mode='lines',  # Display as a line
-                    line=dict(color=color, width=2),  # Line color and width
+                    line=dict(color='red', width=2),  # Line color and width
                     showlegend=False,  # Hide legend for the line itself
-                    legendgroup=sensor_instance.name  # Group in the legend
+                    legendgroup=sensor_instance.name,  # Group in the legend
+                    text=[
+                        f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
+                        f"Quaternion:<br>  (qw={sensor_instance.quat_rotation[0]:.2f},"
+                        f"<br>  qx={sensor_instance.quat_rotation[1]:.2f},"
+                        f"<br>  qy={sensor_instance.quat_rotation[2]:.2f},"
+                        f"<br>  qz={sensor_instance.quat_rotation[3]:.2f})"  # Hover text for the second point
+                    ],
+                    hoverinfo='text'  # Use custom hover text
                 ))
 
-                # Add Cone trace for this sensor
-                # fig.add_trace(go.Cone(
-                #     x=[float(translation[0])],
-                #     y=[float(translation[1])],
-                #     z=[float(translation[2])],
-                #     u=[1],
-                #     v=[0],
-                #     w=[0],
-                #     # name=sensor_instance.name,
-                #     # colorscale=[[0, color], [1, color]],
-                #     # cmin=0,
-                #     # cmax=1
-                # ))
-                # fig.add_trace(go.Cone( # THIS WORKS
-                #     x=[1.0],
-                #     y=[1.0],
-                #     z=[0.0],
-                #     u=[1.0],
-                #     v=[1.0],   
-                #     w=[1.0]
-                # ))
+                # Add a Y+ line between the two points
+                fig.add_trace(go.Scatter3d(
+                    x=[float(translation[0]), float(translation[0]) + float(y_direction[0])],  # Both points
+                    y=[float(translation[1]), float(translation[1]) + float(y_direction[1])],
+                    z=[float(translation[2]), float(translation[2]) + float(y_direction[2])],
+                    mode='lines',  # Display as a line
+                    line=dict(color='green', width=2),  # Line color and width
+                    showlegend=False,  # Hide legend for the line itself
+                    legendgroup=sensor_instance.name,  # Group in the legend
+                    text=[
+                        f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
+                        f"Quaternion:<br>  (qw={sensor_instance.quat_rotation[0]:.2f},"
+                        f"<br>  qx={sensor_instance.quat_rotation[1]:.2f},"
+                        f"<br>  qy={sensor_instance.quat_rotation[2]:.2f},"
+                        f"<br>  qz={sensor_instance.quat_rotation[3]:.2f})"  # Hover text for the second point
+                    ],
+                    hoverinfo='text'  # Use custom hover text
+                ))
 
-        height = 800 if 'height' not in kwargs else kwargs['height']
-        width = 800 if 'width' not in kwargs else kwargs['width']
-        opacity = 0.9 if 'opacity' not in kwargs else kwargs['opacity']
+                # Add a Z+ line between the two points
+                fig.add_trace(go.Scatter3d(
+                    x=[float(translation[0]), float(translation[0]) + float(z_direction[0])],  # Both points
+                    y=[float(translation[1]), float(translation[1]) + float(z_direction[1])],
+                    z=[float(translation[2]), float(translation[2]) + float(z_direction[2])],
+                    mode='lines',  # Display as a line
+                    line=dict(color='blue', width=2),  # Line color and width
+                    showlegend=False,  # Hide legend for the line itself
+                    legendgroup=sensor_instance.name,  # Group in the legend
+                    text=[
+                        f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
+                        f"Quaternion:<br>  (qw={sensor_instance.quat_rotation[0]:.2f},"
+                        f"<br>  qx={sensor_instance.quat_rotation[1]:.2f},"
+                        f"<br>  qy={sensor_instance.quat_rotation[2]:.2f},"
+                        f"<br>  qz={sensor_instance.quat_rotation[3]:.2f})"  # Hover text for the second point
+                    ],
+                    hoverinfo='text'  # Use custom hover text
+                ))
+
+        height = 500 if 'height' not in kwargs else kwargs['height']
+        width = 500 if 'width' not in kwargs else kwargs['width']
         title = f"{self.name} Original" if 'title' not in kwargs else kwargs['title']
 
         # Create a plotly figure
@@ -1808,7 +1824,7 @@ class Bot3D:
         # TODO: Add the bot body to the plot
 
         # Add the sensors to the plot
-        add_sensor_cones(fig)
+        add_sensors(fig)
 
         # Add the perception space
         add_perception_space(fig)

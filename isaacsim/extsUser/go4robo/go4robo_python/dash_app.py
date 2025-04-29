@@ -133,45 +133,51 @@ def build_layout():
             html.P("The goal of this thesis is to generate, select, and optimize sensor packages for mobile robots."),
         ], className="h-100 p-4 bg-light text-dark border rounded-3",),
         dbc.Container([
-            html.H1("Source Robot Visualized"),
-            dcc.Graph(
-                id='source-bot-plot',
-                figure=px.scatter_3d(pd.DataFrame({'x':[0.0], 'y':[0.0], 'z':[0.0], 'name':'PLACEHOLDER DOT'}), 
-                                     x='x', 
-                                     y='y', 
-                                      z='z', 
-                                     hover_name='name')
-                ),
+            html.H1("Problem Definition"),
+            dbc.Col([
+                html.H2("Prior Design"),
+                dcc.Graph(
+                    id='source-bot-plot',
+                    figure=px.scatter_3d(pd.DataFrame({'x':[0.0], 'y':[0.0], 'z':[0.0], 'name':'PLACEHOLDER DOT'}), 
+                                        x='x', 
+                                        y='y', 
+                                        z='z', 
+                                        hover_name='name')
+                    ),
+                ]),
+            dbc.Col([
+                html.H2("Design Variables"),
+                ]),
             html.Hr(className="my-2"),
         ]),
-        dbc.Container([
-            html.H2("Problem Definition"),
-            html.P("The problem is defined as a multi-objective optimization problem with the following objectives:"),
-            html.Ul([
-                html.Li("Minimize Cost"),
-                html.Li("Maximize Coverage & Detection (Minimize Perception Entropy)"),
-            ]),
-            html.Hr(className="my-2"),
-            html.H3("Design Variables"),
-            dbc.Col([
-                html.H4("Sensor Types"),
-                dcc.Store(id='dv-df-store', data=None),  # Store for the DataFrame
-                dash_table.DataTable(
-                    id=('dv-df-table'),
-                    page_size=10,
-                    style_table={'overflowX': 'auto'},
-                ),
-                # html.H4("Sensor Config"),
-                # html.P("Each of N sensors can be placed anywhere in the 3D constraint space."),
-                # dash_table.DataTable(
-                #     id=('dv-df-table'),
-                #     page_size=10,
-                #     style_table={'overflowX': 'auto'},
-                # ),
-            ]),
-            html.Hr(className="my-2"),
+        # dbc.Container([
+        #     html.H2("Problem Definition"),
+        #     html.P("The problem is defined as a multi-objective optimization problem with the following objectives:"),
+        #     html.Ul([
+        #         html.Li("Minimize Cost"),
+        #         html.Li("Maximize Coverage & Detection (Minimize Perception Entropy)"),
+        #     ]),
+        #     html.Hr(className="my-2"),
+        #     html.H3("Design Variables"),
+        #     dbc.Col([
+        #         html.H4("Sensor Types"),
+        #         dcc.Store(id='dv-df-store', data=None),  # Store for the DataFrame
+        #         dash_table.DataTable(
+        #             id=('dv-df-table'),
+        #             page_size=10,
+        #             style_table={'overflowX': 'auto'},
+        #         ),
+        #         html.H4("Sensor Config"),
+        #         html.P("Each of N sensors can be placed anywhere in the 3D constraint space."),
+        #         dash_table.DataTable(
+        #             id=('dv-df-table'),
+        #             page_size=10,
+        #             style_table={'overflowX': 'auto'},
+        #         ),
+        #     ]),
+        #     html.Hr(className="my-2"),
 
-        ], className="h-100 p-4 bg-light text-dark border rounded-3",),
+        # ], className="h-100 p-4 bg-light text-dark border rounded-3",),
         dbc.Container([
             html.H1("Optimization Results"),
             html.H2("Tradespace"),
@@ -199,11 +205,12 @@ def build_layout():
                             ],
                             id="dropdown",
                             placeholder="Choose download file type. Default is CSV format!",
-                ),
+                )]),
+            dbc.Col([
                 dbc.Button(
                             "Download Data", id="btn_csv"
-                        ),
-            ])
+                        )
+            ], width=3)
         #     dbc.Accordion(
         #     [
         #         dbc.AccordionItem(
