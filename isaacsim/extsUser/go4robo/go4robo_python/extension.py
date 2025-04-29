@@ -128,14 +128,9 @@ class GO4RExtension(omni.ext.IExt):
         self.optimization_population_size:int = 4
         self.total_possible_designs:int = self.optimization_population_size + self.optimization_generations * self.optimization_offspring 
 
-        # Results Viewer
-        pop_df_json = pd.DataFrame(data={"NO DATA":["NO DATA"]}).to_json(orient='split')
-
-        # Initialize the Dash app
-        dash_app.app.layout = dash_app.build_layout()
-    
-        # Update the Dash app's Store
-        dash_app.app.layout.children[1].children[2].data = pop_df_json
+        # Previewer
+        # self._stop_dash_app()
+        asyncio.ensure_future(self._launch_dash())
 
     def on_shutdown(self):
         """Shutdown the extension"""
@@ -271,7 +266,7 @@ class GO4RExtension(omni.ext.IExt):
                                 self.optimize_btn = ui.Button("Generate Designs", clicked_fn=self._optimize_robot, height=36, width=0)
                                 self.optimization_progress_bar = ui.ProgressBar(height=36, val=0.0)
                                 self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
-                            self.results_pg_btn = ui.Button("Open Results Viewer", clicked_fn=self.on_optimization_results, height=36)
+                            self.results_pg_btn = ui.Button("Open Results Viewer", clicked_fn=self._launch_dash, height=36)
                             self.disable_ui_element(self.results_pg_btn, text_color=ui.color("#FF0000"))
                             # Initialize with empty results
                             with self.sensor_options_list:
@@ -1182,6 +1177,8 @@ class GO4RExtension(omni.ext.IExt):
         self._update_sensor_list_ui()
         self._update_voxel_groups_ui()
         self._update_sensor_options_ui()
+        if self.robots[0]:
+            self._update_dash_app(robot=self.robots[0])
 
         # Now save a single bot's 3D visualization out to a file
         self._log_message("Saving bot 3D visualization to file...")
@@ -1454,6 +1451,8 @@ class GO4RExtension(omni.ext.IExt):
                                                               perception_space=self.perception_space,
                                                               sensor_options=self.sensor_options,
                                                               max_n_sensors=self.optimization_max_sensors)
+            self._update_dash_app(problem=self.optimization_problem)
+
         except Exception as e:
             self._log_message(f"Error creating optimization problem: {e}")
             self.optimization_problem = None
@@ -2496,55 +2495,57 @@ class GO4RExtension(omni.ext.IExt):
         
         progress_callback.close()
 
-        self.on_optimization_results(res, pop_df)
+        self._update_dash_app(pop_df=pop_df, robot=self.robots[0], problem=self.optimization_problem)
 
         pareto_front = get_pareto_front(pop_df)
 
         self._log_message("Optimization complete.")
         self._log_message(f"{len(pareto_front)} Pareto optimal designs found.")
-        
 
-    
-    def on_optimization_results(self, res, pop_df):
-        """Open the results page"""
 
-        def _run_dash_app():
+    def _run_dash_app(self):
             dash_app.app.run(debug=True, use_reloader=False)
             self._log_message("Dash app running...")
 
-        def _update_dash_app():
-            # Update the dash app with the new data
-            dash_app.app.layout['source-bot-plot'].figure = self.robots[0].plot_bot_3d(perception_space=self.perception_space, show=False)
+    def _update_dash_app(self, pop_df:pd.DataFrame=None, robot:Bot3D=None, problem:SensorPkgOptimization=None):
+        """Update the dash app with the new data"""
+        # dash_app.app.layout = dash_app.build_layout()
+        if pop_df is not None:
             dash_app.app.layout['pop-df-store'].data = pop_df.to_json(orient='split')
-            dash_app.app.layput = dash_app.build_layout()
-            self._log_message("Dash app updated with new data.")
+        if robot is not None:
+            dash_app.app.layout['prior-bot-store'].data = robot.to_json()
+        if problem is not None:
+            dash_app.app.layout['problem-store'].data = problem.to_json()
+        
+        # dash_app.app.layout = dash_app.build_layout()
+        self._log_message("Dash app updated with new data.")
 
-        def _stop_dash_app():
-            import psutil
-            import subprocess
+    def _stop_dash_app(self):
+        import psutil
+        import subprocess
+        import urllib.request
+        try:
+            with urllib.request.urlopen(dash_app.url, timeout=1) as response:
+                if response.status == 200:
+                    self._log_message(f"Dash app is not reachable at {dash_app.url}, try restarting Isaac Sim")
+        except urllib.error.URLError as e:
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 if 'python' in proc.info['name'] and 'dash' in ' '.join(proc.info['cmdline']):
                     proc.terminate()
                     proc.wait()
-            self._log_message("Dash app stopped.")
-        
-        async def _launch_dash():
-            """Render the dash app webpage"""
-            _update_dash_app()
-
-            import urllib.request
-            try:
-                with urllib.request.urlopen(dash_app.url, timeout=1) as response:
-                    if response.status == 200:
-                        self._log_message(f"Dash app is reachable at {dash_app.url}")
-            except urllib.error.URLError as e:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, _run_dash_app)
-                self._log_message(f"Dash app is now reachable at {dash_app.url}")
-
-        asyncio.ensure_future(_launch_dash())
-
-        webbrowser.open(dash_app.url, new=1, autoraise=True)
-        self._log_message(f"Openned results page in browser {dash_app.url} (if not already open)")
+        self._log_message("Dash app stopped.")
+    
+    async def _launch_dash(self):
+        """Render the dash app webpage"""
+        dash_app.app.layout = dash_app.build_layout()
+        import urllib.request
+        try:
+            with urllib.request.urlopen(dash_app.url, timeout=1) as response:
+                if response.status == 200:
+                    self._log_message(f"Dash app is reachable at {dash_app.url}")
+        except urllib.error.URLError as e:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._run_dash_app)
+            self._log_message(f"Dash app is now reachable at {dash_app.url}")
 
         

@@ -62,6 +62,7 @@ class ProgressBar:
         self.pbar.close()
 
 import pandas as pd
+import re
 
 class DesignRecorder:
     def __init__(self, max_sensors:int=5):
@@ -117,13 +118,29 @@ class DesignRecorder:
         df = df.drop(columns=["design"])
         return df
     
-    def squash_df_into_designs(self, df):
-        sensors = [f"s{i}" for i in range(0, self.max_sensors)]
-        # Squash the design dict into a single column
-        df["design"] = df.apply(lambda row: {k: row[k] for k in row.keys() if any([k.startswith(s) for s in sensors])}, axis=1)
-        # Drop the individual sensor columns
-        df = df.drop(columns=[col for col in df.columns if any([k.startswith(s) for s in sensors])])
-        return df
+    def squash_expanded_df_into_designs(self, df:pd.DataFrame):
+        """From a DF, create a dict of designs.
+        
+        Args:
+            df (pd.DataFrame): The DataFrame containing the expanded designs.
+            
+        Returns:
+            (dict, int): A tuple containing (1) the dictionary containing the designs, and the max number of sensors.
+            """
+        design_dicts = []
+        # Use regex to match any key that starts with "s{i}_"
+        pattern = re.compile(rf"^s(\d+)_")
+        max_sensors = 0
+        for i, row in df.iterrows():
+            design_dict = {}
+            for k, v in row.items():
+                match = pattern.match(k)
+                if match:
+                    sensor_idx = int(match.group(1))
+                    max_sensors = max(max_sensors, sensor_idx + 1)
+                    design_dict.update({k: v})
+
+        
     
     def sensor_options_to_df(self, sensor_options:list[Sensor3D|None]):
         # Convert the sensor options to a DataFrame
@@ -138,7 +155,6 @@ class DesignRecorder:
 
         df = pd.DataFrame(data)
         return df
-
 
 class SensorPkgOptimization(ElementwiseProblem):
 
@@ -163,8 +179,9 @@ class SensorPkgOptimization(ElementwiseProblem):
             max_n_sensors (int): Maximum number of sensor instances to be used in the optimization.
             **kwargs: Additional keyword arguments for the parent class.
         """
-
+        
         # BOT
+        self.prior_bot = copy.deepcopy(bot) # Create a deep copy of the bot to avoid modifying the original
         self.bot = copy.deepcopy(bot) # Create a deep copy of the bot to avoid modifying the original
         self.bot.clear_sensors() # Clear any existing sensors
         self.bot.name = "Design" # Set the name of the bot to "Design"
@@ -231,6 +248,51 @@ class SensorPkgOptimization(ElementwiseProblem):
         self.n_designs_generated = 0
 
         super().__init__(vars=variables, n_obj=2, **kwargs)
+
+    def to_json(self, file_path=None):
+        """
+        Serialize the problem definition to a JSON-compatible dictionary.
+
+        Args:
+            file_path (str, optional): Path to save the JSON file. If None, returns the dictionary.
+
+        Returns:
+            dict: A dictionary representation of the problem.
+        """
+
+        problem_dict = {
+            "prior_bot": self.prior_bot.to_json(), # Use the prior bot that has all the sensors!
+            "sensor_options": {key: (sensor.name if sensor else "None") for key, sensor in self.sensor_options.items()},
+            "max_n_sensors": self.max_n_sensors,
+            "sensor_pose_bounds": self.s_bounds.tolist(),  # Convert numpy array to list
+            "perception_space": self.perception_space.to_json(),  # Serialize perception space as a string or ID
+        }
+
+        if file_path:
+            import json
+            with open(file_path, "w") as f:
+                json.dump(problem_dict, f, indent=4)
+        else:
+            return problem_dict
+        
+    def from_json(json_dict):
+        """
+        Deserialize the problem definition from a JSON-compatible dictionary.
+
+        Args:
+            json_dict (dict): A dictionary representation of the problem.
+
+        Returns:
+            SensorPkgOptimization: An instance of the optimization problem.
+        """
+
+        return SensorPkgOptimization(
+            bot=Bot3D.from_json(json_dict["prior_bot"]),
+            sensor_options=[Sensor3D(name=sensor_name) for sensor_name in json_dict["sensor_options"]],
+            max_n_sensors=json_dict["max_n_sensors"],
+            perception_space=PerceptionSpace.from_json(json_dict["perception_space"]),
+            s_bounds=np.array(json_dict["sensor_pose_bounds"]),
+        )
 
     def new_bot_design(self, incr=True) -> Bot3D:
         """
@@ -368,7 +430,7 @@ class SensorPkgOptimization(ElementwiseProblem):
                 
         
 
-    def convert_1D_to_bot(self, x, verbose=False):
+    def convert_1D_to_bot(self, x:dict, verbose=False):
         """
         Converts a 1D dictionary of sensor data into a bot object with sensor attributes.
         Args:
@@ -619,7 +681,7 @@ def run_moo(problem:SensorPkgOptimization,
             num_offsprings:int=5,
             population_size:int=10, 
             # mutation_rate:float=0.1, 
-            # crossover_rate:float=0.5,
+            crossover_rate:float=0.5,
             verbose:bool=False,
             prior_bot:Bot3D=None,
             progress_callback=None) -> Tuple[OptimizeResult, pd.DataFrame]:
@@ -642,6 +704,11 @@ def run_moo(problem:SensorPkgOptimization,
         sampling=CustomSensorPkgRandomSampling(),
         survival=RankAndCrowdingSurvival(),
         eliminate_duplicates=MixedVariableDuplicateElimination(),
+        # crossover=MixedVariableSBX(
+        #     prob=crossover_rate,
+        #     n_offsprings=num_offsprings,
+        #     alpha=0.5
+        # ),
     )
 
     problem.recorder_callback = DesignRecorder(problem.max_n_sensors)

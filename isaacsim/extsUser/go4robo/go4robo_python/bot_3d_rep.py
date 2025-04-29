@@ -12,6 +12,7 @@ import numpy as np
 import math
 
 from typing import List, Dict, Tuple, Optional, Union
+import hashlib
 
 import pandas as pd
 
@@ -330,7 +331,7 @@ class PerceptionSpace:
 
 
     def __init__(self,
-                 usd_context:omni.usd.UsdContext,
+                 usd_context:omni.usd.UsdContext=None,
                  voxel_groups:list[VoxelGroup]|np.ndarray[VoxelGroup]=None, 
                  weights:list[float]|np.ndarray[float]=None):
         """Initialize a new instance of the class.
@@ -340,9 +341,55 @@ class PerceptionSpace:
             weights (torch.Tensor[float]): The weights of the voxel groups.
         """
         self.usd_context = usd_context
-        self.stage = self.usd_context.get_stage()
+        if usd_context is not None:
+            self.stage = usd_context.get_stage()
+        else:
+            self.stage = None
         self.voxel_groups = voxel_groups if voxel_groups is not None else np.array([])
         self.weights = weights if weights is not None else np.array([])
+
+    def to_json(self, file_path=None):
+        """
+        Convert the perception space to a JSON serializable format.
+        Returns:
+            dict: A dictionary representation of the perception space.
+        """
+        data = {
+            "voxel_groups": [],
+            "weights": []
+        }
+        for voxel_group in self.voxel_groups:
+            data["voxel_groups"].append({
+                "name": voxel_group.name,
+                # "voxels": voxel_group.voxels,
+                "voxel_centers": voxel_group.voxel_centers.tolist(),
+                "voxel_sizes": voxel_group.voxel_sizes.tolist()
+            })
+        data["weights"] = self.weights.tolist()
+
+        if file_path is not None:
+            import json
+            with open(file_path, 'w') as f:
+                json.dump(data, f)
+
+        return data
+    
+    def from_json(json_dict):
+        """
+        Load the perception space from a JSON file.
+        Args:
+            json_dict (dict): A dictionary representation of the perception space.
+        """
+        voxel_groups = []
+        for voxel_group in json_dict["voxel_groups"]:
+            voxel_groups.append(PerceptionSpace.VoxelGroup(
+                name=voxel_group["name"],
+                voxels=['']*len(voxel_group["voxel_centers"]), # Just an empty list of the right length since the paths/prims are not needed
+                voxel_centers=torch.tensor(voxel_group["voxel_centers"]),
+                voxel_sizes=torch.tensor(voxel_group["voxel_sizes"])
+            ))
+        weights = np.array(json_dict["weights"])
+        return PerceptionSpace(voxel_groups=voxel_groups, weights=weights)
 
     def add_voxel_group(self, voxel_group:VoxelGroup, weight:float):
         """
@@ -1148,8 +1195,7 @@ class Bot3D:
                  usd_context:omni.usd.UsdContext,
                  body:list[UsdGeom.Mesh]=None,
                  path:str=None,
-                 sensor_coverage_requirement:list[UsdGeom.Mesh]=None,
-                 sensor_pose_constraint:list[UsdGeom.Mesh]=None, 
+                 sensor_pose_constraint:list[UsdGeom.Mesh]=None,
                  sensors:list[Sensor3D_Instance]=[]):
         """
         Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
@@ -1164,13 +1210,14 @@ class Bot3D:
         self.name = name
         self.path = path
         self.body = body
+        self.sensor_pose_constraint = sensor_pose_constraint
         self.sensors = sensors
 
         self.usd_context = usd_context
-        self.stage = self.usd_context.get_stage()
-            
-        self.sensor_coverage_requirement = sensor_coverage_requirement
-        self.sensor_pose_constraint = sensor_pose_constraint
+        if self.usd_context is not None:
+            self.stage = usd_context.get_stage()
+        else:
+            self.stage = None
 
         self.perception_entropy = 0.0
         self.perception_coverage_percentage = 0.0
@@ -1204,6 +1251,51 @@ class Bot3D:
         for k, v in self.__dict__.items():
             setattr(result, k, safe_copy(v))
         return result
+    
+    def to_json(self, file_path:str=None):
+        """Serialize the bot to JSON, and return a dict. If a file path is provided, save to that file."""
+        import json
+        bot_dict = {
+            "name": self.name,
+            "path": str(self.path),  # Convert Path to string
+            "body": None,  # [self.body], # TODO: support mesh JSON serialization?
+            "sensor_pose_constraint": None,  # [self.sensor_pose_constraint], # TODO: support mesh JSON serialization?
+            "sensors": [
+                {
+                    "name": sensor.name,
+                    "path": str(sensor.path),  # Convert Path to string
+                    "translation": sensor.translation,
+                    "rotation": sensor.quat_rotation,
+                }
+                for sensor in self.sensors
+            ],
+        }
+        if file_path is not None:
+            with open(file_path, 'w') as f:
+                json.dump(bot_dict, f)
+        return bot_dict
+    
+    @staticmethod
+    def from_json(json_dict:dict):
+        """Deserialize from a dict to create a Bot3D object. The dict should be in the same format as the one returned by to_json()."""
+        name = json_dict["name"]
+        path = json_dict["path"]
+        body = None, # TODO if you want to plot the body in the dash app, make this work.
+        sensor_pose_constraint = None # TODO if you want to plot the body in the dash app, make this work.
+        usd_context=None
+        sensors = []
+        for sensor in json_dict["sensors"]:
+            sensor_name = sensor["name"]
+            sensor_path = sensor["path"]
+            translation = sensor["translation"]
+            rotation = sensor["rotation"]
+            # Create a Sensor3D_Instance for each sensor
+            sensor = Sensor3D(name=sensor_name) # Don't need any of the local tfs or properties for now
+            sensor_instance = Sensor3D_Instance(sensor=Sensor3D(name=sensor_name), 
+                                                path=sensor_path, 
+                                                tf=(translation, rotation))
+            sensors.append(sensor_instance)
+        return Bot3D(name=name, sensor_pose_constraint=sensor_pose_constraint, usd_context=usd_context, path=path, body=body, sensors=sensors)
 
     def get_sensors_by_type(self, sensor_type:Type[Sensor3D]) -> list[Sensor3D_Instance]:
         sensor_instances = []
@@ -1681,7 +1773,8 @@ class Bot3D:
 
         def random_color(name):
             """Optional: Create a random color from a string, or define your own mapping"""
-            import hashlib
+            if name is None:
+                return "#000000"
             hash_digest = hashlib.md5(name.encode()).hexdigest()
             return f"#{hash_digest[:6]}"
         

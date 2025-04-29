@@ -5,7 +5,7 @@ import dash
 from dash import Dash, html, dcc, callback, Output, Input, State, dash_table
 import dash_bootstrap_components as dbc
 
-from . import bot_3d_problem
+from . import bot_3d_problem, bot_3d_rep
 
 import webbrowser
 
@@ -47,6 +47,7 @@ img_width = 400
     Output('pop-df-table', 'columns'),
     Output('pop-df-table', 'style_data_conditional'),
     Output('tradespace-plot', 'figure'),
+    # Output('selected-bot-plot', 'figure'),  # New output for the bot plot
     Input('pop-df-store', 'data'),
     Input('tradespace-plot', 'clickData')
 )
@@ -83,7 +84,31 @@ def update_table_and_plot(pop_df_json, click_data):
 
     return data, columns, style_data_conditional, figure
 
-# TODO: Add a callback to update the design variable table
+@app.callback(
+    Output('prior-bot-plot', 'figure'),
+    Input('prior-bot-store', 'data'),  # Trigger when prior-bot-store is updated
+    Input('problem-store', 'data'),  # Trigger when problem-store is updated
+)
+def update_prior_bot_plot(prior_bot_json, problem_json):
+    if prior_bot_json is None:
+        # Return an empty figure if no data is available
+        return go.Figure()
+
+    # Deserialize the JSON data into a Bot3D object
+    prior_bot:bot_3d_rep.Bot3D = bot_3d_rep.Bot3D.from_json(prior_bot_json)
+
+    if problem_json is not None:
+        problem:bot_3d_problem.SensorPkgOptimization = bot_3d_problem.SensorPkgOptimization.from_json(problem_json)
+
+        # Generate the 3D plot
+        prior_bot_figure = prior_bot.plot_bot_3d(perception_space=problem.perception_space, show=False)
+    else:
+        # Generate the 3D plot without perception space
+        prior_bot_figure = prior_bot.plot_bot_3d(show=False)
+
+    # TODO: Add code to update the design variable table
+
+    return prior_bot_figure
 
 ########################### Download callback ##########################
 @app.callback(
@@ -116,81 +141,58 @@ def download_results(n_clicks_btn, download_type, pop_df_json):
     
 
 def build_layout():
-    return  html.Div([
+    return html.Div([
         dbc.Container([
-            # html.Div([
-            #     html.Img(
-            #         src="data:image/png;base64,{}".format(base64.b64encode(open(f"../data/icon.png", 'rb').read()).decode('ascii')), 
-            #         style={"height": 100, "marginRight": "10px"}
-            #     ),
-            #     html.H1("Generation and Selection of Sensor Packages for Mobile Robots"),
-            # ], style={"display": "flex", "alignItems": "center"}),
             html.H1("Generation and Selection of Sensor Packages for Mobile Robots"),
             html.Hr(className="my-2"),
             html.P([
-                html.A("Rachael Putnam", href="https://www.linkedin.com/in/robosquiggles/"), 
-                html.P("MIT Thesis, Copyright 2025")], className="lead"),
+                html.A("Rachael Putnam", href="https://www.linkedin.com/in/robosquiggles/"),
+                html.P("MIT Thesis, Copyright 2025")
+            ], className="lead"),
             html.P("The goal of this thesis is to generate, select, and optimize sensor packages for mobile robots."),
         ], className="h-100 p-4 bg-light text-dark border rounded-3",),
+        html.Hr(className="my-2"),
         dbc.Container([
-            html.H1("Problem Definition"),
-            dbc.Col([
-                html.H2("Prior Design"),
-                dcc.Graph(
-                    id='source-bot-plot',
-                    figure=px.scatter_3d(pd.DataFrame({'x':[0.0], 'y':[0.0], 'z':[0.0], 'name':'PLACEHOLDER DOT'}), 
-                                        x='x', 
-                                        y='y', 
-                                        z='z', 
-                                        hover_name='name')
+            html.H2("Problem Definition"),
+            dcc.Store(id='problem-store', data=None),  # Store for the problem
+            dcc.Store(id='prior-bot-store', data=None),  # Store for the bot
+            dbc.Row([
+                dbc.Col([
+                    html.H3("Problem Description"),
+                    html.P("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."),
+                ], width=6),  # Right column for the problem description
+                dbc.Col([
+                    html.H3("Prior Bot Design"),
+                    dcc.Graph(
+                        id='prior-bot-plot',
+                        figure=go.Figure()  # Placeholder figure for the prior bot design
                     ),
-                ]),
-            dbc.Col([
-                html.H2("Design Variables"),
-                ]),
-            html.Hr(className="my-2"),
-        ]),
-        # dbc.Container([
-        #     html.H2("Problem Definition"),
-        #     html.P("The problem is defined as a multi-objective optimization problem with the following objectives:"),
-        #     html.Ul([
-        #         html.Li("Minimize Cost"),
-        #         html.Li("Maximize Coverage & Detection (Minimize Perception Entropy)"),
-        #     ]),
-        #     html.Hr(className="my-2"),
-        #     html.H3("Design Variables"),
-        #     dbc.Col([
-        #         html.H4("Sensor Types"),
-        #         dcc.Store(id='dv-df-store', data=None),  # Store for the DataFrame
-        #         dash_table.DataTable(
-        #             id=('dv-df-table'),
-        #             page_size=10,
-        #             style_table={'overflowX': 'auto'},
-        #         ),
-        #         html.H4("Sensor Config"),
-        #         html.P("Each of N sensors can be placed anywhere in the 3D constraint space."),
-        #         dash_table.DataTable(
-        #             id=('dv-df-table'),
-        #             page_size=10,
-        #             style_table={'overflowX': 'auto'},
-        #         ),
-        #     ]),
-        #     html.Hr(className="my-2"),
-
-        # ], className="h-100 p-4 bg-light text-dark border rounded-3",),
+                ], width=6),  # Left column for the prior bot design
+            ]),
+        ], className="h-100 p-4 bg-light text-dark border rounded-3"),
         dbc.Container([
-            html.H1("Optimization Results"),
-            html.H2("Tradespace"),
-            dcc.Graph(
-                id='tradespace-plot',
-                figure=go.Figure()
-            ),
-            html.H2("Design Population"),
+            html.H2("Generated Designs"),
+            html.H3("Tradespace"),
+                    dcc.Graph(
+                        id='tradespace-plot',
+                        figure=go.Figure()
+                    ),
+            dbc.Row([
+                dbc.Col([
+                ], width=6),  # Right column for the tradespace
+                dbc.Col([
+                    html.H3("Selected Bot Design"),
+                    # dcc.Store(id='selected-bot-store', data=None),  # Store for the selected bot
+                    dcc.Graph(
+                        id='selected-bot-plot',
+                        figure=go.Figure()  # Placeholder figure
+                    ),
+                ], width=6),  # Left column for the bot plot
+            ]),
+            html.H3("Design Population"),
             dcc.Store(id='pop-df-store', data=None),  # Store for the DataFrame
             dash_table.DataTable(
                 id='pop-df-table',
-                # columns=[{"name": i, "id": i} for i in pop_df.columns] if pop_df is not None else [],
-                # data=pop_df.to_dict('records') if pop_df is not None else [],
                 page_size=25,
                 style_table={'overflowX': 'auto'},
             ),
@@ -198,9 +200,7 @@ def build_layout():
             dbc.Col([
                 dcc.Dropdown(options=[
                                 {"label": "Numpy file", "value": "npy"},
-                                # {"label": "Pickle file", "value": "pickle"},
                                 {"label": "JSON file", "value": "json"},
-                                # {"label": "Excel file", "value": "xlsx"},
                                 {"label": "CSV file", "value": "csv"},
                             ],
                             id="dropdown",
@@ -208,26 +208,9 @@ def build_layout():
                 )]),
             dbc.Col([
                 dbc.Button(
-                            "Download Data", id="btn_csv"
-                        )
+                    "Download Data", id="btn_csv"
+                )
             ], width=3)
-        #     dbc.Accordion(
-        #     [
-        #         dbc.AccordionItem(
-        #             [create_abstract_section()], title=html.H2("Abstract")
-        #         ),
-        #         dbc.AccordionItem(
-        #             [create_motivation_section()], title=html.H2("Motivation")
-        #         ),
-        #         dbc.AccordionItem(
-        #             [create_methodology_section()], title=html.Span([html.H2("Methodology"), dbc.Badge("Video!", "99+", color="primary", pill=True, className="position-absolute top-0 start-100 translate-middle")])
-        #         ),
-        #         dbc.AccordionItem(
-        #             [create_results_section()], title=html.Span([html.H2("Results"), dbc.Badge("Interactive!", "99+", color="primary", pill=True, className="position-absolute top-0 start-100 translate-middle")])
-        #         ),
-        #     ],
-        #     start_collapsed=True,
-        # ),
         ], className="h-100 p-4 bg-light text-dark border rounded-3",)
     ])
 
