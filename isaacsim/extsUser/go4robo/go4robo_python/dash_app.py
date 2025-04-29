@@ -101,10 +101,18 @@ def update_prior_bot_plot(prior_bot_json, problem_json):
         problem:bot_3d_problem.SensorPkgOptimization = bot_3d_problem.SensorPkgOptimization.from_json(problem_json)
 
         # Generate the 3D plot
-        prior_bot_figure = prior_bot.plot_bot_3d(perception_space=problem.perception_space, show=False)
+        prior_bot_figure = prior_bot.plot_bot_3d(
+            perception_space=problem.perception_space, 
+            show=False,
+            width=600,
+        )
     else:
         # Generate the 3D plot without perception space
-        prior_bot_figure = prior_bot.plot_bot_3d(show=False)
+        prior_bot_figure = prior_bot.plot_bot_3d(
+            perception_space=None,
+            show=False,
+            width=600,
+        )
 
     # TODO: Add code to update the design variable table
 
@@ -160,14 +168,14 @@ def build_layout():
                 dbc.Col([
                     html.H3("Problem Description"),
                     html.P("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."),
-                ], width=6),  # Right column for the problem description
+                ], width=4),  # Right column for the problem description
                 dbc.Col([
                     html.H3("Prior Bot Design"),
                     dcc.Graph(
                         id='prior-bot-plot',
                         figure=go.Figure()  # Placeholder figure for the prior bot design
                     ),
-                ], width=6),  # Left column for the prior bot design
+                ], width=8),  # Left column for the prior bot design
             ]),
         ], className="h-100 p-4 bg-light text-dark border rounded-3"),
         dbc.Container([
@@ -195,6 +203,8 @@ def build_layout():
                 id='pop-df-table',
                 page_size=25,
                 style_table={'overflowX': 'auto'},
+                sort_action='native',  # Enable native sorting
+                sort_mode='multi',  # Allow multi-column sorting
             ),
             dcc.Download(id="download"),
             dbc.Col([

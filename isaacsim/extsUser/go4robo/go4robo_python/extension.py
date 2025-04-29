@@ -1394,8 +1394,8 @@ class GO4RExtension(omni.ext.IExt):
                             collapsed=False
                         ):
                         header = {"Generations": 50, 
-                                  "Offspring": 50,
-                                  "Population Size": 50}
+                                  "Population Size": 50,
+                                  "Offspring": 50}
                         
                         def _update_total_designs():
                                 self.total_possible_designs = self.optimization_population_size + self.optimization_offspring * self.optimization_generations

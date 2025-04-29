@@ -233,10 +233,10 @@ class SensorPkgOptimization(ElementwiseProblem):
             variables[f"s{i}_x"] = Real(bounds=x_bounds)                                 # Translation x
             variables[f"s{i}_y"] = Real(bounds=y_bounds)                                 # Translation y
             variables[f"s{i}_z"] = Real(bounds=z_bounds)                                 # Translation z
-            variables[f"s{i}_qw"] = Real(bounds=(-1, 1))                                 # Quaternion w
-            variables[f"s{i}_qx"] = Real(bounds=(-1, 1))                                 # Quaternion x
-            variables[f"s{i}_qy"] = Real(bounds=(-1, 1))                                 # Quaternion y
-            variables[f"s{i}_qz"] = Real(bounds=(-1, 1))                                 # Quaternion z
+            variables[f"s{i}_qw"] = Real(bounds=(-1, 1))                                 # Quaternion qw
+            variables[f"s{i}_qx"] = Real(bounds=(-1, 1))                                 # Quaternion qx
+            variables[f"s{i}_qy"] = Real(bounds=(-1, 1))                                 # Quaternion qy
+            variables[f"s{i}_qz"] = Real(bounds=(-1, 1))                                 # Quaternion qz
         # for i in range(self.max_n_sensors):
         #     variables[f"s{i}_type"] = Integer(bounds=(0,len(self.sensor_options)-1))
         #     for j in range(12):  # 3*4 = 12
@@ -489,7 +489,68 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         return sensor_types, positions_tensor, quaternions_tensor
     
+    def get_normalized_quats_from_1Ds_as_tensor(self, X:np.ndarray, device=None) -> torch.Tensor:
+        """Convert a 1D dictionary of sensor data into a tensor of quaternions."""
+        assert isinstance(X, np.ndarray), "X must be a numpy array of dicts"
+        assert isinstance(X[0], dict), "X must be a numpy array of dicts"
+        # Extract quaternions from the 1D dictionaries
+        for x_dict in X:
+            quats = []  # Use a list to collect quaternions initially
+            for i in range(self.max_n_sensors):
+                quats.append([
+                    x_dict[f"s{i}_qw"],
+                    x_dict[f"s{i}_qx"],
+                    x_dict[f"s{i}_qy"],
+                    x_dict[f"s{i}_qz"]
+                ])
+    
+        if len(quats) == 0:
+            # Return an empty tensor if no quaternions are found
+            return torch.tensor([], dtype=torch.float32, device=device)
+
+        # Convert the list of quaternions to a tensor
+        quats = torch.tensor(quats, dtype=torch.float32, device=device)
+
+        # Normalize quaternions
+        quats = torch.nn.functional.normalize(quats, p=2, dim=1, eps=1e-10)
+
+        return quats
+    
+    def convert_quats_tensor_to_1D_dicts(self, quats:torch.tensor) -> dict:
+        """Convert a tensor of quaternions into a 1D dictionary."""
+        n_sensors = self.max_n_sensors
+        n_quats = quats.shape[0]
+        n_xs = int(n_quats/n_sensors)
+    
+        X = []
+        for bot in range(n_xs):
+            quats_1D_dict = {}
+            for i in range(n_sensors):
+                if i < n_quats:
+                    quats_1D_dict[f"s{i}_qw"] = quats[i, 0].item()
+                    quats_1D_dict[f"s{i}_qx"] = quats[i, 1].item()
+                    quats_1D_dict[f"s{i}_qy"] = quats[i, 2].item()
+                    quats_1D_dict[f"s{i}_qz"] = quats[i, 3].item()
+                else:
+                    quats_1D_dict[f"s{i}_qw"] = 0.0
+                    quats_1D_dict[f"s{i}_qx"] = 0.0
+                    quats_1D_dict[f"s{i}_qy"] = 0.0
+                    quats_1D_dict[f"s{i}_qz"] = 0.0
+            X.append(quats_1D_dict)
+        return np.array(X)
+    
+    def normalize_quats_in_1D(self, X:dict) -> dict:
+        """Normalize the quaternions in a 1D dictionary. Keep the sensor types and translations in the 1D dict the same."""
+        quats = self.get_normalized_quats_from_1Ds_as_tensor(X, device=device)
+        quats_dicts = self.convert_quats_tensor_to_1D_dicts(quats)
+        for i, q_dict in enumerate(quats_dicts):
+            X[i].update(q_dict)  # Update the original dictionary with normalized quaternions
+        return X
+
+    
     def _eval_bot_obj(self, bot:Bot3D, out=None, *args, **kwargs):
+        """Evaluate the design variables and calculate the objectives."""
+        start_time = time.time()
         torch.cuda.empty_cache()  # Clear GPU memory
 
         if out is None:
@@ -504,6 +565,9 @@ class SensorPkgOptimization(ElementwiseProblem):
             ]
         else:
             out["F"] = [np.inf, np.inf]
+
+        if 'verbose' in kwargs and kwargs['verbose']:
+            print(f"{bot.name} eval took {time.time() - start_time:.2f} sec. PE: {pe:.3f}, Cov: {cov:.3f}")
 
         return out
 
@@ -526,11 +590,8 @@ class SensorPkgOptimization(ElementwiseProblem):
         print(f"Evaluating bot: {bot.name} with {len(bot.sensors)}") if verbose else None
 
         self._eval_bot_obj(bot, out, *args, **kwargs)
-
-        if 'verbose' in kwargs and kwargs['verbose']:
-            print(f"{bot.name} eval took {time.time() - start_time:.2f} sec. PE: {pe:.3f}, Cov: {cov:.3f}")
     
-class CustomSensorPkgRandomSampling(Sampling):
+class SensorPkgRandomSampling(Sampling):
     def __init__(self, p=None, **kwargs):
         """
         Custom random sampling for sensor package optimization.
@@ -541,7 +602,7 @@ class CustomSensorPkgRandomSampling(Sampling):
         self.p = p
         super().__init__()
 
-    def _do(self, problem, n_samples, **kwargs):
+    def _do(self, problem:SensorPkgOptimization, n_samples:int, **kwargs):
         """
         Generate random samples for the sensor package optimization problem.
 
@@ -563,7 +624,7 @@ class CustomSensorPkgRandomSampling(Sampling):
 
         # Sensor type probabilities
         if self.p is None:
-            p = np.ones(n_types) / n_types
+            p = np.ones(n_types) / n_types # Uniform distribution
         else:
             p = np.array(self.p)
             assert len(p) == n_types, "Probabilities must match the number of sensor types."
@@ -578,7 +639,7 @@ class CustomSensorPkgRandomSampling(Sampling):
         
         # Vectorized sampling of translations and rotations
         translations = np.random.uniform(low=xl[:3], high=xu[:3], size=(n_samples, n_sensors, 3))  # x, y, z; shape (n_samples, n_sensors, 3)
-        quaternions = TF.batch_random_quaternions(n_samples * n_sensors, device=device).reshape(n_samples, n_sensors, 4).cpu().numpy()  # qw, qx, qy, qz; shape (n_samples, n_sensors, 4)
+        quaternions = TF.batch_random_quaternions(n_samples * n_sensors, device=device).reshape(n_samples, n_sensors, 4).cpu().numpy()  # qw, qx, qy, qz; shape (n_samples, n_sensors, 4). These are already normalized.
 
         # Prepare X as a list of dicts for batch conversion
         X = []
@@ -607,6 +668,175 @@ class CustomSensorPkgRandomSampling(Sampling):
             X.append(sample_dict)
 
         return X
+    
+
+class SensorPkgFlatCrossover(Crossover):
+    def __init__(self):
+        super().__init__(2, 2)  # two parents → two children
+
+    def _do(self, problem, X, **kwargs):
+        # X: shape (2, n_matings, n_var)
+        n_parents, n_matings, n_var = X.shape
+        Y = X.copy()
+        
+        # Get flat list of variable names and build index maps
+        var_names = list(problem.vars.keys())
+        max_n = problem.max_n_sensors
+
+        # Pre-compute all indices
+        idx = {}
+        for i in range(max_n):
+            idx[f"type{i}"] = var_names.index(f"s{i}_type")
+            idx[f"x{i}"]    = var_names.index(f"s{i}_x")
+            idx[f"y{i}"]    = var_names.index(f"s{i}_y")
+            idx[f"z{i}"]    = var_names.index(f"s{i}_z")
+            idx[f"qw{i}"]   = var_names.index(f"s{i}_qw")
+            idx[f"qx{i}"]   = var_names.index(f"s{i}_qx")
+            idx[f"qy{i}"]   = var_names.index(f"s{i}_qy")
+            idx[f"qz{i}"]   = var_names.index(f"s{i}_qz")
+
+        # For each mating pair
+        for k in range(n_matings):
+            p1 = X[0, k]  # parent1 vector of length n_var
+            p2 = X[1, k]
+
+            c1 = p1.copy()
+            c2 = p2.copy()
+
+            for i in range(max_n):
+                # 1) Type: swap with 50% chance
+                if np.random.rand() < 0.5:
+                    c1[idx[f"type{i}"]], c2[idx[f"type{i}"]] = p2[idx[f"type{i}"]], p1[idx[f"type{i}"]]
+
+                # 2) Position: simple blend
+                α = np.random.rand()
+                for axis in ("x", "y", "z"):
+                    ia = idx[f"{axis}{i}"]
+                    c1[ia] = α * p1[ia] + (1-α)*p2[ia]
+                    c2[ia] = (1-α)*p1[ia] + α * p2[ia]
+
+                # 3) Quaternion LERP + normalize
+                q1 = np.array([p1[idx[f"qw{i}"]],
+                               p1[idx[f"qx{i}"]],
+                               p1[idx[f"qy{i}"]],
+                               p1[idx[f"qz{i}"]]])
+                q2 = np.array([p2[idx[f"qw{i}"]],
+                               p2[idx[f"qx{i}"]],
+                               p2[idx[f"qy{i}"]],
+                               p2[idx[f"qz{i}"]]])
+                qt1 = α*q1 + (1-α)*q2
+                qt2 = (1-α)*q1 + α*q2
+
+                # Normalize
+                nt1 = np.linalg.norm(qt1)
+                nt2 = np.linalg.norm(qt2)
+                if nt1 > 1e-12 and p1[idx[f"type{i}"]] != 0:
+                    qt1 /= nt1
+                else:
+                    qt1[:] = 0  # zero‐out if inactive or degenerate
+                if nt2 > 1e-12 and p2[idx[f"type{i}"]] != 0:
+                    qt2 /= nt2
+                else:
+                    qt2[:] = 0
+
+                # Write back
+                c1[idx[f"qw{i}"]:]   = qt1
+                c2[idx[f"qw{i}"]:]   = qt2
+
+            Y[0, k] = c1
+            Y[1, k] = c2
+
+        return Y
+    
+
+class SensorPkgFlatMutation(Mutation):
+    def __init__(self, type_prob=0.1, pos_sigma=0.02, quat_sigma=0.02):
+        super().__init__()
+        self.type_prob  = type_prob
+        self.pos_sigma  = pos_sigma
+        self.quat_sigma = quat_sigma
+
+    def _do(self, problem, X, **kwargs):
+        # X: shape (pop_size, n_var) or (offsprings, n_var)
+        pop, n_var = X.shape
+        Y = X.copy()
+
+        var_names = list(problem.vars.keys())
+        max_n = problem.max_n_sensors
+        n_types = len(problem.sensor_options)
+
+        # Pre-compute indices
+        idx = { }
+        for i in range(max_n):
+            idx[f"type{i}"] = var_names.index(f"s{i}_type")
+            idx[f"x{i}"]    = var_names.index(f"s{i}_x")
+            idx[f"y{i}"]    = var_names.index(f"s{i}_y")
+            idx[f"z{i}"]    = var_names.index(f"s{i}_z")
+            idx[f"qw{i}"]   = var_names.index(f"s{i}_qw")
+            idx[f"qx{i}"]   = var_names.index(f"s{i}_qx")
+            idx[f"qy{i}"]   = var_names.index(f"s{i}_qy")
+            idx[f"qz{i}"]   = var_names.index(f"s{i}_qz")
+
+        # Apply mutation for each individual
+        for p in range(pop):
+            for i in range(max_n):
+                # 1) Type flip
+                if np.random.rand() < self.type_prob:
+                    Y[p, idx[f"type{i}"]] = np.random.randint(0, n_types)
+
+                # 2) Position noise + clip
+                for axis in ("x", "y", "z"):
+                    ia = idx[f"{axis}{i}"]
+                    lb, ub = problem.s_bounds[("x","y","z").index(axis)]
+                    Y[p, ia] += np.random.normal(0, self.pos_sigma)
+                    Y[p, ia] = np.clip(Y[p, ia], lb, ub)
+
+                # 3) Quaternion noise + normalize or zero-out
+                qs = np.array([Y[p, idx[f"qw{i}"]],
+                               Y[p, idx[f"qx{i}"]],
+                               Y[p, idx[f"qy{i}"]],
+                               Y[p, idx[f"qz{i}"]]])
+                qs += np.random.normal(0, self.quat_sigma, 4)
+                norm = np.linalg.norm(qs)
+                if norm > 1e-12 and Y[p, idx[f"type{i}"]] != 0:
+                    qs /= norm
+                else:
+                    qs[:] = 0
+                Y[p, idx[f"qw{i}"]:idx[f"qw{i}"]+4] = qs
+
+        return Y
+    
+
+class SensorPkgQuaternionRepairTorch(Repair):
+    """
+    Repair operator that normalizes quaternion variables stored in X.
+    X is expected to be a 1D array of dictionaries.
+    The quaternions are extracted from the dicts, tensorized, normalized, and placed back in the dicts.
+    """
+    def _do(self, problem:SensorPkgOptimization, X, **kwargs):
+        for x in X:
+            for i in range(problem.max_n_sensors):
+                if x[f"s{i}_type"] == 0:  # If sensor type is 0, set quaternion to zero
+                    x[f"s{i}_qw"] = 0.0
+                    x[f"s{i}_qx"] = 0.0
+                    x[f"s{i}_qy"] = 0.0
+                    x[f"s{i}_qz"] = 0.0
+                    x[f"s{i}_x"] = 0.0
+                    x[f"s{i}_y"] = 0.0
+                    x[f"s{i}_z"] = 0.0
+                else:
+                    # Normalize the quaternion
+                    quat = torch.tensor([
+                        x[f"s{i}_qw"],
+                        x[f"s{i}_qx"],
+                        x[f"s{i}_qy"],
+                        x[f"s{i}_qz"]
+                    ], dtype=torch.float32)
+                    quat = torch.nn.functional.normalize(quat, p=2, dim=0, eps=1e-10)
+                    x[f"s{i}_qw"], x[f"s{i}_qx"], x[f"s{i}_qy"], x[f"s{i}_qz"] = quat.tolist()
+        return X
+
+        
         
 
 def get_pareto_front(df, x='Cost', y='Perception Entropy', x_minimize=True, y_minimize=True):
@@ -681,7 +911,7 @@ def run_moo(problem:SensorPkgOptimization,
             num_offsprings:int=5,
             population_size:int=10, 
             # mutation_rate:float=0.1, 
-            crossover_rate:float=0.5,
+            # crossover_rate:float=0.5,
             verbose:bool=False,
             prior_bot:Bot3D=None,
             progress_callback=None) -> Tuple[OptimizeResult, pd.DataFrame]:
@@ -701,14 +931,15 @@ def run_moo(problem:SensorPkgOptimization,
     algorithm = MixedVariableGA(
         pop_size=population_size,
         n_offsprings=num_offsprings,
-        sampling=CustomSensorPkgRandomSampling(),
+        sampling=SensorPkgRandomSampling(),
+        mating=MixedVariableMating(
+            repair=SensorPkgQuaternionRepairTorch(), 
+            eliminate_duplicates=MixedVariableDuplicateElimination(),
+            ),
         survival=RankAndCrowdingSurvival(),
-        eliminate_duplicates=MixedVariableDuplicateElimination(),
-        # crossover=MixedVariableSBX(
-        #     prob=crossover_rate,
-        #     n_offsprings=num_offsprings,
-        #     alpha=0.5
-        # ),
+        repair=SensorPkgQuaternionRepairTorch(),
+        crossover=SensorPkgFlatCrossover(),
+        mutation=SensorPkgFlatMutation(),
     )
 
     problem.recorder_callback = DesignRecorder(problem.max_n_sensors)
