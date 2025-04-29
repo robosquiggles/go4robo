@@ -123,9 +123,9 @@ class GO4RExtension(omni.ext.IExt):
         self.optimization_problem:SensorPkgOptimization = None
         self.optimization_algorithm = None
         self.optimization_max_sensors:int = 5
-        self.optimization_generations:int = 5
-        self.optimization_offspring:int = 3
-        self.optimization_population_size:int = 8
+        self.optimization_generations:int = 2
+        self.optimization_offspring:int = 2
+        self.optimization_population_size:int = 4
         self.total_possible_designs:int = self.optimization_population_size + self.optimization_generations * self.optimization_offspring 
 
         # Results Viewer
@@ -1182,6 +1182,10 @@ class GO4RExtension(omni.ext.IExt):
         self._update_sensor_list_ui()
         self._update_voxel_groups_ui()
         self._update_sensor_options_ui()
+
+        # Now save a single bot's 3D visualization out to a file
+        self._log_message("Saving bot 3D visualization to file...")
+
         return self.robots
 
 
@@ -2455,7 +2459,9 @@ class GO4RExtension(omni.ext.IExt):
         res, pop_df = run_moo(problem = self.optimization_problem,
                               num_generations=self.optimization_generations,
                               num_offsprings=self.optimization_offspring,
-                              population_size=self.optimization_population_size)
+                              population_size=self.optimization_population_size,
+                              prior_bot=self.robots[0],
+                              progress_callback=progress_callback,)
         
         progress_callback.close()
 
@@ -2477,6 +2483,7 @@ class GO4RExtension(omni.ext.IExt):
 
         def _update_dash_app():
             # Update the dash app with the new data
+            dash_app.app.layout['source-bot-plot'].figure = self.robots[0].plot_bot_3d(show=False)
             dash_app.app.layout['pop-df-store'].data = pop_df.to_json(orient='split')
             dash_app.app.layput = dash_app.build_layout()
             self._log_message("Dash app updated with new data.")
@@ -2508,4 +2515,5 @@ class GO4RExtension(omni.ext.IExt):
 
         webbrowser.open(dash_app.url, new=1, autoraise=True)
         self._log_message(f"Openned results page in browser {dash_app.url} (if not already open)")
+
         

@@ -20,6 +20,7 @@ from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib.animation import FuncAnimation
 import plotly.graph_objects as go
+import plotly.express as px
 
 import torch
 
@@ -1135,7 +1136,7 @@ class Sensor3D_Instance:
             print("Prim overlapped mesh!")
             return True
         return False
-    
+
     def overlaps_any(self, stage):
         """Returns whether or not the sensor body overlaps with anything in the given stage."""
         raise NotImplementedError("This method is not yet implemented.")
@@ -1657,3 +1658,139 @@ class Bot3D:
         validity = sensor_constraints_validity and sensors_collision_validity
         return validity
 
+    def plot_bot_3d(
+            self, 
+            perception_space:PerceptionSpace=None, 
+            show=True, 
+            save_path:str=None, 
+            sensor_colors:tuple[tuple]=((255, 0, 0),
+                                        (0, 255, 0),
+                                        (0, 0, 255),
+                                        (255, 255, 0),
+                                        (0, 225, 225),
+                                        (255, 102, 0)),
+            **kwargs):
+        """Plot the bot in 3D using plotly.
+        
+        Plot contains:
+            - the bot body as a mesh (if it exists)
+            - each sensor in self.sensors as a point and a direction. Each sensor is colored by its type.
+            - if perception_space is not None, the perception space is shown as a point cloud (a point for each voxel).
+
+        Args:
+            perception_space (PerceptionSpace): The perception space to plot. If None, the perception space is not plotted.
+            show (bool): If True, show the plot. If False, return the figure.
+            save_path (str): The path to save the plot. If None, the plot is not saved.
+        Returns:
+            fig (plotly.graph_objects.Figure): The plotly figure object.
+        """
+
+        def random_color(name):
+            """Optional: Create a random color from a string, or define your own mapping"""
+            import hashlib
+            hash_digest = hashlib.md5(name.encode()).hexdigest()
+            return f"#{hash_digest[:6]}"
+
+        def add_sensor_cones(fig):
+            """Add cones to the plot for each sensor in the bot."""
+            # Get the translation and rotation of each sensor
+            translations = [[],[],[]]
+            directions = [[],[],[]]
+            names = []
+            colors = []
+            for sensor_instance in self.sensors:
+                translation = sensor_instance.translation
+                translations[0].append(translation[0])
+                translations[1].append(translation[1])
+                translations[2].append(translation[2])
+                quat = sensor_instance.quat_rotation  # (w,x,y,z)
+                names.append(sensor_instance.name)
+                
+                # Get direction vector
+                rot_mat = R.from_quat(quat).as_matrix()
+                local_forward = np.array([0, 0, 1])  # Local forward direction in sensor's local space
+                direction = rot_mat @ local_forward  # Transform to world space
+                # Normalize the direction vector
+                direction = direction / np.linalg.norm(direction)
+
+                directions[0].append(direction[0])
+                directions[1].append(direction[1])
+                directions[2].append(direction[2])
+                
+                color = random_color(sensor_instance.name)
+                colors.append(color)
+
+                # Add Cone trace for this sensor
+                fig.add_trace(go.Cone(
+                    x=[float(translation[0])],
+                    y=[float(translation[1])],
+                    z=[float(translation[2])],
+                    u=[1],
+                    v=[0],
+                    w=[0],
+                    # name=sensor_instance.name,
+                    # colorscale=[[0, color], [1, color]],
+                    # cmin=0,
+                    # cmax=1
+                ))
+                # fig.add_trace(go.Cone( # THIS WORKS
+                #     x=[1.0],
+                #     y=[1.0],
+                #     z=[0.0],
+                #     u=[1.0],
+                #     v=[1.0],   
+                #     w=[1.0]
+                # ))
+
+        height = 800 if 'height' not in kwargs else kwargs['height']
+        width = 800 if 'width' not in kwargs else kwargs['width']
+        opacity = 0.9 if 'opacity' not in kwargs else kwargs['opacity']
+        title = f"{self.name} Original" if 'title' not in kwargs else kwargs['title']
+
+        # Create a plotly figure
+        fig = go.Figure()
+
+        add_sensor_cones(fig)
+
+        # Add a dot at the origin
+        fig.add_trace(go.Scatter3d(
+            x=[0.0],  # X-coordinate
+            y=[0.0],  # Y-coordinate
+            z=[0.0],  # Z-coordinate
+            mode='markers',  # Display as markers
+            marker=dict(size=5, color='black'),  # Marker size and color
+            name='ORIGIN'  # Legend label
+        ))
+
+        fig.update_layout(
+            height=height,
+            width=width,
+            title=title,
+            scene=dict(
+                xaxis=dict(title='X'),
+                yaxis=dict(title='Y'),
+                zaxis=dict(title='Z'),
+                camera=dict(
+                    eye=dict(x=1.25, y=1.25, z=1.25),  # Adjust the camera position
+                    center=dict(x=0, y=0, z=0),  # Center the camera on the origin
+                    up=dict(x=0, y=0, z=1)  # Ensure the Z-axis is up
+                ),
+                aspectmode='data'  # Maintain the aspect ratio
+            )
+        )
+
+        # Add the bot body to the plot
+
+
+        # Add the perception space to the plot
+        # if perception_space is not None:
+        #     perception_space.plot_perception_space(fig)
+
+        # Show or save the plot
+        if show:
+            fig.show()
+        if save_path is not None:
+            fig.write_image(save_path)
+
+        return fig
+        

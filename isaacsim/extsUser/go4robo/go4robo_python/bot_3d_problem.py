@@ -35,9 +35,11 @@ class ProgressBar:
         self.pbar = tqdm(
             total=n_gen,
             desc="MOO Progress",
-            unit="gen",
+            unit="Generation",
             dynamic_ncols=True,
             leave=True,
+            colour="blue",
+
             file=sys.stdout  # Ensure tqdm writes to stdout
         )
         self.update_fn = update_fn  # Callback function to update the Isaac Sim progress bar
@@ -65,6 +67,7 @@ class DesignRecorder:
     def __init__(self, max_sensors:int=5):
         self.records = []
         self.max_sensors = max_sensors
+        self.notification_count = 0
 
     def notify(self, algorithm):
         # Get the current population's variables and objectives
@@ -73,20 +76,30 @@ class DesignRecorder:
         G = algorithm.pop.get("G") if algorithm.pop.has("G") else None
         for x, f, g in zip(X, F, G):
             self.notify_single(x, f, g)
+        self.notification_count += 1
     
     def notify_single(self, x, f, g=None):
         # Store as dict for easy DataFrame conversion
         self.records.append({
             "design": x.copy(),
             "Cost": float(f[1]),
-            "Perception Entropy": float(f[0])
+            "Perception Entropy": float(f[0]),
+            "Generation": self.notification_count
         })
+
+    def notify_init(self, x, f, g=None):
+        # Store as dict for easy DataFrame conversion
+        self.notify_single(x, f, g)
+        self.notification_count += 1
 
     def to_dataframe(self):
         # Convert to DataFrame for analysis/plotting
         df = pd.DataFrame(self.records)
         df["Index"] = df.index
         df["Name"] = df["Index"].map(lambda x: f"Design {x}")
+        # Rename the "Generation 0" design to "Prior"
+        df.loc[df["Generation"] == 0, "Name"] = "Prior Design"
+
         # Reorder columns to put Index and Name at the beginning
         cols = ["Index", "Name"] + [col for col in df.columns if col not in ["Index", "Name"]]
         df = df[cols]
@@ -219,7 +232,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         super().__init__(vars=variables, n_obj=2, **kwargs)
 
-    def new_bot_design(self):
+    def new_bot_design(self, incr=True) -> Bot3D:
         """
         Creates a new bot object with the same properties as the original bot.
         Returns:
@@ -227,7 +240,8 @@ class SensorPkgOptimization(ElementwiseProblem):
         """
         new_bot = copy.deepcopy(self.bot)
         new_bot.name = f"Design {self.n_designs_generated}"
-        self.n_designs_generated += 1
+        if incr:
+            self.n_designs_generated += 1
         return new_bot
 
     def get_sensor_option_key(self, sensor_instance:Sensor3D_Instance|None):
@@ -253,7 +267,8 @@ class SensorPkgOptimization(ElementwiseProblem):
         assert sensor_instance is None or isinstance(sensor_instance, (Sensor3D_Instance, None)), "sensor_instance must be a Sensor3D_Instance or None"
         assert idx < self.max_n_sensors, "idx must be less than max_n_sensors"
         assert sensor_instance is None or sensor_instance.sensor in self.sensor_options.values(), "sensor_instance must be in sensor_options"
-        assert sensor_instance is None or sensor_instance.get_transform() is not None, "sensor_instance must have a transform"
+        assert sensor_instance is None or sensor_instance.translation is not None, "sensor_instance must have a translation"
+        assert sensor_instance is None or sensor_instance.quat_rotation is not None, "sensor_instance must have a quaternion rotation"
 
         if verbose:
             print("Convert sensor->1d X:", sensor_instance)
@@ -335,28 +350,22 @@ class SensorPkgOptimization(ElementwiseProblem):
         assert isinstance(bot, Bot3D), "bot must be a Bot3D object"
         assert len(bot.sensors) <= self.max_n_sensors, "bot must have less than max_n_sensors sensors"
         
+        dict_1D = {}
+        for i in range(self.max_n_sensors):
+            if i < len(bot.sensors):
+                dict_1D.update(self.convert_sensor_instance_to_1D(bot.sensors[i], i, dtype=dict, verbose=verbose))
+            else:
+                dict_1D.update(self.convert_sensor_instance_to_1D(None, i, dtype=dict, verbose=verbose))
+        
         if dtype == dict:
-            x = dict()
-            for i in range(self.max_n_sensors):
-                if i < len(bot.sensors):
-                    sensor = bot.sensors[i]
-                else:
-                    sensor = None
-                x.update(self.convert_sensor_to_1D(sensor, i, dtype=dict))
-            if verbose:
-                print("Convert bot->1d X (dict):", x)
-            return x
+            return dict_1D
+        elif dtype == np.ndarray or dtype == np.array:
+            return np.array(list(dict_1D.values()))
+        elif dtype == list:
+            return list(dict_1D.values())
         else:
-            x = np.ndarray((self.max_n_sensors, self.n_var / self.max_n_sensors))
-            for i in range(self.max_n_sensors):
-                if i < len(bot.sensors):
-                    sensor = bot.sensors[i]
-                else:
-                    sensor = None
-                x[i] = self.convert_sensor_to_1D(sensor, i, dtype=np.ndarray)
-            if verbose:
-                print("Convert bot->1d X (array-like):", x)
-            return x.flatten()
+            raise ValueError("Invalid dtype:", dtype)
+                
         
 
     def convert_1D_to_bot(self, x, verbose=False):
@@ -372,17 +381,18 @@ class SensorPkgOptimization(ElementwiseProblem):
         """
         if verbose:
             print("Convert 1d->bot X:", x)
-        bot = copy.deepcopy(self.bot)
-        if type(x) is not dict:
-            xs = x.reshape(self.max_n_sensors, -1)
-        else:
-            xs = [{k: v for k, v in x.items() if k.startswith(f"s{i}_")} for i in range(0, self.max_n_sensors)]
-        if verbose:
-            print("Convert 1d->bot (xs):", xs)
-        bot.sensors = [self.convert_1D_to_sensor_instance(x, i) for i, x in enumerate(xs)]
-        while None in bot.sensors:
-            bot.sensors.remove(None)
-        return bot
+
+        bot = self.new_bot_design(incr=False) # Don't increment the design number because this was already designed
+        # Add all the sensors to the bot
+        for i in range(self.max_n_sensors):
+            # Get the sensor info from the dictionary
+            sensor_info = {k: v for k, v in x.items() if k.startswith(f"s{i}_")}
+            sensor_instnace = self.convert_1D_to_sensor_instance(sensor_info, i)
+            bot.sensors.append(sensor_instnace)
+        
+        # Update the name
+        bot.name = f"Design {self.n_designs_generated}"
+
 
     def convert_1D_to_spq_tensors(self, X, device=None) -> tuple[list, torch.Tensor, torch.Tensor]:
 
@@ -392,7 +402,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         for i in range(self.max_n_sensors):
             sensor_type = self.sensor_options[X[f"s{i}_type"]]
-            if sensor_type == "none":
+            if sensor_type == None or sensor_type == 0 or sensor_type == "None":
                 continue  # Skip inactive sensors
 
             sensor_types.append(sensor_type)
@@ -416,6 +426,25 @@ class SensorPkgOptimization(ElementwiseProblem):
         quaternions_tensor = torch.nn.functional.normalize(quaternions_tensor, p=2, dim=1, eps=1e-12)
 
         return sensor_types, positions_tensor, quaternions_tensor
+    
+    def _eval_bot_obj(self, bot:Bot3D, out=None, *args, **kwargs):
+        torch.cuda.empty_cache()  # Clear GPU memory
+
+        if out is None:
+            out = {}
+
+        if bot.get_design_validity():
+            pe, cov = bot.calculate_perception_entropy(self.perception_space)
+            cost = bot.calculate_cost()
+            out["F"] = [
+                pe,                  # Minimize perception entropy
+                cost                 # Minimize cost
+            ]
+        else:
+            out["F"] = [np.inf, np.inf]
+
+        return out
+
 
     def _evaluate(self, X, out, *args, **kwargs):
         """Evaluate the design variables and calculate the objectives."""
@@ -434,17 +463,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         print(f"Evaluating bot: {bot.name} with {len(bot.sensors)}") if verbose else None
 
-        torch.cuda.empty_cache()  # Clear GPU memory
-
-        if bot.get_design_validity():
-            pe, cov = bot.calculate_perception_entropy(self.perception_space)
-            cost = bot.calculate_cost()
-            out["F"] = [
-                pe,                  # Minimize perception entropy
-                cost                 # Minimize cost
-            ]
-        else:
-            out["F"] = [np.inf, np.inf]
+        self._eval_bot_obj(bot, out, *args, **kwargs)
 
         if 'verbose' in kwargs and kwargs['verbose']:
             print(f"{bot.name} eval took {time.time() - start_time:.2f} sec. PE: {pe:.3f}, Cov: {cov:.3f}")
@@ -601,7 +620,9 @@ def run_moo(problem:SensorPkgOptimization,
             population_size:int=10, 
             # mutation_rate:float=0.1, 
             # crossover_rate:float=0.5,
-            verbose:bool=False) -> Tuple[OptimizeResult, pd.DataFrame]:
+            verbose:bool=False,
+            prior_bot:Bot3D=None,
+            progress_callback=None) -> Tuple[OptimizeResult, pd.DataFrame]:
     """Run the mixed-variable multi-objective optimization algorithm on the bot.
     Args:
         num_generations (int): The number of generations to run.
@@ -612,9 +633,8 @@ def run_moo(problem:SensorPkgOptimization,
     Returns:
         Tuple[OptimizeResult, pd.DataFrame]: The optimization result and the design space DataFrame, including all the generated designs.
     """
-
-    progress_callback = ProgressBar(num_generations)
-    problem.recorder_callback = DesignRecorder(problem.max_n_sensors)
+    if progress_callback is None:
+        progress_callback = ProgressBar(num_generations)
 
     algorithm = MixedVariableGA(
         pop_size=population_size,
@@ -623,6 +643,11 @@ def run_moo(problem:SensorPkgOptimization,
         survival=RankAndCrowdingSurvival(),
         eliminate_duplicates=MixedVariableDuplicateElimination(),
     )
+
+    problem.recorder_callback = DesignRecorder(problem.max_n_sensors)
+    if prior_bot is not None:
+        first_bot_out = problem._eval_bot_obj(prior_bot)  # Evaluate the first design
+        problem.recorder_callback.notify_init(problem.convert_bot_to_1D(prior_bot, dtype=dict), first_bot_out["F"])  # Initialize the recorder with the first design
 
     res = minimize( problem,
                     algorithm,
@@ -673,51 +698,86 @@ def plot_tradespace(combined_df:pd.DataFrame,
     opacity = 0.9 if 'opacity' not in kwargs else kwargs['opacity']
     title = f"Objective Space ({num_results} designs)" if 'title' not in kwargs else kwargs['title']
     
-    y_min = min(combined_df[y[0]])
+    y_min = min(combined_df[y[0]]+ [0])
     y_max = max(combined_df[y[0]])
     y_range = y_max - y_min
-    x_min = min(combined_df[x[0]])
+    x_min = min(combined_df[x[0]]+ [0])
     x_max = max(combined_df[x[0]])
     x_range = x_max - x_min
 
-    fig = px.scatter(combined_df, x=x[0], y=y[0], 
-                    #  color='Optimized', 
-                     color_discrete_sequence=['#1276a4', '#fc7114'], 
-                     opacity=opacity,
-                     title=title, 
-                     template="plotly_white", 
-                     labels={x[0]: f'{x[0]} [{x[1]}]', y[0]: f'{y[0]} [{y[1]}]'},
-                     hover_name=hover_name,
-                     hover_data=[x[0], y[0]],
-                     custom_data=[hover_name])
-    
-    fig.update_traces(marker=dict(size=5*(width/600)),
-                      hovertemplate="<br>".join([
-                            "%{customdata[0]}",
-                            f"{x[0]} [{x[1]}]: "+"%{x:.2f}",
-                            f"{y[0]} [{y[1]}]: "+"%{y:.2f} ",
-                            ])
-                      )
-    
+    # Find the pareto front
     pareto, idx, ut = get_pareto_front(combined_df, x="Cost", y="Perception Entropy", x_minimize=x_minimize, y_minimize=y_minimize)
 
-    fig.add_scatter(x=[ut[0]], 
-                    y=[ut[1]], 
-                    mode='markers', 
-                    marker=dict(symbol='star', size=12*(width/600), color='gold'), 
-                    name='Ideal',
-                    hoverinfo='none',  # Disable hover data
-                    )
+    #Add a column to the dataframe for pareto
+    combined_df['Pareto Optimal'] = ''
+    combined_df.loc[idx, 'Pareto Optimal'] = 'Pareto Optimal'
 
+    # Split the "Prior Design" from the rest of the designs as a df
+    prior_df = combined_df[combined_df['Name'] == 'Prior Design']
+    generated_df = combined_df[combined_df['Name'] != 'Prior Design']
+
+    # Plot the population of generated designs
+    fig = px.scatter(
+        generated_df, x=x[0], y=y[0], 
+        # color='Optimized', 
+        color_discrete_sequence=['#1276a4'], 
+        opacity=opacity,
+        title=title, 
+        template="plotly_white", 
+        labels={x[0]: f'{x[0]} [{x[1]}]', y[0]: f'{y[0]} [{y[1]}]'},
+        name='Generated Design',
+        hover_name=hover_name,
+        hover_data=[x[0], y[0]],
+        custom_data=[hover_name]
+        )
+    
+    # Plot the prior/original design
+    fig.add_scatter(
+        x=prior_df[x[0]].values,
+        y=prior_df[y[0]].values,
+        mode='markers',
+        opacity=opacity,
+        marker=dict(symbol='square', size=12 * (width / 600), color='#dd6b00'),
+        name='Prior Design',
+        hoverinfo='text',
+        text=prior_df[hover_name],
+        hover_name=hover_name,
+        hover_data=[x[0], y[0]],
+        custom_data=[hover_name]
+    )
+    
+    # Set the hover template for the designs
+    fig.update_traces(
+        marker=dict(size=5*(width/600)),
+        hovertemplate="<br>".join([
+        "%{customdata[0]}",
+        f"{x[0]} [{x[1]}]: "+"%{x:.2f}",
+        f"{y[0]} [{y[1]}]: "+"%{y:.2f} ",
+        ])
+    )
+
+    # Plot the utopia point
+    fig.add_scatter(
+        x=[ut[0]], 
+        y=[ut[1]], 
+        mode='markers', 
+        marker=dict(symbol='star', size=12*(width/600), color='gold'), 
+        name='Ideal',
+        hoverinfo='none',  # Disable hover data
+    )
+
+    # Plot the Pareto front
     if show_pareto:
-        fig.add_scatter(x=pareto[:, 0],
-                        y=pareto[:, 1],
-                        mode='lines+markers', 
-                        line=dict(color='orange', width=1*(width/600)), 
-                        marker=dict(size=10*(width/600), color='orange', symbol='circle-open'),
-                        name='Pareto Front',
-                        hoverinfo='none',  # Disable hover data
-                        )
+        fig.add_scatter(
+            x=pareto[:, 0],
+            y=pareto[:, 1],
+            mode='lines+markers', 
+            line=dict(color='orange', width=1*(width/600)), 
+            marker=dict(size=10*(width/600), color='orange', symbol='circle-open'),
+            name='Pareto Front',
+            hoverinfo='none',  # Disable hover data
+        )
+    
     
     if not panzoom:
         fig.update_layout(

@@ -113,6 +113,18 @@ def build_layout():
             html.P("The goal of this thesis is to generate, select, and optimize sensor packages for mobile robots."),
         ], className="h-100 p-4 bg-light text-dark border rounded-3",),
         dbc.Container([
+            html.H1("Source Robot Visualized"),
+            dcc.Graph(
+                id='source-bot-plot',
+                figure=px.scatter_3d(pd.DataFrame({'x':[0.0], 'y':[0.0], 'z':[0.0], 'name':'PLACEHOLDER DOT'}), 
+                                     x='x', 
+                                     y='y', 
+                                      z='z', 
+                                     hover_name='name')
+                ),
+            html.Hr(className="my-2"),
+        ]),
+        dbc.Container([
             html.H2("Problem Definition"),
             html.P("The problem is defined as a multi-objective optimization problem with the following objectives:"),
             html.Ul([
