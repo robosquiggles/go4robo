@@ -45,27 +45,47 @@ img_width = 400
 @app.callback(
     Output('pop-df-table', 'data'),
     Output('pop-df-table', 'columns'),
+    Output('pop-df-table', 'style_data_conditional'),
     Output('tradespace-plot', 'figure'),
-    Input('pop-df-store', 'data')
+    Input('pop-df-store', 'data'),
+    Input('tradespace-plot', 'clickData')
 )
-def update_results(pop_df_json):
+def update_table_and_plot(pop_df_json, click_data):
     if pop_df_json is None:
-        return [], [], go.Figure()
-    
+        return [], [], [], go.Figure()
+
     # Deserialize the DataFrame
     df = pd.read_json(StringIO(pop_df_json), orient='split')
-    
+
     # Update DataTable
     columns = [{"name": i, "id": i} for i in df.columns]
     data = df.to_dict('records')
-    
+
+    # Default style for the table
+    style_data_conditional = []
+
+    # Check if a point was clicked
+    if click_data is not None:
+        # Extract the hover name (or unique identifier) from the clicked point
+        clicked_name = click_data['points'][0]['customdata'][0]
+
+        # Highlight the row in the table
+        style_data_conditional = [
+            {
+                'if': {'filter_query': f'{{Name}} = "{clicked_name}"'},
+                'backgroundColor': '#4ccfff',
+                'color': 'black',
+            }
+        ]
+
     # Update Tradespace Plot
     figure = bot_3d_problem.plot_tradespace(df)
-    
-    return data, columns, figure
+
+    return data, columns, style_data_conditional, figure
 
 # TODO: Add a callback to update the design variable table
 
+########################### Download callback ##########################
 @app.callback(
     Output("download", "data"),
     Input("btn_csv", "n_clicks"),

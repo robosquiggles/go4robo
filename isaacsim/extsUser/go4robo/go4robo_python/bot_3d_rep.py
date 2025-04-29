@@ -1720,6 +1720,15 @@ class Bot3D:
                 color = random_color(sensor_instance.name)
                 colors.append(color)
 
+                fig.add_trace(go.Scatter3d(
+                    x=[float(translation[0])],
+                    y=[float(translation[1])],
+                    z=[float(translation[2])],
+                    mode='markers',  # Display as markers
+                    marker=dict(size=5, color='orange'),  # Marker size and color
+                    name='ORIGIN'  # Legend label
+                ))
+
                 # Add Cone trace for this sensor
                 fig.add_trace(go.Cone(
                     x=[float(translation[0])],

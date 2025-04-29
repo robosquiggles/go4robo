@@ -725,7 +725,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
         title=title, 
         template="plotly_white", 
         labels={x[0]: f'{x[0]} [{x[1]}]', y[0]: f'{y[0]} [{y[1]}]'},
-        name='Generated Design',
+        # name='Generated Design',
         hover_name=hover_name,
         hover_data=[x[0], y[0]],
         custom_data=[hover_name]
@@ -741,9 +741,9 @@ def plot_tradespace(combined_df:pd.DataFrame,
         name='Prior Design',
         hoverinfo='text',
         text=prior_df[hover_name],
-        hover_name=hover_name,
-        hover_data=[x[0], y[0]],
-        custom_data=[hover_name]
+        # hover_name=hover_name,
+        # hover_data=[x[0], y[0]],
+        # custom_data=[hover_name]
     )
     
     # Set the hover template for the designs
