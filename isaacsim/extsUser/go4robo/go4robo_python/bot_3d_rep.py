@@ -1076,6 +1076,11 @@ class Sensor3D_Instance:
             hres = int(sensor.h_fov / sensor.h_res) # number of rays, horizontal
             vres = int(sensor.v_fov / sensor.v_res) # number of rays, vertical
 
+            # Check if there are zero norms in quat
+            if np.linalg.norm(tfs[i][1]) == 0:
+                print('\033[91m' + f"Warning: Quaternion used to generate rays for {sensor.name} has zero norm. Skipping sensor in {self.name}.\nQUAT: {tfs[i][1]}" + '\033[0m')
+                continue
+
             rotation = R.from_quat(tfs[i][1]).as_matrix() # Convert quaternion to rotation matrix
             
             position = torch.tensor(tfs[i][0], dtype=torch.float32, device=device) # Simple x,y,z
@@ -1195,16 +1200,16 @@ class Bot3D:
                  usd_context:omni.usd.UsdContext,
                  body:list[UsdGeom.Mesh]=None,
                  path:str=None,
-                 sensor_pose_constraint:list[UsdGeom.Mesh]=None,
+                 sensor_pose_constraint:np.ndarray[float]=None,
                  sensors:list[Sensor3D_Instance]=[]):
         """
         Initialize a bot representation with a given shape, sensor coverage requirements, and optional color and sensor pose constraints.
         Args:
             name (str): The name of the bot.
+            usd_context (omni.usd.UsdContext): The USD context (if there is one).
             body (list[UsdGeom.Mesh]): The body of the bot.
             path (str): The path to the bot in the USD stage.
-            sensor_coverage_requirement (list[UsdGeom.Mesh]): The required coverage area for the sensors.
-            sensor_pose_constraint (list[UsdGeom.Mesh]): The constraints for the sensor poses.
+            sensor_pose_constraint (np.ndarray): The pose constraint for the sensors as an array [[x-bounds], [y-bounds], [z-bounds]]. ex. [[0,1], [0,1], [0,1]]
             sensors (list[Sensor3D_Instance]): A list of sensor instances attached to the bot.
         """
         self.name = name
@@ -1809,6 +1814,11 @@ class Bot3D:
                 translation = sensor_instance.translation
                 quat = sensor_instance.quat_rotation  # (w,x,y,z)
                 names.append(sensor_instance.name)
+
+                # Check if there are zero norms in quat
+                if np.linalg.norm(quat) == 0:
+                    print('\033[91m' + f"Warning: Quaternion has zero norm. Skipping sensor {sensor_instance.name}.\nQUAT: {quat}" + '\033[0m')
+                    continue
                 
                 # Get direction vector
                 rot_mat = R.from_quat(quat).as_matrix()
@@ -1915,6 +1925,10 @@ class Bot3D:
 
         # Add the bot body to the plot
         # TODO: Add the bot body to the plot
+
+        # Add the sensor pose constraints to the plot
+        if self.sensor_pose_constraint is not None:
+            print("TODO Adding sensor pose constraints to the plot.")
 
         # Add the sensors to the plot
         add_sensors(fig)

@@ -3,6 +3,7 @@ from .bot_3d_rep import *
 import numpy as np
 
 import sys
+import traceback
 
 import plotly.express as px
 
@@ -38,7 +39,7 @@ class ProgressBar:
             unit="Generation",
             dynamic_ncols=True,
             leave=True,
-            colour="blue",
+            colour='rgb(0, 91, 151)',
 
             file=sys.stdout  # Ensure tqdm writes to stdout
         )
@@ -47,7 +48,7 @@ class ProgressBar:
     def notify(self, algorithm, problem):
         self.pbar.update(1)
         self.pbar.set_postfix({
-            "Designs": problem.n_evals,
+            "Designs": problem.n_designs_generated,
             "Best Cost": algorithm.pop.get("F").min(axis=0)[1],
             "Best PE": algorithm.pop.get("F").min(axis=0)[0]
         })
@@ -140,8 +141,6 @@ class DesignRecorder:
                     max_sensors = max(max_sensors, sensor_idx + 1)
                     design_dict.update({k: v})
 
-        
-    
     def sensor_options_to_df(self, sensor_options:list[Sensor3D|None]):
         # Convert the sensor options to a DataFrame
         data = []
@@ -814,6 +813,7 @@ class SensorPkgQuaternionRepairTorch(Repair):
     The quaternions are extracted from the dicts, tensorized, normalized, and placed back in the dicts.
     """
     def _do(self, problem:SensorPkgOptimization, X, **kwargs):
+        eps = 1e-10 # Small value to avoid division by zero
         for x in X:
             for i in range(problem.max_n_sensors):
                 if x[f"s{i}_type"] == 0:  # If sensor type is 0, set quaternion to zero
@@ -832,64 +832,74 @@ class SensorPkgQuaternionRepairTorch(Repair):
                         x[f"s{i}_qy"],
                         x[f"s{i}_qz"]
                     ], dtype=torch.float32)
-                    quat = torch.nn.functional.normalize(quat, p=2, dim=0, eps=1e-10)
+                    # Correct for zero norm
+                    if quat.norm() < eps:
+                        quat = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+                    quat = torch.nn.functional.normalize(quat, p=2, dim=0, eps=eps)
                     x[f"s{i}_qw"], x[f"s{i}_qx"], x[f"s{i}_qy"], x[f"s{i}_qz"] = quat.tolist()
         return X
 
         
         
 
-def get_pareto_front(df, x='Cost', y='Perception Entropy', x_minimize=True, y_minimize=True):
+def get_pareto_front(df, x='Cost', y='Perception Entropy',
+                     x_minimize=True, y_minimize=True):
     """
-    Get the Pareto front for a given DataFrame, considering whether to minimize or maximize each objective.
+    Get the non-dominated Pareto front for a DataFrame of bi-objective designs.
 
     Args:
-        df (pd.DataFrame): The DataFrame containing the data.
-        x (str): The column name for the first objective.
-        y (str): The column name for the second objective.
-        x_minimize (bool): Whether to minimize the first objective (True) or maximize it (False).
-        y_minimize (bool): Whether to minimize the second objective (True) or maximize it (False).
+        df (pd.DataFrame): DataFrame containing at least the columns x and y.
+        x (str): Name of the first objective column.
+        y (str): Name of the second objective column.
+        x_minimize (bool): If True, smaller x is better; if False, larger x is better.
+        y_minimize (bool): If True, smaller y is better; if False, larger y is better.
 
     Returns:
-        np.ndarray: The Pareto front points.
-        list: The indices of the Pareto front points in the original DataFrame.
-        tuple: The utopia point in (x, y).
+        pareto_points (np.ndarray): Array of shape (k,2) of the Pareto designs’ (x,y).
+        pareto_idx   (List[int]):  Indices in `df` corresponding to those designs.
+        utopia_point (tuple):      The “best possible” utopia corner for these objectives.
     """
-    # Extract the relevant columns for the Pareto front
-    points = df[[x, y]].values
+    # 1) Extract raw points
+    raw = df[[x, y]].values.astype(float)  # shape (n,2)
+    pts = raw.copy()
 
-    # Adjust the points based on the minimization/maximization direction
+    # 2) Flip signs if we’re maximizing
     if not x_minimize:
-        points[:, 0] = -points[:, 0]
+        pts[:, 0] = -pts[:, 0]
     if not y_minimize:
-        points[:, 1] = -points[:, 1]
+        pts[:, 1] = -pts[:, 1]
 
-    # Sort the points by the first objective
-    sorted_points = points[np.argsort(points[:, 0])]
+    n = pts.shape[0]
+    is_dominated = np.zeros(n, dtype=bool)
 
-    # Initialize the Pareto front with the first point
-    pareto_front = [sorted_points[0]]
-    indices = [df.index[np.where((df[[x, y]].values == sorted_points[0]).all(axis=1))[0][0]]]
+    # 3) Pairwise check: i is dominated if any j beats it on both dims,
+    #    and strictly better in at least one.
+    for i in range(n):
+        for j in range(n):
+            if j == i:
+                continue
+            # j dominates i?
+            if (pts[j] <= pts[i]).all() and (pts[j] < pts[i]).any():
+                is_dominated[i] = True
+                break
 
-    # Iterate through the sorted points and add to Pareto front if it dominates the previous point
-    for point in sorted_points[1:]:
-        if point[1] < pareto_front[-1][1]:  # Check for dominance
-            pareto_front.append(point)
-            indices.append(df.index[np.where((df[[x, y]].values == point).all(axis=1))[0][0]])
+    # 4) Collect non-dominated
+    pareto_idx = np.where(~is_dominated)[0]
+    pareto_pts = pts[pareto_idx, :]
 
-    # Revert the points back to their original scale
-    pareto_front = np.array(pareto_front)
+    # 5) Restore original signs
+    restored = pareto_pts.copy()
     if not x_minimize:
-        pareto_front[:, 0] = -pareto_front[:, 0]
+        restored[:, 0] = -restored[:, 0]
     if not y_minimize:
-        pareto_front[:, 1] = -pareto_front[:, 1]
+        restored[:, 1] = -restored[:, 1]
 
-    # Calculate the utopia point
-    utopia_x = pareto_front[:, 0].min() if x_minimize else pareto_front[:, 0].max()
-    utopia_y = pareto_front[:, 1].min() if y_minimize else pareto_front[:, 1].max()
-    utopia_point = (utopia_x, utopia_y)
+    # 6) Compute utopia point (ideal corner)
+    ux = restored[:, 0].min() if x_minimize else restored[:, 0].max()
+    uy = restored[:, 1].min() if y_minimize else restored[:, 1].max()
+    utopia = (ux, uy)
 
-    return pareto_front, indices, utopia_point
+    return restored, df.index[pareto_idx].tolist(), utopia
 
 
 def get_hypervolume(df, ref_point, x='Cost', y='Perception Coverage', x_minimize=True, y_minimize=False):
@@ -947,12 +957,18 @@ def run_moo(problem:SensorPkgOptimization,
         first_bot_out = problem._eval_bot_obj(prior_bot)  # Evaluate the first design
         problem.recorder_callback.notify_init(problem.convert_bot_to_1D(prior_bot, dtype=dict), first_bot_out["F"])  # Initialize the recorder with the first design
 
-    res = minimize( problem,
-                    algorithm,
-                    ('n_gen', num_generations),
-                    seed=1,
-                    callback=lambda algo: [progress_callback.notify(algo, problem), problem.recorder_callback.notify(algo)],
-                    verbose=verbose)
+    try:
+        res = minimize( problem,
+                        algorithm,
+                        ('n_gen', num_generations),
+                        seed=1,
+                        callback=lambda algo: [progress_callback.notify(algo, problem), problem.recorder_callback.notify(algo)],
+                        verbose=verbose)
+    except Exception as e:
+        print('\033[91m' + f"ERROR DURING run_moo()!! Returing res(=None) and df anywho for introspection" + '\033[0m')
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        traceback.print_exception(exc_type, exc_value, exc_traceback)
+        res = None
 
     progress_callback.close()
 

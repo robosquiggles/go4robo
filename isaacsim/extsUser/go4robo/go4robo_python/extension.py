@@ -128,6 +128,10 @@ class GO4RExtension(omni.ext.IExt):
         self.optimization_population_size:int = 4
         self.total_possible_designs:int = self.optimization_population_size + self.optimization_generations * self.optimization_offspring 
 
+        self.opt_results_folder_path = os.path.join(os.path.dirname(__file__), 'results')
+        if not os.path.exists(self.opt_results_folder_path):
+            os.makedirs(self.opt_results_folder_path)
+
         # Previewer
         # self._stop_dash_app()
         asyncio.ensure_future(self._launch_dash())
@@ -1179,9 +1183,6 @@ class GO4RExtension(omni.ext.IExt):
         self._update_sensor_options_ui()
         if self.robots[0]:
             self._update_dash_app(robot=self.robots[0])
-
-        # Now save a single bot's 3D visualization out to a file
-        self._log_message("Saving bot 3D visualization to file...")
 
         return self.robots
 
@@ -2487,19 +2488,23 @@ class GO4RExtension(omni.ext.IExt):
         progress_callback = ProgressBar(self.optimization_generations, update_fn=update_progress_bar)
 
         res, pop_df = run_moo(problem = self.optimization_problem,
-                              num_generations=self.optimization_generations,
-                              num_offsprings=self.optimization_offspring,
-                              population_size=self.optimization_population_size,
-                              prior_bot=self.robots[0],
-                              progress_callback=progress_callback,)
+                            num_generations=self.optimization_generations,
+                            num_offsprings=self.optimization_offspring,
+                            population_size=self.optimization_population_size,
+                            prior_bot=self.robots[0],
+                            progress_callback=progress_callback,)
         
         progress_callback.close()
 
         self._update_dash_app(pop_df=pop_df, robot=self.robots[0], problem=self.optimization_problem)
 
         pareto_front = get_pareto_front(pop_df)
+        import datetime
+        unique_file_name = os.path.join(self.opt_results_folder_path, f"designs_{self.optimization_problem.prior_bot.name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 
         self._log_message("Optimization complete.")
+        self._log_message(f"Saving Optimization Designs to {self.opt_results_folder_path + unique_file_name}")
+        pop_df.to_csv(unique_file_name, index=False)
         self._log_message(f"{len(pareto_front)} Pareto optimal designs found.")
 
 

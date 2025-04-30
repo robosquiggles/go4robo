@@ -104,14 +104,14 @@ def update_prior_bot_plot(prior_bot_json, problem_json):
         prior_bot_figure = prior_bot.plot_bot_3d(
             perception_space=problem.perception_space, 
             show=False,
-            width=600,
+            width=800,
         )
     else:
         # Generate the 3D plot without perception space
         prior_bot_figure = prior_bot.plot_bot_3d(
             perception_space=None,
             show=False,
-            width=600,
+            width=800,
         )
 
     # TODO: Add code to update the design variable table
