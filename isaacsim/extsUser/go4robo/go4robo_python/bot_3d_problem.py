@@ -984,6 +984,7 @@ def run_moo(problem:SensorPkgOptimization,
     return res, all_bots_df
 
 def plot_tradespace(combined_df:pd.DataFrame, 
+                    selected_name=None,
                     x=('Cost', '$'), 
                     y=('Perception Entropy', '-'), 
                     x_minimize=True,
@@ -1097,6 +1098,20 @@ def plot_tradespace(combined_df:pd.DataFrame,
             marker=dict(size=10*(width/600), color='orange', symbol='circle-open'),
             name='Pareto Front',
             hoverinfo='none',  # Disable hover data
+        )
+
+    # Finally draw a circle around the selected design
+    if selected_name is not None:
+        selected_df = combined_df[combined_df['Name'] == selected_name]
+        fig.add_scatter(
+            x=selected_df[x[0]].values,
+            y=selected_df[y[0]].values,
+            mode='markers',
+            marker=dict(symbol='circle-open', size=12*(width/600), color='#00729b'),
+            name='Selected Design',
+            hoverinfo='text',
+            text=selected_df[hover_name],
+            customdata=[hover_name]
         )
     
     
