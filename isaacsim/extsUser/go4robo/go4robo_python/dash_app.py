@@ -47,42 +47,55 @@ img_width = 400
     Output('pop-df-table', 'columns'),
     Output('pop-df-table', 'style_data_conditional'),
     Output('tradespace-plot', 'figure'),
-    # Output('selected-bot-plot', 'figure'),  # New output for the bot plot
+    Output('selected-bot-plot', 'figure'),          # ← New output
     Input('pop-df-store', 'data'),
-    Input('tradespace-plot', 'clickData')
+    Input('pop-df-table', 'active_cell'),           # ← Listen for row clicks
+    State('problem-store', 'data')                  # ← Need the problem JSON
 )
-def update_table_and_plot(pop_df_json, click_data):
+def update_table_and_plot(pop_df_json, active_cell, problem_json):
+    # --- 1) If no population yet, return all empty/placeholder figures ---
     if pop_df_json is None:
-        return [], [], [], go.Figure()
+        empty_fig = go.Figure()
+        return [], [], [], empty_fig, empty_fig
 
-    # Deserialize the DataFrame
+    # --- 2) Reconstruct the DataFrame from your JSON store ---
     df = pd.read_json(StringIO(pop_df_json), orient='split')
 
-    # Update DataTable
-    columns = [{"name": i, "id": i} for i in df.columns]
+    # --- 3) Build the DataTable data & columns as before ---
     data = df.to_dict('records')
+    columns = [{"name": col, "id": col} for col in df.columns]
 
-    # Default style for the table
+    # --- 4) Highlighting style: no change from your existing logic ---
     style_data_conditional = []
+    # (You could also highlight based on active_cell if you like)
 
-    # Check if a point was clicked
-    if click_data is not None:
-        # Extract the hover name (or unique identifier) from the clicked point
-        clicked_name = click_data['points'][0]['customdata'][0]
+    # --- 5) Re-generate your tradespace plot as before ---
+    tradespace_fig = bot_3d_problem.plot_tradespace(df)
 
-        # Highlight the row in the table
-        style_data_conditional = [
-            {
-                'if': {'filter_query': f'{{Name}} = "{clicked_name}"'},
-                'backgroundColor': '#4ccfff',
-                'color': 'black',
-            }
-        ]
+    # --- 6) Build the selected‐bot plot, default empty ---
+    selected_fig = go.Figure()
 
-    # Update Tradespace Plot
-    figure = bot_3d_problem.plot_tradespace(df)
+    # Only if the user clicked a row:
+    if active_cell:
+        row_idx = active_cell['row']
+        row_dict = df.iloc[row_idx].to_dict()
 
-    return data, columns, style_data_conditional, figure
+        # 6a) Rebuild your SensorPkgOptimization problem
+        problem = bot_3d_problem.SensorPkgOptimization.from_json(problem_json)
+
+        # 6b) Convert that row back into a Bot3D
+        #     (make sure your convert_1D_to_bot actually returns the bot)
+        bot = problem.convert_1D_to_bot(row_dict)
+
+        # 6c) Plot it in 3D
+        selected_fig = bot.plot_bot_3d(
+            perception_space=problem.perception_space,
+            show=False,
+            width=600,    # or whatever size you prefer
+        )
+
+    # --- 7) Return all five outputs in order ---
+    return data, columns, style_data_conditional, tradespace_fig, selected_fig
 
 @app.callback(
     Output('prior-bot-plot', 'figure'),

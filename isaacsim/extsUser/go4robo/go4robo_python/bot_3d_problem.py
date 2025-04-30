@@ -39,7 +39,7 @@ class ProgressBar:
             unit="Generation",
             dynamic_ncols=True,
             leave=True,
-            colour='rgb(0, 91, 151)',
+            colour='#005b97',
 
             file=sys.stdout  # Ensure tqdm writes to stdout
         )
@@ -365,7 +365,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         else:
             raise ValueError("Invalid dtype:", dtype)
     
-    def convert_1D_to_sensor_instance(self, x:dict|np.ndarray|list, idx:int, verbose=False) -> Sensor3D_Instance|None:
+    def convert_1D_to_sensor_instance(self, x:dict, idx:int, verbose=False) -> Sensor3D_Instance|None:
         """
         Converts a 1D representation of a sensor to a Sensor3D_Instance object.
         Args:
@@ -377,24 +377,28 @@ class SensorPkgOptimization(ElementwiseProblem):
         """
         assert idx < self.max_n_sensors, "idx must be less than max_n_sensors"
         assert x is not None, "x must not be None"
-        assert type(x) is dict or type(x) is np.ndarray or type(x) is list, "x must be a dict or np.ndarray or list"
+        assert type(x) is dict, "x must be a dictionary"
 
-        if type(x) is dict:
-            sensor_type = x[f"s{idx}_type"]
-            tf = {k: v for k, v in x.items() if k.startswith(f"s{idx}_tf_")}
-        else:
-            sensor_type = x[idx * 2]
-            tf = x[idx * 2 + 1]
-
-        if verbose:
-            print("Convert 1d->sensor X:", x)
+        
+        sensor_type = x[f"s{idx}_type"]
+        quat = (
+            x[f"s{idx}_qw"],
+            x[f"s{idx}_qx"],
+            x[f"s{idx}_qy"],
+            x[f"s{idx}_qz"]
+        )
+        pos = (
+            x[f"s{idx}_x"],
+            x[f"s{idx}_y"],
+            x[f"s{idx}_z"]
+        )
         
         if sensor_type > 0 and sensor_type in self.sensor_options: # 0 is None
             sensor = self.sensor_options[sensor_type]
             sensor_instance = Sensor3D_Instance(sensor=sensor,
                                                 name=f"sensor_{idx}",
-                                                tf=self.convert_1D_to_4dtf(tf),
-                                                path=None)
+                                                tf=(pos, quat),
+                                                path='')
             return sensor_instance
         else:
             return None
@@ -440,19 +444,22 @@ class SensorPkgOptimization(ElementwiseProblem):
             Given a dictionary `x` with keys like 's0_param1', 's1_param2', etc., this method
             will split the dictionary into separate sensor dictionaries and assign them to the bot's sensors.
         """
+        assert isinstance(x, dict), "x must be a dictionary"
+
         if verbose:
             print("Convert 1d->bot X:", x)
 
-        bot = self.new_bot_design(incr=False) # Don't increment the design number because this was already designed
-        # Add all the sensors to the bot
+        sensor_instances = []
         for i in range(self.max_n_sensors):
-            # Get the sensor info from the dictionary
-            sensor_info = {k: v for k, v in x.items() if k.startswith(f"s{i}_")}
-            sensor_instnace = self.convert_1D_to_sensor_instance(sensor_info, i)
-            bot.sensors.append(sensor_instnace)
-        
-        # Update the name
-        bot.name = f"Design {self.n_designs_generated}"
+            sensor_instance = self.convert_1D_to_sensor_instance(x, i, verbose=verbose)
+            if sensor_instance is not None:
+                sensor_instances.append(sensor_instance)
+
+        bot = self.new_bot_design(incr=False)
+        bot.name=x["Name"]
+        bot.sensors = sensor_instances
+
+        return bot
 
 
     def convert_1D_to_spq_tensors(self, X:dict, device=None) -> tuple[list, torch.Tensor, torch.Tensor]:
