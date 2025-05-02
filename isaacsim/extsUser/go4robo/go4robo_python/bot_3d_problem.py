@@ -211,7 +211,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         self.max_n_sensors = max_n_sensors
 
         # PERCEPTION SPACE
-        assert isinstance(perception_space, PerceptionSpace), "perception_space must be a PerceptionSpace object"
+        assert isinstance(perception_space, PerceptionSpace), f"perception_space must be a PerceptionSpace object, but is a {type(perception_space)}"
         self.perception_space = perception_space
 
         # SENSOR POSE CONSTRAINTS

@@ -379,12 +379,19 @@ class PerceptionSpace:
 
         return data
     
+    @staticmethod
     def from_json(json_dict):
         """
         Load the perception space from a JSON file.
         Args:
             json_dict (dict): A dictionary representation of the perception space.
         """
+        if not isinstance(json_dict, dict):
+            raise ValueError("Invalid perception_space data")
+        
+        assert "voxel_groups" in json_dict, "Invalid perception_space data, no voxel_groups found"
+        assert "weights" in json_dict, "Invalid perception_space data, no weights found"
+        
         voxel_groups = []
         for voxel_group in json_dict["voxel_groups"]:
             voxel_groups.append(PerceptionSpace.VoxelGroup(
@@ -394,7 +401,9 @@ class PerceptionSpace:
                 voxel_sizes=torch.tensor(voxel_group["voxel_sizes"])
             ))
         weights = np.array(json_dict["weights"])
-        return PerceptionSpace(voxel_groups=voxel_groups, weights=weights)
+        perception_space = PerceptionSpace(voxel_groups=voxel_groups, weights=weights)
+        assert isinstance(perception_space, PerceptionSpace), "Invalid perception_space data"
+        return perception_space
 
     def add_voxel_group(self, voxel_group:VoxelGroup, weight:float):
         """
@@ -860,7 +869,7 @@ class Sensor3D_Instance:
         assert isinstance(tf, (tuple, np.ndarray, list)) and len(tf) == 2, "Transformation must be a tuple, list, or np.ndarray of length 2 (translation and rotation)"
         assert isinstance(tf[0], (tuple, np.ndarray, list)) and len(tf[0]) == 3, "TF Translation must be a list or tuple of length 3 (x,y,z)"
         assert isinstance(tf[1], (tuple, np.ndarray, list)) and len(tf[1]) == 4, "TF Rotation must be a list or tuple of length 4 (w, x, y, z)"
-        assert isinstance(usd_context, (omni.usd.UsdContext, None)), "USD context must be of type omni.usd.UsdContext or None"
+        # assert isinstance(usd_context, (omni.usd.UsdContext, None)), "USD context must be of type omni.usd.UsdContext or None"
         assert isinstance(name, str) or name is None, "Name must be a string or None"
 
         self.name = name
