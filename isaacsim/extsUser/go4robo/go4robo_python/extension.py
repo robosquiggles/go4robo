@@ -1143,6 +1143,8 @@ class GO4RExtension(omni.ext.IExt):
             for child in prim.GetChildren():
                 _assign_sensors_to_robot(child, bot, processed_camera_paths)
 
+        # TODO Find and add the sensor constraint mesh bounds as bounds
+
         self._log_message("Refreshing robots & sensors list...")
 
         stage = get_current_stage()
@@ -2492,20 +2494,20 @@ class GO4RExtension(omni.ext.IExt):
                             num_offsprings=self.optimization_offspring,
                             population_size=self.optimization_population_size,
                             prior_bot=self.robots[0],
-                            progress_callback=progress_callback,)
+                            progress_callback=progress_callback,
+                            gens_between_save=2,
+                            save_dir=self.opt_results_folder_path)
         
         progress_callback.close()
 
         self._update_dash_app(pop_df=pop_df, robot=self.robots[0], problem=self.optimization_problem)
 
         pareto_front = get_pareto_front(pop_df)
-        import datetime
-        unique_file_name = os.path.join(self.opt_results_folder_path, f"designs_{self.optimization_problem.prior_bot.name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
 
         self._log_message("Optimization complete.")
-        self._log_message(f"Saving Optimization Designs to {self.opt_results_folder_path + unique_file_name}")
-        pop_df.to_csv(unique_file_name, index=False)
         self._log_message(f"{len(pareto_front)} Pareto optimal designs found.")
+        self._log_message(f"Saved Optimization Problem to {self.opt_results_folder_path}")
+        self._log_message(f"Saved Optimization Designs to {self.opt_results_folder_path}")
 
 
     def _run_dash_app(self):

@@ -1283,8 +1283,8 @@ class Bot3D:
                 {
                     "name": sensor.name,
                     "path": str(sensor.path),  # Convert Path to string
-                    "translation": sensor.translation,
-                    "rotation": sensor.quat_rotation,
+                    "translation": sensor.translation.tolist() if isinstance(sensor.translation, np.ndarray) else sensor.translation,
+                    "rotation": sensor.quat_rotation.tolist() if isinstance(sensor.quat_rotation, np.ndarray) else sensor.quat_rotation,
                 }
                 for sensor in self.sensors
             ],

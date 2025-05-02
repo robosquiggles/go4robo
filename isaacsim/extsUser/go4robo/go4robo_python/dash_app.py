@@ -42,6 +42,8 @@ server = app.server
 
 img_width = 400
 
+dash_df_page_size = 25
+
 @app.callback(
     Output('pop-df-table', 'data'),
     Output('pop-df-table', 'columns'),
@@ -50,10 +52,13 @@ img_width = 400
     Output('selected-bot-plot', 'figure'),
     Input('pop-df-store', 'data'),
     Input('pop-df-table', 'active_cell'),
-    Input('tradespace-plot', 'clickData'),
     State('problem-store', 'data')
 )
-def update_table_and_plot(pop_df_json, active_cell, click_data, problem_json):
+def update_table_and_plot(
+        pop_df_json, 
+        active_cell, 
+        problem_json
+    ):
     # If no population yet, return all empty/placeholder figures
     if pop_df_json is None:
         empty_fig = go.Figure()
@@ -71,33 +76,30 @@ def update_table_and_plot(pop_df_json, active_cell, click_data, problem_json):
     
     # Highlight the row based on active_cell or clickData
     selected_name:str = None
+    row_id = None
     if active_cell:
-        selected_row = active_cell['row']
-        selected_name = df.iloc[selected_row]["Name"]
-        
-    elif click_data:
-        selected_name = click_data['points'][0]['customdata']  # Get the index from customdata
-        selected_row = df[df["Name"] == selected_name].index[0]  # Get the row index from the name
+        row_id = active_cell['row_id'] #THIS IS THE ACTUAL INDEX IN THE DF (not effected by pagination)
+        row_index = active_cell['row']  # This is the index in the DataTable (effected by pagination)
+    
+    selected_name = df.iloc[int(row_id)].to_dict()['Name'] if row_id is not None else None
 
     # Highlight the selected row in the DataTable
     if selected_name is not None:
         style_data_conditional = [
             {
-                'if': {'row_index': selected_row},
+                'if': {'row_index': row_index},
                 'backgroundColor': '#00a3df',
                 'color': 'black',
             }
         ]
-        # Re-generate tradespace plot WITH the selected index highlighted
-        tradespace_fig = bot_3d_problem.plot_tradespace(df, selected_name=selected_name, show=False)
-    else:
-        # Re-generate tradespace plot WITHOUT the selected index highlighted
-        tradespace_fig = bot_3d_problem.plot_tradespace(df, show=False)
+        
+    # Re-generate tradespace plot with or without the selected index highlighted
+    tradespace_fig = bot_3d_problem.plot_tradespace(df, selected_name=selected_name, show=False)
 
     # Generate the selected bot plot
     selected_fig = go.Figure()
-    if selected_name is not None:
-        row_dict = df[df["Name"] == selected_name].iloc[0].to_dict()
+    if row_id is not None:
+        row_dict = df[df["id"] == row_id].iloc[0].to_dict()
         problem = bot_3d_problem.SensorPkgOptimization.from_json(problem_json)
         bot = problem.convert_1D_to_bot(row_dict)
         selected_fig = bot.plot_bot_3d(
@@ -225,7 +227,7 @@ def build_layout():
             dcc.Store(id='pop-df-store', data=None),  # Store for the DataFrame
             dash_table.DataTable(
                 id='pop-df-table',
-                page_size=25,
+                page_size=dash_df_page_size,
                 style_table={'overflowX': 'auto'},
                 sort_action='native',  # Enable native sorting
                 sort_mode='multi',  # Allow multi-column sorting
