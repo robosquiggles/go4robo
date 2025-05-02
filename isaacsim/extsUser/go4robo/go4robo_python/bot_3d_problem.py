@@ -35,12 +35,12 @@ class ProgressBar:
     def __init__(self, n_gen, update_fn=None):
         self.pbar = tqdm(
             total=n_gen,
-            desc="MOO Progress",
-            unit="Generation",
+            desc="MOO",
+            unit="gen",
             dynamic_ncols=True,
             leave=True,
             colour='#005b97',
-
+            ncols=80,
             file=sys.stdout  # Ensure tqdm writes to stdout
         )
         self.update_fn = update_fn  # Callback function to update the Isaac Sim progress bar
@@ -48,9 +48,9 @@ class ProgressBar:
     def notify(self, algorithm, problem):
         self.pbar.update(1)
         self.pbar.set_postfix({
-            "Designs": problem.n_designs_generated,
-            "Best Cost": algorithm.pop.get("F").min(axis=0)[1],
-            "Best PE": algorithm.pop.get("F").min(axis=0)[0]
+            "designs": problem.n_designs_generated,
+            "min cost": algorithm.pop.get("F").min(axis=0)[1],
+            "min PE": algorithm.pop.get("F").min(axis=0)[0]
         })
         self.pbar.refresh()  # Force immediate update to the terminal
 
@@ -66,10 +66,16 @@ import pandas as pd
 import re
 
 class DesignRecorder:
-    def __init__(self, max_sensors:int=5):
+    def __init__(
+            self, 
+            max_sensors:int=5, 
+            save_file=None, 
+            gens_between_save=None):
         self.records = []
         self.max_sensors = max_sensors
         self.notification_count = 0
+        self.save_file = save_file
+        self.save_between = gens_between_save
 
     def notify(self, algorithm):
         # Get the current population's variables and objectives
@@ -79,6 +85,11 @@ class DesignRecorder:
         for x, f, g in zip(X, F, G):
             self.notify_single(x, f, g)
         self.notification_count += 1
+        if self.save_file and self.notification_count % self.save_between == 0:
+            # Save the current records to a CSV file
+            df = self.to_dataframe()
+            df.to_csv(self.save_file, index=False)
+            print(f"Saved designs to {self.save_file}")
     
     def notify_single(self, x, f, g=None):
         # Store as dict for easy DataFrame conversion
@@ -97,13 +108,13 @@ class DesignRecorder:
     def to_dataframe(self):
         # Convert to DataFrame for analysis/plotting
         df = pd.DataFrame(self.records)
-        df["Index"] = df.index
-        df["Name"] = df["Index"].map(lambda x: f"Design {x}")
+        df["id"] = df.index
+        df["Name"] = df["id"].map(lambda x: f"Design {x}")
         # Rename the "Generation 0" design to "Prior"
         df.loc[df["Generation"] == 0, "Name"] = "Prior Design"
 
         # Reorder columns to put Index and Name at the beginning
-        cols = ["Index", "Name"] + [col for col in df.columns if col not in ["Index", "Name"]]
+        cols = ["id", "Name"] + [col for col in df.columns if col not in ["id", "Name"]]
         df = df[cols]
         df = self.expand_designs_into_df(df)
         return df
@@ -236,10 +247,6 @@ class SensorPkgOptimization(ElementwiseProblem):
             variables[f"s{i}_qx"] = Real(bounds=(-1, 1))                                 # Quaternion qx
             variables[f"s{i}_qy"] = Real(bounds=(-1, 1))                                 # Quaternion qy
             variables[f"s{i}_qz"] = Real(bounds=(-1, 1))                                 # Quaternion qz
-        # for i in range(self.max_n_sensors):
-        #     variables[f"s{i}_type"] = Integer(bounds=(0,len(self.sensor_options)-1))
-        #     for j in range(12):  # 3*4 = 12
-        #         variables[f"s{i}_tf_{j}"] = Real(bounds=(0, 1))
         self.n_var = len(variables)
 
         # ETCETERA
@@ -862,7 +869,7 @@ def get_pareto_front(df, x='Cost', y='Perception Entropy',
         y_minimize (bool): If True, smaller y is better; if False, larger y is better.
 
     Returns:
-        pareto_points (np.ndarray): Array of shape (k,2) of the Pareto designs’ (x,y).
+        pareto_points (np.ndarray): Array of shape (k,2) of the Pareto designs' (x,y).
         pareto_idx   (List[int]):  Indices in `df` corresponding to those designs.
         utopia_point (tuple):      The “best possible” utopia corner for these objectives.
     """
@@ -901,7 +908,10 @@ def get_pareto_front(df, x='Cost', y='Perception Entropy',
     if not y_minimize:
         restored[:, 1] = -restored[:, 1]
 
-    # 6) Compute utopia point (ideal corner)
+    # 6) Sort points for continuity
+    restored = restored[np.argsort(restored[:, 0])]
+
+    # 7) Compute utopia point (ideal corner)
     ux = restored[:, 0].min() if x_minimize else restored[:, 0].max()
     uy = restored[:, 1].min() if y_minimize else restored[:, 1].max()
     utopia = (ux, uy)
@@ -927,23 +937,44 @@ def run_moo(problem:SensorPkgOptimization,
             num_generations:int=10, 
             num_offsprings:int=5,
             population_size:int=10, 
-            # mutation_rate:float=0.1, 
+            # mutation_rate:float=0.1,
             # crossover_rate:float=0.5,
             verbose:bool=False,
             prior_bot:Bot3D=None,
-            progress_callback=None) -> Tuple[OptimizeResult, pd.DataFrame]:
+            progress_callback=None,
+            save_dir:str=os.path.join(os.path.dirname(__file__), 'results'),
+            gens_between_save=2) -> Tuple[OptimizeResult, pd.DataFrame]:
     """Run the mixed-variable multi-objective optimization algorithm on the bot.
     Args:
-        num_generations (int): The number of generations to run.
-        population_size (int): The size of the population.
-        mutation_rate (float): The mutation rate.
-        crossover_rate (float): The crossover rate.
-        verbose (bool): If True, print debug information.
+        problem (SensorPkgOptimization): The optimization problem instance.
+        num_generations (int): Number of generations to run the optimization.
+        num_offsprings (int): Number of offsprings to generate in each generation.
+        population_size (int): Size of the population for the optimization algorithm.
+        verbose (bool): If True, print detailed information during the optimization process.
+        prior_bot (Bot3D): A prior design to initialize the optimization with.
+        progress_callback: A callback function to update progress during optimization.
+        gens_between_save (int): Number of generations between saving designs. If None, don't save results until the end.
     Returns:
         Tuple[OptimizeResult, pd.DataFrame]: The optimization result and the design space DataFrame, including all the generated designs.
     """
+    assert isinstance(problem, SensorPkgOptimization), "problem must be an instance of SensorPkgOptimization"
+    assert isinstance(num_generations, int), "num_generations must be an integer"
+    assert isinstance(num_offsprings, int), "num_offsprings must be an integer"
+    assert isinstance(population_size, int), "population_size must be an integer"
+
     if progress_callback is None:
         progress_callback = ProgressBar(num_generations)
+
+    # First figure out where to save the problem and designs
+    if save_dir is not None:
+        # Generate a unique file name for the results
+        import datetime
+        now_str = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        unique_df_file_name = os.path.join(save_dir, f"designs_{problem.prior_bot.name}_{now_str}.csv")
+        unique_problem_file_name = os.path.join(save_dir, f"problem_{problem.prior_bot.name}_{now_str}.json")
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        problem.to_json(unique_problem_file_name)
 
     algorithm = MixedVariableGA(
         pop_size=population_size,
@@ -959,7 +990,12 @@ def run_moo(problem:SensorPkgOptimization,
         mutation=SensorPkgFlatMutation(),
     )
 
-    problem.recorder_callback = DesignRecorder(problem.max_n_sensors)
+    problem.recorder_callback = DesignRecorder(
+        problem.max_n_sensors, 
+        save_file=unique_df_file_name, 
+        gens_between_save=gens_between_save
+        )
+    
     if prior_bot is not None:
         first_bot_out = problem._eval_bot_obj(prior_bot)  # Evaluate the first design
         problem.recorder_callback.notify_init(problem.convert_bot_to_1D(prior_bot, dtype=dict), first_bot_out["F"])  # Initialize the recorder with the first design
@@ -1107,11 +1143,9 @@ def plot_tradespace(combined_df:pd.DataFrame,
             x=selected_df[x[0]].values,
             y=selected_df[y[0]].values,
             mode='markers',
-            marker=dict(symbol='circle-open', size=12*(width/600), color='#00729b'),
+            marker=dict(symbol='circle-open', size=15*(width/600), color='#00729b', line=dict(width=2*(width/600))),
             name='Selected Design',
-            hoverinfo='text',
-            text=selected_df[hover_name],
-            customdata=[hover_name]
+            hoverinfo='none',  # Disable hover data
         )
     
     
