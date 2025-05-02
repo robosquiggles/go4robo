@@ -30,11 +30,16 @@ from scipy.optimize import Bounds, OptimizeResult, NonlinearConstraint, LinearCo
 
 from scipy.spatial.transform import Rotation as R
 
-import omni
-import omni.physx as physx
-import omni.isaac.core.utils.prims as prim_utils
-import isaacsim.core.utils.transformations as tf_utils
-
+try:
+    import omni
+    import omni.physx as physx
+    import omni.isaac.core.utils.prims as prim_utils
+    import isaacsim.core.utils.transformations as tf_utils
+    print("Isaac Sim found; Isaac Sim-specific features will work.")
+    ISAAC_SIM_MODE = True
+except ImportError:
+    print("Isaac Sim not found; Isaac Sim-specific features will not work.")
+    ISAAC_SIM_MODE = False
 
 try:
     from pxr import UsdGeom, Gf, Sdf, Usd, PhysicsSchemaTools
@@ -331,7 +336,7 @@ class PerceptionSpace:
 
 
     def __init__(self,
-                 usd_context:omni.usd.UsdContext=None,
+                 usd_context=None,
                  voxel_groups:list[VoxelGroup]|np.ndarray[VoxelGroup]=None, 
                  weights:list[float]|np.ndarray[float]=None):
         """Initialize a new instance of the class.
@@ -837,7 +842,7 @@ class Sensor3D_Instance:
                  sensor:Sensor3D,
                  path:str,
                  tf:tuple[tuple[float], tuple[float]],
-                 usd_context:omni.usd.UsdContext=None,
+                 usd_context=None,
                  name:str|None=None,
                  ):
         """Initialize a new instance of the class.
@@ -855,7 +860,7 @@ class Sensor3D_Instance:
         assert isinstance(tf, (tuple, np.ndarray, list)) and len(tf) == 2, "Transformation must be a tuple, list, or np.ndarray of length 2 (translation and rotation)"
         assert isinstance(tf[0], (tuple, np.ndarray, list)) and len(tf[0]) == 3, "TF Translation must be a list or tuple of length 3 (x,y,z)"
         assert isinstance(tf[1], (tuple, np.ndarray, list)) and len(tf[1]) == 4, "TF Rotation must be a list or tuple of length 4 (w, x, y, z)"
-        assert isinstance(usd_context, omni.usd.UsdContext) or usd_context is None, "USD context must be of type omni.usd.UsdContext or None"
+        assert isinstance(usd_context, (omni.usd.UsdContext, None)), "USD context must be of type omni.usd.UsdContext or None"
         assert isinstance(name, str) or name is None, "Name must be a string or None"
 
         self.name = name
@@ -1197,7 +1202,7 @@ class Sensor3D_Instance:
 class Bot3D:
     def __init__(self, 
                  name:str,
-                 usd_context:omni.usd.UsdContext,
+                 usd_context=None,
                  body:list[UsdGeom.Mesh]=None,
                  path:str=None,
                  sensor_pose_constraint:np.ndarray[float]=None,
@@ -1961,4 +1966,3 @@ class Bot3D:
             fig.write_image(save_path)
 
         return fig
-        
