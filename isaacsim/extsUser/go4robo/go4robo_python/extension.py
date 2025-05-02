@@ -1195,11 +1195,43 @@ class GO4RExtension(omni.ext.IExt):
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
                     with ui.VStack(spacing=2):
                         self._display_sensor_instance_properties(value)
-            elif "tf" in attr:
-                with ui.CollapsableFrame(attr, height=0, collapsed=True):
-                    with ui.VStack(spacing=2):
-                        ui.Label(f"position: {value[0]}")
-                        ui.Label(f"rotation: {value[1]}")
+            elif "quat_rotation" in attr:
+                with ui.HStack(spacing=5):
+                    ui.Label("ROT:", width=25)
+                    ui.Label("qw:", width=25)
+                    qw_field = ui.FloatField(width=50)
+                    qw_field.model.set_value(value[0]) 
+                    ui.Label("qx:", width=25)
+                    qx_field = ui.FloatField(width=50)
+                    qx_field.model.set_value(value[1])
+                    ui.Label("qy:", width=25)
+                    qy_field = ui.FloatField(width=50)
+                    qy_field.model.set_value(value[2])
+                    ui.Label("qz:", width=25)
+                    qz_field = ui.FloatField(width=50)
+                    qz_field.model.set_value(value[3])
+
+                    def set_quat_fn():
+                        # Retrieve values from the FloatFields
+                        qw = qw_field.model.get_value_as_float()
+                        qx = qx_field.model.get_value_as_float()
+                        qy = qy_field.model.get_value_as_float()
+                        qz = qz_field.model.get_value_as_float()
+                        # Set the quaternion values in the sensor instance
+                        sensor_instance.set_omniverse_quaterion((qw, qx, qy, qz))
+                        self._log_message(f"Set {sensor_instance.name} quaternion to {(qw, qx, qy, qz)}")
+
+                    ui.Button("SET QUAT", clicked_fn=set_quat_fn, width=0)
+            elif "translation" in attr:
+                with ui.HStack(spacing=5):
+                    ui.Label("POS:", width=25)
+                    ui.Label("x:", width=25)
+                    ui.Label(f"{value[0]}", width=50)
+                    ui.Label("y:", width=25)
+                    ui.Label(f"{value[1]}", width=50)
+                    ui.Label("z:", width=25)
+                    ui.Label(f"{value[2]}", width=50)
+
             elif "ap_constants" in attr:
                 continue # Skip average precision attributes
             elif "ray_casters" in attr:

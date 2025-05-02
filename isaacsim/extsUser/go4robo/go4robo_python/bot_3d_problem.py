@@ -75,7 +75,7 @@ class DesignRecorder:
         self.max_sensors = max_sensors
         self.notification_count = 0
         self.save_file = save_file
-        self.save_between = gens_between_save
+        self.gens_between_save = gens_between_save
 
     def notify(self, algorithm):
         # Get the current population's variables and objectives
@@ -85,7 +85,7 @@ class DesignRecorder:
         for x, f, g in zip(X, F, G):
             self.notify_single(x, f, g)
         self.notification_count += 1
-        if self.save_file and self.notification_count % self.save_between == 0:
+        if self.save_file and self.notification_count % self.gens_between_save == 0:
             # Save the current records to a CSV file
             df = self.to_dataframe()
             df.to_csv(self.save_file, index=False)

@@ -903,6 +903,7 @@ class Sensor3D_Instance:
 
     def create_sensor_body(self, body:UsdGeom.Mesh):
         """Create the sensor body in the USD stage. Returns the created sensor body."""
+        assert ISAAC_SIM_MODE, "This function is only available in Isaac Sim mode"
         # First check the stage for the sensor body
         if self.stage.GetPrimAtPath(self.path).IsValid():
             # print(f"Sensor body {self.path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
@@ -922,9 +923,24 @@ class Sensor3D_Instance:
                 print(f"Failed to create sensor body for {self.name} at {self.path}. Skipping!")
                 return None
 
+    def set_omniverse_quaterion(self, quat:tuple[float, float, float, float]):
+        assert isinstance(quat, (tuple, np.ndarray, list)) and len(quat) == 4, "Quaternion must be a tuple, list, or np.ndarray of length 4 (w, x, y, z)"
+        assert ISAAC_SIM_MODE, "This function is only available in Isaac Sim mode"
+        import isaacsim.core.utils.xforms as xforms_utils
+        # Update the quaternion of the sensor in the stage
+        prim = self.stage.GetPrimAtPath(self.path)
+        xforms_utils.reset_and_set_xform_ops(
+            prim=prim, 
+            translation=Gf.Vec3d(*self.translation), 
+            orientation=Gf.Quatd(*quat)
+        )
+        
+        #Update self.tf's quat_rotation
+        self.quat_rotation = quat
 
     def create_ray_casters(self, disable=False):
         """Check if the ray casters have been created in the stage. If not, create them. Sets self.ray_casters to the created ray casters. Returns the created ray casters in a list."""
+        assert ISAAC_SIM_MODE, "This function is only available in Isaac Sim mode"
         import omni.kit.commands
         import isaacsim.core.utils.xforms as xforms_utils
 
@@ -1037,10 +1053,16 @@ class Sensor3D_Instance:
     
     def get_prim(self):
         """Get the USD prim for the sensor"""
+        assert USD_MODE, "This function is only available in USD mode"
+        assert ISAAC_SIM_MODE, "This function is only available in Isaac Sim mode"
+        assert self.stage is not None, "Stage is not set"
         return self.stage.GetPrimAtPath(self.path)
     
     def get_world_transform(self) -> Gf.Matrix4d:
         """Get the world transform of a prim"""
+        assert USD_MODE, "This function is only available in USD mode"
+        assert ISAAC_SIM_MODE, "This function is only available in Isaac Sim mode"
+        assert self.stage is not None, "Stage is not set"
         xform = UsdGeom.Xformable(self.get_prim())
         world_transform = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
         
@@ -1092,7 +1114,7 @@ class Sensor3D_Instance:
 
             # Check if there are zero norms in quat
             if np.linalg.norm(tfs[i][1]) == 0:
-                print('\033[91m' + f"Warning: Quaternion used to generate rays for {sensor.name} has zero norm. Skipping sensor in {self.name}.\nQUAT: {tfs[i][1]}" + '\033[0m')
+                print('\033[91m' + f"Warning: Quaternion used to generate rays for {sensor.name} has zero norm. Skipping sensor in instance {self.name}.\nQUAT: {tfs[i][1]}" + '\033[0m')
                 continue
 
             rotation = R.from_quat(tfs[i][1]).as_matrix() # Convert quaternion to rotation matrix
