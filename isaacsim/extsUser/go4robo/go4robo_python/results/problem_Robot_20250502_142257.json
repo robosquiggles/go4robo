@@ -19,21 +19,6 @@
                     0.0,
                     1.0
                 ]
-            },
-            {
-                "name": "Stereo_Cam_A",
-                "path": "/World/Robot/Stereo_Cam_A_01",
-                "translation": [
-                    0.0,
-                    0.0,
-                    1.0
-                ],
-                "rotation": [
-                    6.123233995736766e-17,
-                    0.13052619222005157,
-                    7.832796718715562e-18,
-                    0.9914448613738105
-                ]
             }
         ]
     },
@@ -41,7 +26,7 @@
         "0": "None",
         "1": "Stereo_Cam_A"
     },
-    "max_n_sensors": 5,
+    "max_n_sensors": 1,
     "sensor_pose_bounds": [
         [
             0,

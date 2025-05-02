@@ -68,9 +68,11 @@ import re
 class DesignRecorder:
     def __init__(
             self, 
-            max_sensors:int=5, 
+            max_sensors:int, 
             save_file=None, 
             gens_between_save=None):
+        assert isinstance(max_sensors, int), "max_sensors must be an int"
+        assert max_sensors > 0, "max_sensors must be greater than 0"
         self.records = []
         self.max_sensors = max_sensors
         self.notification_count = 0
@@ -171,9 +173,9 @@ class SensorPkgOptimization(ElementwiseProblem):
     def __init__(
             self, 
             bot:Bot3D, 
+            max_n_sensors:int, 
             sensor_options:list[Sensor3D|None], 
             perception_space:PerceptionSpace, 
-            max_n_sensors:int=5, 
             **kwargs
             ):
         """
@@ -470,7 +472,17 @@ class SensorPkgOptimization(ElementwiseProblem):
 
 
     def convert_1D_to_spq_tensors(self, X:dict, device=None) -> tuple[list, torch.Tensor, torch.Tensor]:
-        """Convert a 1D dictionary of sensor data into separate tensors for sensor types, positions, and quaternions."""
+        """Convert a 1D dictionary of sensor data into separate tensors for sensor types, positions, and quaternions.
+        
+        Args:
+            X (dict): A 1D dictionary containing sensor data.
+            device (torch.device, optional): The device to which the tensors should be moved. Defaults to None.
+            
+        Returns:
+            tuple: A tuple containing:
+                - sensor_types (list): A list of sensor types.
+                - positions_tensor (torch.Tensor): A tensor of shape (N, 3) containing sensor positions.
+                - quaternions_tensor (torch.Tensor): A tensor of shape (N, 4) containing sensor rotation quaternions."""
         sensor_types = []
         positions = []
         quaternions = []
@@ -496,6 +508,12 @@ class SensorPkgOptimization(ElementwiseProblem):
         # Convert to tensors
         positions_tensor = torch.tensor(positions, dtype=torch.float32, device=device)
         quaternions_tensor = torch.tensor(quaternions, dtype=torch.float32, device=device)
+
+        # Ensure the right shapes
+        if positions_tensor.ndim == 1:
+            positions_tensor = positions_tensor.unsqueeze(0)
+        if quaternions_tensor.ndim == 1:
+            quaternions_tensor = quaternions_tensor.unsqueeze(0)
 
         # Normalize quaternions
         quaternions_tensor = torch.nn.functional.normalize(quaternions_tensor, p=2, dim=1, eps=1e-12)

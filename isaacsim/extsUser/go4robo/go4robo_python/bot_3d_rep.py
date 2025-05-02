@@ -853,6 +853,7 @@ class Sensor3D_Instance:
                  tf:tuple[tuple[float], tuple[float]],
                  usd_context=None,
                  name:str|None=None,
+                 body:UsdGeom.Mesh=None,
                  ):
         """Initialize a new instance of the class.
         Args:
@@ -886,10 +887,10 @@ class Sensor3D_Instance:
         self.path = str(path)
 
         self.ray_casters = []
-        self.body = None
+        self.body = body
 
         # If a usd_context is provided, create the sensor body and ray casters in isaac sim
-        if self.usd_context is not None:
+        if ISAAC_SIM_MODE and self.usd_context is not None and self.body is not None:
             self.ray_casters = self.create_ray_casters()
             self.body = self.create_sensor_body(sensor.body)
 
@@ -904,6 +905,7 @@ class Sensor3D_Instance:
     def create_sensor_body(self, body:UsdGeom.Mesh):
         """Create the sensor body in the USD stage. Returns the created sensor body."""
         assert ISAAC_SIM_MODE, "This function is only available in Isaac Sim mode"
+        assert body is not None, "Body must be a UsdGeom.Mesh"
         # First check the stage for the sensor body
         if self.stage.GetPrimAtPath(self.path).IsValid():
             # print(f"Sensor body {self.path} already exists in stage, adding it to Sensor3D_Instance: {self.name}.")
@@ -1439,7 +1441,7 @@ class Bot3D:
         
         return world_transform
     
-    def calculate_perception_entropy(self, perception_space:PerceptionSpace, verbose:bool=False) -> float:
+    def calculate_perception_entropy(self, perception_space:PerceptionSpace, verbose:bool=True) -> float:
         """
         Calculate the perception entropy of the bot based on the sensors and the perception space.
         Args:
@@ -1612,8 +1614,9 @@ class Bot3D:
 
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
-            sensor_m = perception_space.batch_ray_voxel_intersections(o, d)
+            sensor_m:torch.Tensor = perception_space.batch_ray_voxel_intersections(o, d)
             print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
+            print(f"sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.mean()}")  if verbose else None
 
             # Add the sensor measurements to the tensor for the sensor type
             if name not in sensor_ms or sensor_ms[name].numel() == 0:

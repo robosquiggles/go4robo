@@ -1088,7 +1088,7 @@ class GO4RExtension(omni.ext.IExt):
                                     else:
                                         common_parent_name = common_parent_prim.GetName()
                                     
-                                    # Remove any training '_XX' suffix (where XX is two+ digits) from the common parent name
+                                    # Remove any trailing '_XX' suffix (where XX is two+ digits) from the common parent name
                                     if common_parent_name.endswith("_XX"):
                                         common_parent_name = common_parent_name[:-3]
 
@@ -1114,14 +1114,12 @@ class GO4RExtension(omni.ext.IExt):
                                     # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
                                     if stereo_cam in self.sensor_options:
                                         stereo_cam = next((s for s in self.sensor_options if s == stereo_cam), stereo_cam)
-                                        # Also remove both mono cameras from the list of unique sensors options
-                                        self.sensor_options.remove(sensor_instance.sensor)
-                                        self.sensor_options.remove(camera.sensor)
                                     else:
                                         # Add the stereo camera to the list of unique sensor options
                                         self.sensor_options.add(stereo_cam)
-                                        # Remove the mono camera from the list of unique sensors options
-                                        self.sensor_options.remove(sensor_instance.sensor)
+                                        # Remove the mono cameras from the list of unique sensors options
+                                    self.sensor_options.remove(sensor_instance.sensor)
+                                    self.sensor_options.remove(camera.sensor)
                                     stereo_instance = Sensor3D_Instance(stereo_cam, 
                                                                         path=common_parent_path, 
                                                                         name=_remove_trailing_digits(common_parent_name), 
@@ -1307,6 +1305,27 @@ class GO4RExtension(omni.ext.IExt):
                                                                 with ui.VStack(spacing=2):
                                                                     self._display_sensor_instance_properties(sensor_instance)
 
+    def _update_optimization_problem(self):
+        try:
+            self.optimization_problem = SensorPkgOptimization(
+                bot=self.robots[0],
+                max_n_sensors=self.optimization_max_sensors,
+                sensor_options=self.sensor_options,
+                perception_space=self.perception_space,
+            )
+            self._update_dash_app(problem=self.optimization_problem)
+
+        except Exception as e:
+            self._log_message(f"Error creating optimization problem: {e}")
+            self.optimization_problem = None
+            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+            raise e
+            
+        if self.optimization_problem is not None:
+            self.enable_ui_element(self.optimize_btn, text_color=ui.color("#00FF00"))
+        else:
+            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+
     def _update_sensor_options_ui(self):
         """Udpate the sensor options UI with the detected unique sensors for all the robots analyzed
         For each sensor, list its name, type, FOV (HxV), Resolution (HxV), AP constants, and Cost
@@ -1347,6 +1366,8 @@ class GO4RExtension(omni.ext.IExt):
                                             def on_max_sensors_val_changed(new_value):
                                                 max_sensors = max(0, new_value.get_value_as_int())
                                                 self.optimization_max_sensors = max_sensors
+                                                self._log_message(f"Set max sensors to {max_sensors}")
+                                                self._update_optimization_problem()
                                             
                                             self.max_sensors_field.model.add_value_changed_fn(on_max_sensors_val_changed)
                                         case "Sensor Constraint Mesh Path":
@@ -1450,6 +1471,7 @@ class GO4RExtension(omni.ext.IExt):
                                                 generations = max(0, new_value.get_value_as_int())
                                                 self.optimization_generations = generations
                                                 _update_total_designs()
+                                                self._update_optimization_problem()
                                             
                                             self.generations_field.model.add_value_changed_fn(on_generations_val_changed)
 
@@ -1461,6 +1483,7 @@ class GO4RExtension(omni.ext.IExt):
                                                 offspring = max(0, new_value.get_value_as_int())
                                                 self.optimization_offspring = offspring
                                                 _update_total_designs()
+                                                self._update_optimization_problem()
 
                                             self.offspring_field.model.add_value_changed_fn(on_offspring_val_changed)
 
@@ -1472,32 +1495,14 @@ class GO4RExtension(omni.ext.IExt):
                                                 pop_size = max(0, new_value.get_value_as_int())
                                                 self.optimization_population_size = pop_size
                                                 _update_total_designs()
+                                                self._update_optimization_problem()
 
                                             self.pop_size_field.model.add_value_changed_fn(on_pop_size_val_changed)
 
                             self.total_designs_field = ui.Label(f"(Generates ~{self.total_possible_designs} total designs)")
                             _update_total_designs()
 
-                            
-                            
-
-        try:
-            self.optimization_problem = SensorPkgOptimization(bot=self.robots[0],
-                                                              perception_space=self.perception_space,
-                                                              sensor_options=self.sensor_options,
-                                                              max_n_sensors=self.optimization_max_sensors)
-            self._update_dash_app(problem=self.optimization_problem)
-
-        except Exception as e:
-            self._log_message(f"Error creating optimization problem: {e}")
-            self.optimization_problem = None
-            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
-            raise e
-            
-        if self.optimization_problem is not None:
-            self.enable_ui_element(self.optimize_btn, text_color=ui.color("#00FF00"))
-        else:
-            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+        self._update_optimization_problem()
                                                                 
 
     def _batch_calc_perception_entropies(self):
@@ -2579,10 +2584,10 @@ class GO4RExtension(omni.ext.IExt):
         dash_app.app.layout = dash_app.build_layout()
         import urllib.request
         try:
-            with urllib.request.urlopen(dash_app.url, timeout=1) as response:
+            with urllib.request.urlopen(dash_app.url, timeout=5) as response:
                 if response.status == 200:
                     self._log_message(f"Dash app is reachable at {dash_app.url}")
-        except urllib.error.URLError as e:
+        except:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self._run_dash_app)
             self._log_message(f"Dash app is now reachable at {dash_app.url}")
