@@ -873,7 +873,7 @@ class Sensor3D_Instance:
             name (str|None): The name of the sensor instance. If None, use the sensor's name.
         """
 
-        assert isinstance(sensor, Sensor3D), "Sensor must be of type Sensor3D"
+        # assert isinstance(sensor, Sensor3D), f"Sensor must be of type Sensor3D, not {type(sensor)}"
         assert isinstance(path, str), "Path must be a string"
         assert isinstance(tf, (tuple, np.ndarray, list)) and len(tf) == 2, "Transformation must be a tuple, list, or np.ndarray of length 2 (translation and rotation)"
         assert isinstance(tf[0], (tuple, np.ndarray, list)) and len(tf[0]) == 3, "TF Translation must be a list or tuple of length 3 (x,y,z)"
@@ -939,6 +939,7 @@ class Sensor3D_Instance:
         import isaacsim.core.utils.xforms as xforms_utils
         # Update the quaternion of the sensor in the stage
         prim = self.stage.GetPrimAtPath(self.path)
+
         xforms_utils.reset_and_set_xform_ops(
             prim=prim, 
             translation=Gf.Vec3d(*self.translation), 
@@ -1069,7 +1070,10 @@ class Sensor3D_Instance:
         return self.stage.GetPrimAtPath(self.path)
     
     def get_world_transform(self) -> Gf.Matrix4d:
-        """Get the world transform of a prim"""
+        """Get the world transform of a prim
+        Returns:
+            Gf.Matrix4d: The world transform of the prim
+        """
         assert USD_MODE, "This function is only available in USD mode"
         assert ISAAC_SIM_MODE, "This function is only available in Isaac Sim mode"
         assert self.stage is not None, "Stage is not set"
@@ -1870,8 +1874,9 @@ class Bot3D:
                     print('\033[91m' + f"Warning: Quaternion has zero norm. Skipping sensor {sensor_instance.name}.\nQUAT: {quat}" + '\033[0m')
                     continue
                 
+                scalar_last_quat = (quat[1], quat[2], quat[3], quat[0])  # (x,y,z,w)
                 # Get direction vector
-                rot_mat = R.from_quat(quat).as_matrix()
+                rot_mat = R.from_quat(scalar_last_quat).as_matrix()
                 x_forward = np.array([1, 0, 0])  # Local forward direction in sensor's local space
                 y_forward = np.array([0, 1, 0])  # Local left direction in sensor's local space
                 z_forward = np.array([0, 0, 1])  # Local up direction in sensor's local space
