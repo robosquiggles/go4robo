@@ -560,7 +560,8 @@ class PerceptionSpace:
                                       ray_origins:torch.Tensor, 
                                       ray_directions:torch.Tensor, 
                                       batch_size:int=15000,
-                                      verbose:bool=False
+                                      verbose:bool=False,
+                                      eps:float=1e-8,
                                       ) -> torch.Tensor:
         """
         Check if the rays intersect with the voxels in the voxel groups.
@@ -570,6 +571,7 @@ class PerceptionSpace:
         Returns:
             torch.Tensor: A tensor of shape (N,) where N is the number of voxels. Each element is the number of rays that intersect with the voxel.
         """
+
         if verbose:
             start_time = time.time()
         
@@ -592,6 +594,10 @@ class PerceptionSpace:
             rays_d = ray_directions[start:end].unsqueeze(1).expand(-1, num_voxels, -1)  # Shape: (R, N, 3)
             boxes_min = voxel_mins.unsqueeze(0).expand(end-start, -1, -1)               # Shape: (R, N, 3)
             boxes_max = voxel_maxs.unsqueeze(0).expand(end-start, -1, -1)               # Shape: (R, N, 3)
+
+            # Clamp to avoid division by zero
+            rays_d = torch.where(-eps < rays_d, torch.tensor(-eps), rays_d)
+            rays_d = torch.where(eps > rays_d, torch.tensor(eps), rays_d)
 
             inv_dir = 1.0 / rays_d
             tmin = (boxes_min - rays_o) * inv_dir
@@ -619,7 +625,75 @@ class PerceptionSpace:
         torch.cuda.empty_cache()
 
         return v_hits  # Shape: (N,), hits for each voxel
+    
+    def plot_me(self, fig=None, show=True, mode='centers'):
+        """
+        Plot the perception space.
+        Args:
+            fig (matplotlib.figure.Figure): The figure to plot on.
+            title (str): The title of the plot.
+            show (bool): Whether to show the plot.
+            mode (str): The mode of the plot. Can be 'centers' or 'boxes'.
+        """
+        # Get voxel data
+        centers = self.get_voxel_centers().cpu().numpy()
+        weights = self.get_voxel_weights()
+        weights = (weights - weights.min()) / (weights.max() - weights.min())
+        weights = weights.cpu().numpy()
+        
+        if mode == 'centers':
+            fig = fig or go.Figure()
+            fig.add_trace(go.Scatter3d(
+                x=centers[:,0], y=centers[:,1], z=centers[:,2],
+                mode='markers',
+                marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.25),
+                name='Perception Space'
+            ))
+            if show: fig.show()
+            return fig
 
+        # BOXES mode: build Mesh3d per voxel
+        mins = self.get_voxel_mins().cpu().numpy()
+        maxs = self.get_voxel_maxs().cpu().numpy()
+
+        # Define static face‐index arrays for a cube
+        i_faces = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2]
+        j_faces = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3]
+        k_faces = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6]
+
+        mesh_traces = []
+        for idx in range(len(centers)):
+            x0,y0,z0 = mins[idx]
+            x1,y1,z1 = maxs[idx]
+            # Eight corners
+            x_verts = [x0, x0, x1, x1, x0, x0, x1, x1]
+            y_verts = [y0, y1, y1, y0, y0, y1, y1, y0]
+            z_verts = [z0, z0, z0, z0, z1, z1, z1, z1]
+            # Per‐face intensity (replicate weight per triangle)
+            face_intensity = [weights[idx]] * len(i_faces)
+
+            mesh_traces.append(go.Mesh3d(
+                x=x_verts, y=y_verts, z=z_verts,
+                i=i_faces, j=j_faces, k=k_faces,
+                intensity=face_intensity, colorscale='Viridis',
+                opacity=0.25, showscale=False,
+                name='Perception Space'
+            ))
+
+        # Add traces to figure
+        if fig is None:
+            fig = go.Figure(data=mesh_traces)
+        else:
+            for mesh in mesh_traces:
+                fig.add_trace(mesh)
+
+        fig.update_layout(
+            title='Perception Space',
+            scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'),
+            margin=dict(l=0, r=0, b=0, t=0)
+        )
+        if show: fig.show()
+        return fig
 
 class Sensor3D:
     def __init__(self, 
@@ -1191,7 +1265,7 @@ class Sensor3D_Instance:
             tfs.append((self.translation, self.quat_rotation))
         return tfs
 
-    def get_rays(self, verbose:bool=True) -> Tuple[np.ndarray, np.ndarray]:
+    def get_rays(self, verbose:bool=False) -> Tuple[np.ndarray, np.ndarray]:
         """Returns (ray_origins, ray_directions) for this sensor instance, vectorized with torch."""
 
         start_time = time.time()
@@ -1261,7 +1335,7 @@ class Sensor3D_Instance:
         print(f"    V_ANGLES max: {torch.max(v_angles)}, min: {torch.min(v_angles)}, mean: {torch.mean(v_angles)}") if verbose else None
         return ray_origins, ray_directions
     
-    def plot_rays(self, ray_origins, ray_directions, ray_length=1.0, show=True):
+    def plot_rays(self, ray_origins, ray_directions, ray_length=1.0, fig=None, show=True):
         """Plot the rays in 3D using plotly"""
 
         # Convert to numpy arrays
@@ -1269,7 +1343,8 @@ class Sensor3D_Instance:
         ray_directions = ray_directions.cpu().numpy()
 
         # Create a 3D scatter plot
-        fig = go.Figure()
+        if fig is None:
+            fig = go.Figure()
 
         # Add rays
         for i in range(ray_origins.shape[0]):
@@ -1292,10 +1367,11 @@ class Sensor3D_Instance:
             scene=dict(
                 xaxis_title='X',
                 yaxis_title='Y',
-                zaxis_title='Z'
+                zaxis_title='Z',
+                aspectmode='data'
             ),
             width=800,
-            height=800
+            height=800,
         )
 
         if show:
@@ -1841,7 +1917,7 @@ class Bot3D:
 
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
-            sensor_m:torch.Tensor = perception_space.batch_ray_voxel_intersections(o, d, verbose=True)
+            sensor_m:torch.Tensor = perception_space.batch_ray_voxel_intersections(o, d, verbose=False)
             print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
             print(f"sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.mean()}")  if verbose else None
 
