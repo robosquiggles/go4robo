@@ -685,6 +685,54 @@ class Sensor3D:
     def __repr__(self):
         return f"{self.__class__.__name__}(name={self.name}, h_fov={self.h_fov}, h_res={self.h_res}, v_fov={self.v_fov}, v_res={self.v_res}, max_range={self.max_range}, min_range={self.min_range}, cost={self.cost})"
 
+    @staticmethod
+    def from_json(json_dict):
+        """
+        Load the sensor from JSON.
+        Args:
+            json_dict (dict): A dictionary representation of the sensor.
+        """
+        if not isinstance(json_dict, dict):
+            raise ValueError("Invalid sensor data")
+        
+        assert "name" in json_dict, "Invalid sensor data, no name found"
+        assert "h_fov" in json_dict, "Invalid sensor data, no h_fov found"
+        assert "h_res" in json_dict, "Invalid sensor data, no h_res found"
+        assert "v_fov" in json_dict, "Invalid sensor data, no v_fov found"
+        assert "v_res" in json_dict, "Invalid sensor data, no v_res found"
+        assert "max_range" in json_dict, "Invalid sensor data, no max_range found"
+        assert "min_range" in json_dict, "Invalid sensor data, no min_range found"
+        assert "cost" in json_dict, "Invalid sensor data, no cost found"
+
+        return Sensor3D(
+            name=json_dict["name"],
+            h_fov=json_dict["h_fov"],
+            h_res=json_dict["h_res"],
+            v_fov=json_dict["v_fov"],
+            v_res=json_dict["v_res"],
+            max_range=json_dict["max_range"],
+            min_range=json_dict["min_range"],
+            cost=json_dict["cost"]
+        )
+    
+    def to_json(self):
+        """
+        Convert the sensor to a JSON serializable format.
+        Returns:
+            dict: A dictionary representation of the sensor.
+        """
+        data = {
+            "name": self.name,
+            "h_fov": self.h_fov,
+            "h_res": self.h_res,
+            "v_fov": self.v_fov,
+            "v_res": self.v_res,
+            "max_range": self.max_range,
+            "min_range": self.min_range,
+            "cost": self.cost
+        }
+        return data
+
     def get_properties_dict(self):
         properties = {}
         for key, value in self.__dict__.items():
@@ -717,7 +765,6 @@ class Sensor3D:
         sigma = self.calculate_ap_sigma(sigma)
         entropy = 2 * math.log(sigma) + 1 + math.log(2 * math.pi)
         return entropy
-
 
 
 class MonoCamera3D(Sensor3D):
@@ -819,6 +866,48 @@ class StereoCamera3D(Sensor3D):
         self.max_range = sensor1.max_range
         self.min_range = sensor1.min_range
         self.ap_constants = ap_constants
+
+    @staticmethod
+    def from_json(json_dict):
+        """
+        Load the sensor from JSON.
+        Args:
+            json_dict (dict): A dictionary representation of the sensor.
+        """
+        if not isinstance(json_dict, dict):
+            raise ValueError("Invalid sensor data")
+        
+        assert "name" in json_dict, "Invalid sensor data, no name found"
+        assert "sensor1" in json_dict, "Invalid sensor data, no sensor1 found"
+        assert "sensor2" in json_dict, "Invalid sensor data, no sensor2 found"
+        assert "tf_sensor1" in json_dict, "Invalid sensor data, no tf_sensor1 found"
+        assert "tf_sensor2" in json_dict, "Invalid sensor data, no tf_sensor2 found"
+        assert "cost" in json_dict, "Invalid sensor data, no cost found"
+
+        return StereoCamera3D(
+            name=json_dict["name"],
+            sensor1=MonoCamera3D.from_json(json_dict["sensor1"]),
+            sensor2=MonoCamera3D.from_json(json_dict["sensor2"]),
+            tf_sensor1=json_dict["tf_sensor1"],
+            tf_sensor2=json_dict["tf_sensor2"],
+            cost=json_dict["cost"]
+        )
+    
+    def to_json(self):
+        """
+        Convert the sensor to a JSON serializable format.
+        Returns:
+            dict: A dictionary representation of the sensor.
+        """
+        data = {
+            "name": self.name,
+            "sensor1": self.sensor1.to_json(),
+            "sensor2": self.sensor2.to_json(),
+            "tf_sensor1": self.tf_1,
+            "tf_sensor2": self.tf_2,
+            "cost": self.cost
+        }
+        return data
 
 
 class Lidar3D(Sensor3D):
@@ -1144,9 +1233,9 @@ class Sensor3D_Instance:
             h_flat = h_grid.flatten()
 
             # Spherical to Cartesian (vectorized)
-            x = torch.cos(v_flat) * torch.cos(h_flat)  # X+ is forward
-            y = torch.cos(v_flat) * torch.sin(h_flat)  # Y+ is left (or maybe right? need a fact check but shouldn't matter)
-            z = torch.sin(v_flat)                      # Z+ is up
+            x = -torch.cos(v_flat) * torch.cos(h_flat)   # negate X so +X is forward
+            y =  torch.cos(v_flat) * torch.sin(h_flat)
+            z =  torch.sin(v_flat)
             dirs = torch.stack([x, y, z], dim=1)
             dirs = dirs / torch.norm(dirs, dim=1, keepdim=True)
 
@@ -1171,7 +1260,121 @@ class Sensor3D_Instance:
         print(f"    H_ANGLES max: {torch.max(h_angles)}, min: {torch.min(h_angles)}, mean: {torch.mean(h_angles)}") if verbose else None
         print(f"    V_ANGLES max: {torch.max(v_angles)}, min: {torch.min(v_angles)}, mean: {torch.mean(v_angles)}") if verbose else None
         return ray_origins, ray_directions
+    
+    def plot_rays(self, ray_origins, ray_directions, ray_length=1.0, show=True):
+        """Plot the rays in 3D using plotly"""
 
+        # Convert to numpy arrays
+        ray_origins = ray_origins.cpu().numpy()
+        ray_directions = ray_directions.cpu().numpy()
+
+        # Create a 3D scatter plot
+        fig = go.Figure()
+
+        # Add rays
+        for i in range(ray_origins.shape[0]):
+            fig.add_trace(go.Scatter3d(
+                x=[ray_origins[i, 0], ray_origins[i, 0] + ray_directions[i, 0]*ray_length],
+                y=[ray_origins[i, 1], ray_origins[i, 1] + ray_directions[i, 1]*ray_length],
+                z=[ray_origins[i, 2], ray_origins[i, 2] + ray_directions[i, 2]*ray_length],
+                mode='lines',
+                line=dict(color='violet', width=2),
+                hoverinfo='none',
+                showlegend=False
+            ))
+
+        # Add the sensor
+        self.plot_me(fig)
+
+        # Set the layout
+        fig.update_layout(
+            title='Rays',
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Z'
+            ),
+            width=800,
+            height=800
+        )
+
+        if show:
+            fig.show()
+
+        return fig
+
+
+    def plot_me(self, fig, vec_length=0.2):
+        translation = self.translation
+        quat = self.quat_rotation  # (w,x,y,z)
+        
+        scalar_last_quat = (quat[1], quat[2], quat[3], quat[0])  # (x,y,z,w)
+        # Get direction vector
+        rot_mat = R.from_quat(scalar_last_quat).as_matrix()
+        x_forward = np.array([1, 0, 0])  # Local forward direction in sensor's local space
+        y_forward = np.array([0, 1, 0])  # Local left direction in sensor's local space
+        z_forward = np.array([0, 0, 1])  # Local up direction in sensor's local space
+        x_direction = rot_mat @ x_forward  # Transform to world space
+        y_direction = rot_mat @ y_forward  # Transform to world space
+        z_direction = rot_mat @ z_forward  # Transform to world space
+        # Normalize the direction vector
+        x_direction = x_direction / np.linalg.norm(x_direction) * vec_length
+        y_direction = y_direction / np.linalg.norm(y_direction) * vec_length
+        z_direction = z_direction / np.linalg.norm(z_direction) * vec_length
+        
+        color = random_color(self.name)
+
+        # Add the first point as a marker
+        fig.add_trace(go.Scatter3d(
+            x=[float(translation[0])],  # Only the first point
+            y=[float(translation[1])],
+            z=[float(translation[2])],
+            mode='markers',  # Display as markers
+            marker=dict(size=3, color=color),  # Marker size and color
+            name=self.name,  # Legend label
+            legendgroup=self.name,  # Group in the legend
+            text=[
+                f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
+                f"Quaternion:<br>  (qw={self.quat_rotation[0]:.2f},"
+                f"<br>  qx={self.quat_rotation[1]:.2f},"
+                f"<br>  qy={self.quat_rotation[2]:.2f},"
+                f"<br>  qz={self.quat_rotation[3]:.2f})"  # Hover text for the second point
+            ],
+            hoverinfo='text'  # Use custom hover text
+        ))
+
+        # Add a X+ line between the two points
+        fig.add_trace(go.Scatter3d(
+            x=[float(translation[0]), float(translation[0]) + float(x_direction[0])],  # Both points
+            y=[float(translation[1]), float(translation[1]) + float(x_direction[1])],
+            z=[float(translation[2]), float(translation[2]) + float(x_direction[2])],
+            mode='lines',  # Display as a line
+            line=dict(color='red', width=2),  # Line color and width
+            showlegend=False,  # Hide legend for the line itself
+            legendgroup=self.name,  # Group in the legend
+        ))
+
+        # Add a Y+ line between the two points
+        fig.add_trace(go.Scatter3d(
+            x=[float(translation[0]), float(translation[0]) + float(y_direction[0])],  # Both points
+            y=[float(translation[1]), float(translation[1]) + float(y_direction[1])],
+            z=[float(translation[2]), float(translation[2]) + float(y_direction[2])],
+            mode='lines',  # Display as a line
+            line=dict(color='green', width=2),  # Line color and width
+            showlegend=False,  # Hide legend for the line itself
+            legendgroup=self.name,  # Group in the legend
+        ))
+
+        # Add a Z+ line between the two points
+        fig.add_trace(go.Scatter3d(
+            x=[float(translation[0]), float(translation[0]) + float(z_direction[0])],  # Both points
+            y=[float(translation[1]), float(translation[1]) + float(z_direction[1])],
+            z=[float(translation[2]), float(translation[2]) + float(z_direction[2])],
+            mode='lines',  # Display as a line
+            line=dict(color='blue', width=2),  # Line color and width
+            showlegend=False,  # Hide legend for the line itself
+            legendgroup=self.name,  # Group in the legend
+        ))
     
     def get_position(self):
         return self.tf[0]
@@ -1318,12 +1521,15 @@ class Bot3D:
             "path": str(self.path),  # Convert Path to string
             "body": None,  # [self.body], # TODO: support mesh JSON serialization?
             "sensor_pose_constraint": None,  # [self.sensor_pose_constraint], # TODO: support mesh JSON serialization?
-            "sensors": [
+            "sensor_instances": [
                 {
                     "name": sensor.name,
                     "path": str(sensor.path),  # Convert Path to string
                     "translation": sensor.translation.tolist() if isinstance(sensor.translation, np.ndarray) else sensor.translation,
                     "rotation": sensor.quat_rotation.tolist() if isinstance(sensor.quat_rotation, np.ndarray) else sensor.quat_rotation,
+                    "sensor": sensor.sensor.to_json()  if not isinstance(sensor.sensor, StereoCamera3D) else None,
+                    "sensor1": sensor.sensor.sensor1.to_json() if isinstance(sensor.sensor, StereoCamera3D) else None,
+                    "sensor2": sensor.sensor.sensor2.to_json() if isinstance(sensor.sensor, StereoCamera3D) else None,
                 }
                 for sensor in self.sensors
             ],
@@ -1342,14 +1548,20 @@ class Bot3D:
         sensor_pose_constraint = None # TODO if you want to plot the body in the dash app, make this work.
         usd_context=None
         sensors = []
-        for sensor in json_dict["sensors"]:
+        for sensor in json_dict["sensor_instances"]:
             sensor_name = sensor["name"]
             sensor_path = sensor["path"]
             translation = sensor["translation"]
             rotation = sensor["rotation"]
+
             # Create a Sensor3D_Instance for each sensor
-            sensor = Sensor3D(name=sensor_name) # Don't need any of the local tfs or properties for now
-            sensor_instance = Sensor3D_Instance(sensor=Sensor3D(name=sensor_name), 
+            if sensor["sensor"] is not None:
+                sensor = Sensor3D.from_json(sensor["sensor"])
+            elif sensor["sensor1"] is not None and sensor["sensor2"] is not None:
+                sensor = StereoCamera3D.from_json(sensor["sensor1"], sensor["sensor2"])
+            else:
+                sensor = None
+            sensor_instance = Sensor3D_Instance(sensor=sensor, 
                                                 path=sensor_path, 
                                                 tf=(translation, rotation))
             sensors.append(sensor_instance)
@@ -1829,13 +2041,6 @@ class Bot3D:
         Returns:
             fig (plotly.graph_objects.Figure): The plotly figure object.
         """
-
-        def random_color(name):
-            """Optional: Create a random color from a string, or define your own mapping"""
-            if name is None:
-                return "#000000"
-            hash_digest = hashlib.md5(name.encode()).hexdigest()
-            return f"#{hash_digest[:6]}"
         
         def add_perception_space(fig):
             """ Add the perception space as a point cloud of all the voxel centers."""
@@ -1857,108 +2062,6 @@ class Bot3D:
                     mode='markers',
                     marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.25),
                     name='Perception Space'
-                ))
-
-        def add_sensors(fig, vec_length=0.1):
-            """Add cones to the plot for each sensor in the bot."""
-            # Get the translation and rotation of each sensor
-            names = []
-            colors = []
-            for sensor_instance in self.sensors:
-                translation = sensor_instance.translation
-                quat = sensor_instance.quat_rotation  # (w,x,y,z)
-                names.append(sensor_instance.name)
-
-                # Check if there are zero norms in quat
-                if np.linalg.norm(quat) == 0:
-                    print('\033[91m' + f"Warning: Quaternion has zero norm. Skipping sensor {sensor_instance.name}.\nQUAT: {quat}" + '\033[0m')
-                    continue
-                
-                scalar_last_quat = (quat[1], quat[2], quat[3], quat[0])  # (x,y,z,w)
-                # Get direction vector
-                rot_mat = R.from_quat(scalar_last_quat).as_matrix()
-                x_forward = np.array([1, 0, 0])  # Local forward direction in sensor's local space
-                y_forward = np.array([0, 1, 0])  # Local left direction in sensor's local space
-                z_forward = np.array([0, 0, 1])  # Local up direction in sensor's local space
-                x_direction = rot_mat @ x_forward  # Transform to world space
-                y_direction = rot_mat @ y_forward  # Transform to world space
-                z_direction = rot_mat @ z_forward  # Transform to world space
-                # Normalize the direction vector
-                x_direction = x_direction / np.linalg.norm(x_direction) * vec_length
-                y_direction = y_direction / np.linalg.norm(y_direction) * vec_length
-                z_direction = z_direction / np.linalg.norm(z_direction) * vec_length
-                
-                color = random_color(sensor_instance.name)
-                colors.append(color)
-
-                # Add the first point as a marker
-                fig.add_trace(go.Scatter3d(
-                    x=[float(translation[0])],  # Only the first point
-                    y=[float(translation[1])],
-                    z=[float(translation[2])],
-                    mode='markers',  # Display as markers
-                    marker=dict(size=3, color=color),  # Marker size and color
-                    name=sensor_instance.name,  # Legend label
-                    legendgroup=sensor_instance.name,  # Group in the legend
-                    text=[f"Translation: (x={translation[0]:.2f}, y={translation[1]:.2f}, z={translation[2]:.2f})"],  # Hover text for the first point
-                    hoverinfo='text'  # Use custom hover text
-                ))
-
-                # Add a X+ line between the two points
-                fig.add_trace(go.Scatter3d(
-                    x=[float(translation[0]), float(translation[0]) + float(x_direction[0])],  # Both points
-                    y=[float(translation[1]), float(translation[1]) + float(x_direction[1])],
-                    z=[float(translation[2]), float(translation[2]) + float(x_direction[2])],
-                    mode='lines',  # Display as a line
-                    line=dict(color='red', width=2),  # Line color and width
-                    showlegend=False,  # Hide legend for the line itself
-                    legendgroup=sensor_instance.name,  # Group in the legend
-                    text=[
-                        f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
-                        f"Quaternion:<br>  (qw={sensor_instance.quat_rotation[0]:.2f},"
-                        f"<br>  qx={sensor_instance.quat_rotation[1]:.2f},"
-                        f"<br>  qy={sensor_instance.quat_rotation[2]:.2f},"
-                        f"<br>  qz={sensor_instance.quat_rotation[3]:.2f})"  # Hover text for the second point
-                    ],
-                    hoverinfo='text'  # Use custom hover text
-                ))
-
-                # Add a Y+ line between the two points
-                fig.add_trace(go.Scatter3d(
-                    x=[float(translation[0]), float(translation[0]) + float(y_direction[0])],  # Both points
-                    y=[float(translation[1]), float(translation[1]) + float(y_direction[1])],
-                    z=[float(translation[2]), float(translation[2]) + float(y_direction[2])],
-                    mode='lines',  # Display as a line
-                    line=dict(color='green', width=2),  # Line color and width
-                    showlegend=False,  # Hide legend for the line itself
-                    legendgroup=sensor_instance.name,  # Group in the legend
-                    text=[
-                        f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
-                        f"Quaternion:<br>  (qw={sensor_instance.quat_rotation[0]:.2f},"
-                        f"<br>  qx={sensor_instance.quat_rotation[1]:.2f},"
-                        f"<br>  qy={sensor_instance.quat_rotation[2]:.2f},"
-                        f"<br>  qz={sensor_instance.quat_rotation[3]:.2f})"  # Hover text for the second point
-                    ],
-                    hoverinfo='text'  # Use custom hover text
-                ))
-
-                # Add a Z+ line between the two points
-                fig.add_trace(go.Scatter3d(
-                    x=[float(translation[0]), float(translation[0]) + float(z_direction[0])],  # Both points
-                    y=[float(translation[1]), float(translation[1]) + float(z_direction[1])],
-                    z=[float(translation[2]), float(translation[2]) + float(z_direction[2])],
-                    mode='lines',  # Display as a line
-                    line=dict(color='blue', width=2),  # Line color and width
-                    showlegend=False,  # Hide legend for the line itself
-                    legendgroup=sensor_instance.name,  # Group in the legend
-                    text=[
-                        f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
-                        f"Quaternion:<br>  (qw={sensor_instance.quat_rotation[0]:.2f},"
-                        f"<br>  qx={sensor_instance.quat_rotation[1]:.2f},"
-                        f"<br>  qy={sensor_instance.quat_rotation[2]:.2f},"
-                        f"<br>  qz={sensor_instance.quat_rotation[3]:.2f})"  # Hover text for the second point
-                    ],
-                    hoverinfo='text'  # Use custom hover text
                 ))
 
         height = 500 if 'height' not in kwargs else kwargs['height']
@@ -1986,7 +2089,8 @@ class Bot3D:
             print("TODO Adding sensor pose constraints to the plot.")
 
         # Add the sensors to the plot
-        add_sensors(fig)
+        for sensor_i in self.sensors:
+            sensor_i.plot_me(fig)
 
         # Add the perception space
         add_perception_space(fig)
@@ -2016,3 +2120,10 @@ class Bot3D:
             fig.write_image(save_path)
 
         return fig
+
+def random_color(name):
+    """Optional: Create a random color from a string, or define your own mapping"""
+    if name is None:
+        return "#000000"
+    hash_digest = hashlib.md5(name.encode()).hexdigest()
+    return f"#{hash_digest[:6]}"
