@@ -1258,7 +1258,7 @@ class Sensor3D_Instance:
         
         return world_transform
     
-    def get_tfs(self) -> list[tuple[float, float, float], tuple[float, float, float, float]]:
+    def get_world_tfs(self) -> list[tuple[float, float, float], tuple[float, float, float, float]]:
         """Get the translation and rotation of the sensor in world coordinates"""
         tfs = []
         if isinstance(self.sensor, StereoCamera3D):
@@ -1281,7 +1281,9 @@ class Sensor3D_Instance:
         torch.cuda.empty_cache()
 
         sensors = [self.sensor] if not isinstance(self.sensor, StereoCamera3D) else [self.sensor.sensor1, self.sensor.sensor2]
-        tfs = self.get_tfs()
+        tfs = self.get_world_tfs()
+
+        print(f"Calculating rays for {type(self)} {self.name}, with {len(tfs)} sets of rays...") if verbose else None
 
         ray_origins_list = []
         ray_directions_list = []
@@ -1293,6 +1295,11 @@ class Sensor3D_Instance:
             # hres = int(hfov / ray_caster.GetAttribute("horizontalResolution").Get()) # number of rays, horizontal
             # vres = int(vfov / ray_caster.GetAttribute("verticalResolution").Get()) # Number of rays, vertical
 
+            if verbose:
+                print(f" Sensor {i}: {sensor.name}, is a ({type(sensor)})")
+                print(f"  POS:  {tfs[i][0]}")
+                print(f"  QUAT: {tfs[i][1]} (w,x,y,z)")
+
             hfov = sensor.h_fov
             vfov = sensor.v_fov
             hres = int(sensor.h_fov / sensor.h_res) # number of rays, horizontal
@@ -1302,8 +1309,14 @@ class Sensor3D_Instance:
             if np.linalg.norm(tfs[i][1]) == 0:
                 print('\033[91m' + f"Warning: Quaternion used to generate rays for {sensor.name} has zero norm. Skipping sensor in instance {self.name}.\nQUAT: {tfs[i][1]}" + '\033[0m')
                 continue
+            
+            quat_scalar_last = (tfs[i][1][1], tfs[i][1][2], tfs[i][1][3], tfs[i][1][0])  # (x,y,z,w)
+            rotation = R.from_quat(quat_scalar_last).as_matrix() # Convert quaternion to rotation matrix
 
-            rotation = R.from_quat(tfs[i][1]).as_matrix() # Convert quaternion to rotation matrix
+            if verbose:
+                print(f"  R:    {rotation[0]}")
+                print(f"        {rotation[1]}")
+                print(f"        {rotation[2]}")
             
             position = torch.tensor(tfs[i][0], dtype=torch.float32, device=device) # Simple x,y,z
             rotation = torch.tensor(rotation, dtype=torch.float32, device=device) # Rotation matrix
@@ -1315,10 +1328,23 @@ class Sensor3D_Instance:
             v_flat = v_grid.flatten()
             h_flat = h_grid.flatten()
 
+            if verbose:
+                print(f"  H_ANGLES: shape={h_angles.shape}, min={torch.min(h_angles)}, max={torch.max(h_angles)}")
+                print(f"  V_ANGLES: shape={v_angles.shape}, min={torch.min(v_angles)}, max={torch.max(v_angles)}")
+                print(f"  H_GRID: shape={h_grid.shape}, min={torch.min(h_grid)}, max={torch.max(h_grid)}")
+                print(f"  V_GRID: shape={v_grid.shape}, min={torch.min(v_grid)}, max={torch.max(v_grid)}")
+
             # Spherical to Cartesian (vectorized)
-            x = torch.cos(v_flat) * torch.cos(h_flat)   # negate X so +X is forward
-            y =  torch.cos(v_flat) * torch.sin(h_flat)
-            z =  torch.sin(v_flat)
+            x = torch.cos(v_flat) * torch.cos(h_flat)
+            y = torch.cos(v_flat) * torch.sin(h_flat)
+            z = torch.sin(v_flat)
+            
+            if verbose:
+                print(f"  +X: {x}")
+                print(f"  +Y: {y}")
+                print(f"  +Z: {z}")
+
+            # Stack and normalize
             dirs = torch.stack([x, y, z], dim=1)
             dirs = dirs / torch.norm(dirs, dim=1, keepdim=True)
 
@@ -1340,8 +1366,6 @@ class Sensor3D_Instance:
         print(f"Rays for {self.name} calculated in {time.time() - start_time:.3f} sec.") if verbose else None
         print(f"  RAY ORIGINS max: {torch.max(ray_origins)}, min: {torch.min(ray_origins)}, mean: {torch.mean(ray_origins)}") if verbose else None
         print(f"  RAY DIRECTIONS max: {torch.max(ray_directions)}, min: {torch.min(ray_directions)}, mean: {torch.mean(ray_directions)}") if verbose else None
-        print(f"    H_ANGLES max: {torch.max(h_angles)}, min: {torch.min(h_angles)}, mean: {torch.mean(h_angles)}") if verbose else None
-        print(f"    V_ANGLES max: {torch.max(v_angles)}, min: {torch.min(v_angles)}, mean: {torch.mean(v_angles)}") if verbose else None
         return ray_origins, ray_directions
     
     def plot_rays(self, ray_origins, ray_directions, ray_length=1.0, fig=None, show=True):
@@ -1362,7 +1386,7 @@ class Sensor3D_Instance:
                 y=[ray_origins[i, 1], ray_origins[i, 1] + ray_directions[i, 1]*ray_length],
                 z=[ray_origins[i, 2], ray_origins[i, 2] + ray_directions[i, 2]*ray_length],
                 mode='lines',
-                line=dict(color='violet', width=2),
+                line=dict(color=random_color(self.name), width=2),
                 hoverinfo='none',
                 showlegend=False
             ))
