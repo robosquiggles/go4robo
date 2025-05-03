@@ -555,76 +555,71 @@ class PerceptionSpace:
         else:
             raise ValueError(f"Voxel group {voxel_group_name} not found.")
         
-    
-    def batch_ray_voxel_intersections(self, 
-                                      ray_origins:torch.Tensor, 
-                                      ray_directions:torch.Tensor, 
-                                      batch_size:int=15000,
-                                      verbose:bool=False,
-                                      eps:float=1e-8,
-                                      ) -> torch.Tensor:
+    def chunk_ray_voxel_intersections(self,
+                                        ray_origins:torch.Tensor,
+                                        ray_directions:torch.Tensor,
+                                        rays_per_chunk:int=15000,
+                                        voxels_per_chunk:int=1000,
+                                        eps:float=1e-8,
+                                        verbose:bool=False,
+                                        ) -> torch.Tensor:
         """
-        Check if the rays intersect with the voxels in the voxel groups.
+        Count ray-vs-voxel intersections in chunks to limit peak memory.
+
         Args:
-            ray_origins (torch.Tensor): The origins of the rays.
-            ray_directions (torch.Tensor): The directions of the rays.
+            origins:    Ray origins, shape (R,3).
+            directions: Ray direction vectors, shape (R,3).
+            max_rays_per_chunk: Maximum number of rays to process at once.
+            max_voxels_per_chunk: Maximum number of voxels to process at once.
+            eps: Small epsilon to avoid division-by-zero.
+
         Returns:
-            torch.Tensor: A tensor of shape (N,) where N is the number of voxels. Each element is the number of rays that intersect with the voxel.
+            counts: Tensor of shape (V,) giving number of rays intersecting each voxel.
         """
 
         if verbose:
             start_time = time.time()
         
         torch.cuda.empty_cache()
-        
-        ray_origins = ray_origins                     # Shape: (R, 3)
-        ray_directions = ray_directions               # Shape: (R, 3)
-        voxel_mins = self.get_voxel_mins().to(device) # Shape: (N, 3)
-        voxel_maxs = self.get_voxel_maxs().to(device) # Shape: (N, 3)
 
-        num_rays = ray_origins.shape[0]
-        num_voxels = voxel_mins.shape[0]
+        # Precompute box mins/maxs once
+        box_mins = self.get_voxel_mins().to(device)  # (V,3)
+        box_maxs = self.get_voxel_maxs().to(device)  # (V,3)
 
-        v_hits = torch.zeros(num_voxels)
+        R = ray_origins.shape[0]
+        V = box_mins.shape[0]
+        counts = torch.zeros(V, dtype=torch.long, device=device)
 
-        for start in range(0, num_rays, batch_size):
-            end = min(start + batch_size, num_rays)
-            # Expand rays and voxels for broadcasting
-            rays_o = ray_origins[start:end].unsqueeze(1).expand(-1, num_voxels, -1)     # Shape: (R, N, 3)
-            rays_d = ray_directions[start:end].unsqueeze(1).expand(-1, num_voxels, -1)  # Shape: (R, N, 3)
-            boxes_min = voxel_mins.unsqueeze(0).expand(end-start, -1, -1)               # Shape: (R, N, 3)
-            boxes_max = voxel_maxs.unsqueeze(0).expand(end-start, -1, -1)               # Shape: (R, N, 3)
+        # Loop over ray‐chunks
+        for i in range(0, R, rays_per_chunk):
+            o_chunk = ray_origins[i : i + rays_per_chunk]      # (r_chunk,3)
+            d_chunk = ray_directions[i : i + rays_per_chunk]   # (r_chunk,3)
 
-            # Clamp to avoid division by zero
-            rays_d = torch.where(-eps < rays_d, torch.tensor(-eps), rays_d)
-            rays_d = torch.where(eps > rays_d, torch.tensor(eps), rays_d)
+            # Prepare for broadcasting
+            O = o_chunk.unsqueeze(1)       # (r_chunk,1,3)
+            D = d_chunk.unsqueeze(1)       # (r_chunk,1,3)
+            D_safe = torch.where(D.abs() < eps, torch.full_like(D, eps), D)
 
-            inv_dir = 1.0 / rays_d
-            tmin = (boxes_min - rays_o) * inv_dir
-            tmax = (boxes_max - rays_o) * inv_dir
+            # Loop over voxel‐chunks
+            for j in range(0, V, voxels_per_chunk):
+                Bmin = box_mins[j : j + voxels_per_chunk].unsqueeze(0)  # (1,v_chunk,3)
+                Bmax = box_maxs[j : j + voxels_per_chunk].unsqueeze(0)  # (1,v_chunk,3)
 
-            t1 = torch.minimum(tmin, tmax)
-            t2 = torch.maximum(tmin, tmax)
+                # slab intersection distances
+                t1 = (Bmin - O) / D_safe    # (r_chunk, v_chunk, 3)
+                t2 = (Bmax - O) / D_safe    # (r_chunk, v_chunk, 3)
 
-            t_enter = torch.max(t1, dim=2).values
-            t_exit = torch.min(t2, dim=2).values
+                t_enter = torch.max(torch.min(t1, t2), dim=2).values  # (r_chunk, v_chunk)
+                t_exit  = torch.min(torch.max(t1, t2), dim=2).values  # (r_chunk, v_chunk)
 
-            # A ray intersects a voxel if t_enter <= t_exit and t_exit >= 0
-            hits = (t_enter <= t_exit) & (t_exit >= 0)
-            # Shape: (R, N) where R is the number of rays and N is the number of voxels. 
-            # Each element is True if the ray intersects with the voxel, False otherwise.
+                hits = (t_exit >= t_enter) & (t_exit >= 0)            # bool mask
+                counts[j : j + voxels_per_chunk] += hits.sum(dim=0).to(torch.long)
 
-            # To get the number of rays that intersect with each voxel, we can sum along the first dimension
-            v_hits += hits.sum(dim=0)
+        print(f" Batch ray voxel intersection traversal took {time.time() - start_time:.2f} seconds for {R} rays and {V} voxels.") if verbose else None
+        print(f"  VOXEL HITS max: {torch.max(counts)}, min: {torch.min(counts)}") if verbose else None
 
-            # v_hits.cpu() # Move back to CPU if needed
+        return counts
 
-        print(f" Batch ray voxel intersection traversal took {time.time() - start_time:.2f} seconds for {num_rays} rays and {num_voxels} voxels.") if verbose else None
-        print(f"  VOXEL HITS max: {torch.max(v_hits)}, min: {torch.min(v_hits)}, mean: {torch.mean(v_hits)}") if verbose else None
-
-        torch.cuda.empty_cache()
-
-        return v_hits  # Shape: (N,), hits for each voxel
     
     def plot_me(self, fig=None, show=True, mode='centers'):
         """
@@ -766,28 +761,41 @@ class Sensor3D:
         Args:
             json_dict (dict): A dictionary representation of the sensor.
         """
+        if json_dict == "None" or json_dict is None:
+            return None
+        
         if not isinstance(json_dict, dict):
             raise ValueError("Invalid sensor data")
         
+        assert "type" in json_dict, "Invalid sensor data, no type found"
         assert "name" in json_dict, "Invalid sensor data, no name found"
-        assert "h_fov" in json_dict, "Invalid sensor data, no h_fov found"
-        assert "h_res" in json_dict, "Invalid sensor data, no h_res found"
-        assert "v_fov" in json_dict, "Invalid sensor data, no v_fov found"
-        assert "v_res" in json_dict, "Invalid sensor data, no v_res found"
-        assert "max_range" in json_dict, "Invalid sensor data, no max_range found"
-        assert "min_range" in json_dict, "Invalid sensor data, no min_range found"
-        assert "cost" in json_dict, "Invalid sensor data, no cost found"
 
-        return Sensor3D(
-            name=json_dict["name"],
-            h_fov=json_dict["h_fov"],
-            h_res=json_dict["h_res"],
-            v_fov=json_dict["v_fov"],
-            v_res=json_dict["v_res"],
-            max_range=json_dict["max_range"],
-            min_range=json_dict["min_range"],
-            cost=json_dict["cost"]
-        )
+        if json_dict["type"] == "StereoCamera3D":
+            return StereoCamera3D.from_json(json_dict)
+        else:
+            assert "h_fov" in json_dict, "Invalid sensor data, no h_fov found"
+            assert "h_res" in json_dict, "Invalid sensor data, no h_res found"
+            assert "v_fov" in json_dict, "Invalid sensor data, no v_fov found"
+            assert "v_res" in json_dict, "Invalid sensor data, no v_res found"
+            assert "max_range" in json_dict, "Invalid sensor data, no max_range found"
+            assert "min_range" in json_dict, "Invalid sensor data, no min_range found"
+            assert "cost" in json_dict, "Invalid sensor data, no cost found"
+            h_fov = json_dict["h_fov"]
+            h_res = json_dict["h_res"]
+            v_fov = json_dict["v_fov"]
+            v_res = json_dict["v_res"]
+            max_range = json_dict["max_range"]
+            min_range = json_dict["min_range"]
+            cost = json_dict["cost"]
+            name = json_dict["name"]
+            body = None # TODO: This should be the body of the sensor
+            
+            # Create a new instance of the class of type json_dict["type"]
+            sensor_class = globals()[json_dict["type"]]
+            sensor = sensor_class(name=name, h_fov=h_fov, h_res=h_res, v_fov=v_fov, v_res=v_res, max_range=max_range, min_range=min_range, cost=cost, body=body)
+            return sensor
+            
+
     
     def to_json(self):
         """
@@ -796,6 +804,7 @@ class Sensor3D:
             dict: A dictionary representation of the sensor.
         """
         data = {
+            "type": self.__class__.__name__,
             "name": self.name,
             "h_fov": self.h_fov,
             "h_res": self.h_res,
@@ -1307,7 +1316,7 @@ class Sensor3D_Instance:
             h_flat = h_grid.flatten()
 
             # Spherical to Cartesian (vectorized)
-            x = -torch.cos(v_flat) * torch.cos(h_flat)   # negate X so +X is forward
+            x = torch.cos(v_flat) * torch.cos(h_flat)   # negate X so +X is forward
             y =  torch.cos(v_flat) * torch.sin(h_flat)
             z =  torch.sin(v_flat)
             dirs = torch.stack([x, y, z], dim=1)
@@ -1616,7 +1625,7 @@ class Bot3D:
         return bot_dict
     
     @staticmethod
-    def from_json(json_dict:dict):
+    def from_json(json_dict:dict) -> 'Bot3D':
         """Deserialize from a dict to create a Bot3D object. The dict should be in the same format as the one returned by to_json()."""
         name = json_dict["name"]
         path = json_dict["path"]
@@ -1624,7 +1633,7 @@ class Bot3D:
         sensor_pose_constraint = None # TODO if you want to plot the body in the dash app, make this work.
         usd_context=None
         sensors = []
-        for sensor in json_dict["sensor_instances"]:
+        for i, sensor in enumerate(json_dict["sensor_instances"]):
             sensor_name = sensor["name"]
             sensor_path = sensor["path"]
             translation = sensor["translation"]
@@ -1637,7 +1646,8 @@ class Bot3D:
                 sensor = StereoCamera3D.from_json(sensor["sensor1"], sensor["sensor2"])
             else:
                 sensor = None
-            sensor_instance = Sensor3D_Instance(sensor=sensor, 
+            sensor_instance = Sensor3D_Instance(name=f"s{i}={sensor_name}",
+                                                sensor=sensor, 
                                                 path=sensor_path, 
                                                 tf=(translation, rotation))
             sensors.append(sensor_instance)
@@ -1917,7 +1927,7 @@ class Bot3D:
 
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
-            sensor_m:torch.Tensor = perception_space.batch_ray_voxel_intersections(o, d, verbose=False)
+            sensor_m:torch.Tensor = perception_space.chunk_ray_voxel_intersections(o, d, verbose=False)
             print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
             print(f"sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.mean()}")  if verbose else None
 

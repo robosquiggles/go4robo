@@ -270,7 +270,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         problem_dict = {
             "prior_bot": self.prior_bot.to_json(), # Use the prior bot that has all the sensors!
-            "sensor_options": {key: (sensor.name if sensor else "None") for key, sensor in self.sensor_options.items()},
+            "sensor_options": {key: (sensor.to_json() if sensor else "None") for key, sensor in self.sensor_options.items()},
             "max_n_sensors": self.max_n_sensors,
             "sensor_pose_bounds": self.s_bounds.tolist(),  # Convert numpy array to list
             "perception_space": self.perception_space.to_json(),  # Serialize perception space as a string or ID
@@ -296,7 +296,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         return SensorPkgOptimization(
             bot=Bot3D.from_json(json_dict["prior_bot"]),
-            sensor_options=[Sensor3D(name=sensor_name) for sensor_name in json_dict["sensor_options"]],
+            sensor_options=[Sensor3D.from_json(sensor_dict) for sensor_dict in json_dict["sensor_options"].values()], # This should handle the None case, StereoCamera, or a MonoCamera or Lidar
             max_n_sensors=json_dict["max_n_sensors"],
             perception_space=PerceptionSpace.from_json(json_dict["perception_space"]),
             s_bounds=np.array(json_dict["sensor_pose_bounds"]),
@@ -403,6 +403,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         )
         
         if sensor_type > 0 and sensor_type in self.sensor_options: # 0 is None
+            print(f"Found sensor type {sensor_type} in problem sensor options.")
             sensor = self.sensor_options[sensor_type]
             sensor_instance = Sensor3D_Instance(sensor=sensor,
                                                 name=f"sensor_{idx}",
