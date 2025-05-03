@@ -556,7 +556,12 @@ class PerceptionSpace:
             raise ValueError(f"Voxel group {voxel_group_name} not found.")
         
     
-    def batch_ray_voxel_intersections(self, ray_origins:torch.Tensor, ray_directions:torch.Tensor, batch_size:int=15000) -> torch.Tensor:
+    def batch_ray_voxel_intersections(self, 
+                                      ray_origins:torch.Tensor, 
+                                      ray_directions:torch.Tensor, 
+                                      batch_size:int=15000,
+                                      verbose:bool=False
+                                      ) -> torch.Tensor:
         """
         Check if the rays intersect with the voxels in the voxel groups.
         Args:
@@ -565,7 +570,8 @@ class PerceptionSpace:
         Returns:
             torch.Tensor: A tensor of shape (N,) where N is the number of voxels. Each element is the number of rays that intersect with the voxel.
         """
-        start_time = time.time()
+        if verbose:
+            start_time = time.time()
         
         torch.cuda.empty_cache()
         
@@ -607,8 +613,10 @@ class PerceptionSpace:
 
             # v_hits.cpu() # Move back to CPU if needed
 
+        print(f" Batch ray voxel intersection traversal took {time.time() - start_time:.2f} seconds for {num_rays} rays and {num_voxels} voxels.") if verbose else None
+        print(f"  VOXEL HITS max: {torch.max(v_hits)}, min: {torch.min(v_hits)}, mean: {torch.mean(v_hits)}") if verbose else None
+
         torch.cuda.empty_cache()
-        # print(f"Batch ray voxel intersection traversal took {time.time() - start_time:.2f} seconds for {num_rays} rays and {num_voxels} voxels.")
 
         return v_hits  # Shape: (N,), hits for each voxel
 
@@ -1090,7 +1098,7 @@ class Sensor3D_Instance:
             tfs.append((self.translation, self.quat_rotation))
         return tfs
 
-    def get_rays(self) -> Tuple[np.ndarray, np.ndarray]:
+    def get_rays(self, verbose:bool=True) -> Tuple[np.ndarray, np.ndarray]:
         """Returns (ray_origins, ray_directions) for this sensor instance, vectorized with torch."""
 
         start_time = time.time()
@@ -1125,16 +1133,16 @@ class Sensor3D_Instance:
             rotation = torch.tensor(rotation, dtype=torch.float32, device=device) # Rotation matrix
 
             # Generate grid of angles
-            h_angles = torch.linspace(-hfov/2, hfov/2, hres, device=device) #* (np.pi/180)
-            v_angles = torch.linspace(-vfov/2, vfov/2, vres, device=device) #* (np.pi/180)
+            h_angles = torch.linspace(-hfov/2, hfov/2, hres, device=device) * (np.pi/180)
+            v_angles = torch.linspace(-vfov/2, vfov/2, vres, device=device) * (np.pi/180)
             v_grid, h_grid = torch.meshgrid(v_angles, h_angles, indexing='ij')
             v_flat = v_grid.flatten()
             h_flat = h_grid.flatten()
 
             # Spherical to Cartesian (vectorized)
-            x = torch.cos(v_flat) * torch.sin(h_flat)
-            y = torch.sin(v_flat)
-            z = torch.cos(v_flat) * torch.cos(h_flat)
+            x = torch.cos(v_flat) * torch.cos(h_flat)  # X+ is forward
+            y = torch.cos(v_flat) * torch.sin(h_flat)  # Y+ is left (or maybe right? need a fact check but shouldn't matter)
+            z = torch.sin(v_flat)                      # Z+ is up
             dirs = torch.stack([x, y, z], dim=1)
             dirs = dirs / torch.norm(dirs, dim=1, keepdim=True)
 
@@ -1153,8 +1161,11 @@ class Sensor3D_Instance:
 
         torch.cuda.empty_cache()
 
-        # print(f"Rays for {self.name} calculated in {time.time() - start_time:.3f} sec.")
-
+        print(f"Rays for {self.name} calculated in {time.time() - start_time:.3f} sec.") if verbose else None
+        print(f"  RAY ORIGINS max: {torch.max(ray_origins)}, min: {torch.min(ray_origins)}, mean: {torch.mean(ray_origins)}") if verbose else None
+        print(f"  RAY DIRECTIONS max: {torch.max(ray_directions)}, min: {torch.min(ray_directions)}, mean: {torch.mean(ray_directions)}") if verbose else None
+        print(f"    H_ANGLES max: {torch.max(h_angles)}, min: {torch.min(h_angles)}, mean: {torch.mean(h_angles)}") if verbose else None
+        print(f"    V_ANGLES max: {torch.max(v_angles)}, min: {torch.min(v_angles)}, mean: {torch.mean(v_angles)}") if verbose else None
         return ray_origins, ray_directions
 
     
@@ -1441,7 +1452,7 @@ class Bot3D:
         
         return world_transform
     
-    def calculate_perception_entropy(self, perception_space:PerceptionSpace, verbose:bool=True) -> float:
+    def calculate_perception_entropy(self, perception_space:PerceptionSpace, verbose:bool=False) -> float:
         """
         Calculate the perception entropy of the bot based on the sensors and the perception space.
         Args:
@@ -1614,7 +1625,7 @@ class Bot3D:
 
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
-            sensor_m:torch.Tensor = perception_space.batch_ray_voxel_intersections(o, d)
+            sensor_m:torch.Tensor = perception_space.batch_ray_voxel_intersections(o, d, verbose=True)
             print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
             print(f"sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.mean()}")  if verbose else None
 
@@ -1862,8 +1873,8 @@ class Bot3D:
                 # Get direction vector
                 rot_mat = R.from_quat(quat).as_matrix()
                 x_forward = np.array([1, 0, 0])  # Local forward direction in sensor's local space
-                y_forward = np.array([0, 1, 0])  # Local up direction in sensor's local space
-                z_forward = np.array([0, 0, 1])  # Local right direction in sensor's local space
+                y_forward = np.array([0, 1, 0])  # Local left direction in sensor's local space
+                z_forward = np.array([0, 0, 1])  # Local up direction in sensor's local space
                 x_direction = rot_mat @ x_forward  # Transform to world space
                 y_direction = rot_mat @ y_forward  # Transform to world space
                 z_direction = rot_mat @ z_forward  # Transform to world space
@@ -1881,7 +1892,7 @@ class Bot3D:
                     y=[float(translation[1])],
                     z=[float(translation[2])],
                     mode='markers',  # Display as markers
-                    marker=dict(size=5, color=color),  # Marker size and color
+                    marker=dict(size=3, color=color),  # Marker size and color
                     name=sensor_instance.name,  # Legend label
                     legendgroup=sensor_instance.name,  # Group in the legend
                     text=[f"Translation: (x={translation[0]:.2f}, y={translation[1]:.2f}, z={translation[2]:.2f})"],  # Hover text for the first point

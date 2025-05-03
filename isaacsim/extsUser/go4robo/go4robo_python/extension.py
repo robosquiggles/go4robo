@@ -875,7 +875,7 @@ class GO4RExtension(omni.ext.IExt):
                                         aspect_ratio=aspect_ratio,
                                         h_res=resolution[0] if resolution else None,
                                         v_res=resolution[1] if resolution else None,
-                                        body=_find_sensor_body(prim) if not has_stereo_role(prim, name) else None,
+                                        body=None,#_find_sensor_body(prim) if not has_stereo_role(prim, name) else None,
                                         cost=1.0,
                                         focal_point=(0, 0, 0)
                                         )
@@ -887,10 +887,12 @@ class GO4RExtension(omni.ext.IExt):
 
                     tf = self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim)
 
+                    tf = (tf[0], self._reorient_camera_to_sensor_quat(tf[1]))
+                    
                     cam3d_instance = Sensor3D_Instance(cam3d, 
                                                        path=str(prim.GetPath()), 
                                                        name=_remove_trailing_digits(name), 
-                                                       tf=tf, # This is the transform from the robot to the lidar INSTANCE
+                                                       tf=tf, # This is the transform from the robot to the camera INSTANCE
                                                        usd_context=self._usd_context)
                     # self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
@@ -927,7 +929,7 @@ class GO4RExtension(omni.ext.IExt):
                                     v_res=self._get_prim_attribute(prim, "verticalResolution"),
                                     max_range=self._get_prim_attribute(prim, "maxRange"),
                                     min_range=self._get_prim_attribute(prim, "minRange"),
-                                    body=_find_sensor_body(prim.GetParent()),
+                                    body=None,#_find_sensor_body(prim.GetParent()),
                                     cost=1.0,
                                     )
                     # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
@@ -1109,7 +1111,7 @@ class GO4RExtension(omni.ext.IExt):
                                         tf_sensor1=tf_sensor1, # This is the transform from the common parent to the left camera
                                         tf_sensor2=tf_sensor2, # This is the transform from the common parent to the right camera
                                         cost=sensor_instance.sensor.cost + camera.sensor.cost,
-                                        body=_find_sensor_body(prim)
+                                        body=None#_find_sensor_body(prim)
                                     )
                                     # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
                                     if stereo_cam in self.sensor_options:
@@ -1799,6 +1801,51 @@ class GO4RExtension(omni.ext.IExt):
         translation, rotation = tf_utils.pose_from_tf_matrix(rel_mat)
 
         return translation, rotation
+    
+    def _reorient_camera_to_sensor_quat(self, q_orig: np.ndarray) -> np.ndarray:
+        """
+        Given original camera quaternion q_orig ([x,y,z,w], 
+        local forward = -Z, up = +Y), return new quaternion 
+        with forward = +X, up = +Z.
+        """
+        def quat_between(v0: np.ndarray, v1: np.ndarray) -> np.ndarray:
+            """
+            Return unit quaternion (x, y, z, w) rotating v0 onto v1.
+            Uses the shortest-arc formula: axis = cross(v0,v1), w = |v0||v1| + dot(v0,v1).
+            """
+            # ensure unit inputs
+            a = v0 / np.linalg.norm(v0)
+            b = v1 / np.linalg.norm(v1)
+            axis = np.cross(a, b)
+            w = np.linalg.norm(a) * np.linalg.norm(b) + np.dot(a, b)
+            q = np.concatenate([axis, [w]])
+            return q / np.linalg.norm(q)
+        
+        if not isinstance(q_orig, np.ndarray):
+            q_orig = np.array(q_orig)
+
+        print(f"Original quaternion: {q_orig}")
+        
+        # Map original forward → new forward
+        q1 = quat_between(np.array([0, 0, -1]), np.array([1, 0, 0]))
+        # Compute where original up lands, then align it w/ new up
+        r1 = R.from_quat(q1)              # alignment step 1
+        up_rot = r1.apply(np.array([0, 1, 0]))
+        q2 = quat_between(up_rot, np.array([0, 0, 1]))
+        # Combined alignment rotation
+        r_align = R.from_quat(q2) * r1    # apply q1 then q2
+        # Compose with original orientation
+        r_orig = R.from_quat(q_orig)      
+        r_new = r_orig * r_align          # apply alignment in local frame
+
+        r_quat = r_new.as_quat()            # [x, y, z, w]
+        # Convert to [x, y, z, w] format
+        r_quat = np.array([r_quat[1], r_quat[2], r_quat[0], r_quat[3]])  # [x, y, z, w]
+
+        print(f"New quaternion:      {r_quat}")
+
+        return r_quat
+
     
     def _get_world_transform(self, prim) -> Tuple[Gf.Vec3d, Gf.Rotation]:
         """Get the world transform (position and rotation) of a prim"""
