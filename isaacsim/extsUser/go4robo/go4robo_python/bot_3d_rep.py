@@ -16,12 +16,23 @@ import hashlib
 
 import pandas as pd
 
-import matplotlib.pyplot as plt
-from matplotlib.path import Path
-from matplotlib.patches import PathPatch
-from matplotlib.animation import FuncAnimation
-import plotly.graph_objects as go
-import plotly.express as px
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.path import Path
+    from matplotlib.patches import PathPatch
+    from matplotlib.animation import FuncAnimation
+    MATPLOTLIB_MODE = True
+except (ImportError, ModuleNotFoundError):
+    print("Matplotlib not found; Matplotlib-specific features will not work.")
+    MATPLOTLIB_MODE = False
+
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    PLOTLY_MODE = True
+except (ImportError, ModuleNotFoundError):
+    print("Plotly not found; Plotly-specific features will not work.")
+    PLOTLY_MODE = False
 
 import torch
 
@@ -1413,7 +1424,14 @@ class Sensor3D_Instance:
         return fig
 
 
-    def plot_me(self, fig, vec_length=0.2):
+    def plot_me(self, fig, group_mode="type", plot_rays=False, vec_length=0.2):
+        """Plot the sensor in 3D using plotly
+        Args:
+            fig (plotly.graph_objects.Figure): The figure to plot on.
+            group_mode (str): The mode to group the sensor by. Can be "type" or "idx".
+            vec_length (float): The length of the vectors to plot.
+        """
+
         translation = self.translation
         quat = self.quat_rotation  # (w,x,y,z)
         
@@ -1440,7 +1458,7 @@ class Sensor3D_Instance:
             z=[float(translation[2])],
             mode='markers',  # Display as markers
             marker=dict(size=3, color=color),  # Marker size and color
-            name=self.name,  # Legend label
+            name=self.name if group_mode=="idx" else self.sensor.name,  # Legend label
             legendgroup=self.name,  # Group in the legend
             text=[
                 f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
@@ -1484,6 +1502,13 @@ class Sensor3D_Instance:
             showlegend=False,  # Hide legend for the line itself
             legendgroup=self.name,  # Group in the legend
         ))
+
+        if plot_rays:
+            # Plot the rays
+            ray_origins, ray_directions = self.get_rays()
+            fig = self.plot_rays(ray_origins, ray_directions, vec_length=vec_length, fig=fig, show=False)
+
+        return fig
     
     def get_position(self):
         return self.tf[0]
@@ -2181,13 +2206,13 @@ class Bot3D:
         # Create a plotly figure
         fig = go.Figure()
 
-        # Add a dot at the origin
+        # Add a dot at the bot origin
         fig.add_trace(go.Scatter3d(
             x=[0.0],  # X-coordinate
             y=[0.0],  # Y-coordinate
             z=[0.0],  # Z-coordinate
             mode='markers',  # Display as markers
-            marker=dict(size=5, color='black'),  # Marker size and color
+            marker=dict(size=3, color='black'),  # Marker size and color
             name='ORIGIN'  # Legend label
         ))
 
@@ -2231,9 +2256,40 @@ class Bot3D:
 
         return fig
 
-def random_color(name):
-    """Optional: Create a random color from a string, or define your own mapping"""
-    if name is None:
+def box_mesh_data(extents:tuple[tuple,tuple,tuple], opacity:float=0.25, **kwargs):
+    """Create a box mesh data for a box with given extents.
+    Args:
+        extents (tuple[tuple,tuple,tuple]): The extents of the box in the form ((x0,x1),(y0,y1),(z0,z1)).
+        **kwargs: Additional arguments to pass to the mesh data. Used directly to create the go.Mesh3D obj.
+    Returns:
+        mesh_data: The mesh data for the box. Can me used to create a mesh in plotly. For example, add to an existing fig:
+            mesh_data = box_mesh_data(((0,1),(0,1),(0,1)))
+            fig.add_trace(go.Mesh3d(**mesh_data))
+    """
+    x0, x1 = extents[0]
+    y0, y1 = extents[1]
+    z0, z1 = extents[2]
+
+    # Eight corners
+    x_verts = [x0, x0, x1, x1, x0, x0, x1, x1]
+    y_verts = [y0, y1, y1, y0, y0, y1, y1, y0]
+    z_verts = [z0, z0, z0, z0, z1, z1, z1, z1]
+    
+    # Define static face‐index arrays for a cube
+    i_faces = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2]
+    j_faces = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3]
+    k_faces = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6]
+
+    return go.Mesh3d(
+        x=x_verts, y=y_verts, z=z_verts,
+        i=i_faces, j=j_faces, k=k_faces,
+        opacity=opacity, showscale=False,
+        **kwargs
+    )
+
+def random_color(unique_str:str|None) -> str:
+    """Create a random color from a string, or define your own mapping"""
+    if unique_str is None:
         return "#000000"
-    hash_digest = hashlib.md5(name.encode()).hexdigest()
+    hash_digest = hashlib.md5(unique_str.encode()).hexdigest()
     return f"#{hash_digest[:6]}"

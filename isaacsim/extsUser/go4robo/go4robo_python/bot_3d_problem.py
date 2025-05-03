@@ -5,7 +5,25 @@ import numpy as np
 import sys
 import traceback
 
-import plotly.express as px
+try:
+    PLOTLY_MODE = True
+    import plotly.express as px
+except (ImportError, ModuleNotFoundError):
+    PLOTLY_MODE = False
+    print("Plotly is not installed in this environment, Plotly visualizations will not work.")
+    # traceback.print_exc()
+    # sys.exit(1)
+
+try:
+    SNS_MODE = True
+    import seaborn as sns
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1)
+except (ImportError, ModuleNotFoundError):
+    SNS_MODE = False
+    print("Seaborn is not installed in this environment, Seaborn visualizations will not work.")
+    # traceback.print_exc()
+    # sys.exit(1)
 
 import copy
 
@@ -1068,6 +1086,8 @@ def plot_tradespace(combined_df:pd.DataFrame,
         plotly.graph_objs._figure.Figure: The generated Plotly figure object.
     """
 
+    assert PLOTLY_MODE, "Plotly is not available in this environment. Please install plotly to use this function."
+
     num_results = combined_df.shape[0]
 
     height = 800 if 'height' not in kwargs else kwargs['height']
@@ -1193,3 +1213,15 @@ def plot_tradespace(combined_df:pd.DataFrame,
         fig.show()
     
     return fig
+
+def plot_pairplot(df:pd.DataFrame,
+                  paired_axes:list[str]=["Cost", "Perception Entropy"],
+                  hue:str="Generation",
+                  ):
+    
+    assert SNS_MODE, "Seaborn is not available. Please install seaborn to use this function."
+
+    axes = paired_axes + [hue]
+    pair_plot_df = df[axes]
+    plot = sns.pairplot(pair_plot_df, hue=hue, diag_kind="kde")
+    return plot
