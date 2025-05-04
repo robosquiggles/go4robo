@@ -46,8 +46,9 @@ from pymoo.indicators.hv import HV
 import torch
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
 from tqdm import tqdm
+
+color_scale_blue = ['#94b8c9', '#5a91aa','#2e6985' ,'#216483' , '#004666']
 
 class ProgressBar:
     def __init__(self, n_gen, update_fn=None):
@@ -763,6 +764,12 @@ class SensorPkgFlatCrossover(Crossover):
         super().__init__(2, 2)  # two parents → two children
 
     def _do(self, problem, X, **kwargs):
+        #Print some warnings if anything fishy is going on
+        if np.any(np.isnan(X)): print("X-O WARN: NaN values found in X")
+        if np.any(np.isinf(X)): print("X-O WARN: Inf values found in X")
+        if not np.all(X >= problem.bounds()[0]): print("X-O WARN: Values in X are below the lower bounds")
+        if not np.all(X <= problem.bounds()[1]): print("X-O WARN: Values in X exceed the upper bounds")
+
         # X: shape (2, n_matings, n_var)
         n_parents, n_matings, n_var = X.shape
         Y = X.copy()
@@ -845,6 +852,12 @@ class SensorPkgFlatMutation(Mutation):
         self.quat_sigma = quat_sigma
 
     def _do(self, problem, X, **kwargs):
+        #Print some warnings if anything fishy is going on
+        if np.any(np.isnan(X)): print("MUT WARN: NaN values found in X")
+        if np.any(np.isinf(X)): print("MUT WARN: Inf values found in X")
+        if not np.all(X >= problem.bounds()[0]): print("MUT WARN: Values in X are below the lower bounds")
+        if not np.all(X <= problem.bounds()[1]): print("MUT WARN: Values in X exceed the upper bounds")
+
         # X: shape (pop_size, n_var) or (offsprings, n_var)
         pop, n_var = X.shape
         Y = X.copy()
@@ -1130,7 +1143,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
 
     height = 800 if 'height' not in kwargs else kwargs['height']
     width = 800 if 'width' not in kwargs else kwargs['width']
-    opacity = 0.9 if 'opacity' not in kwargs else kwargs['opacity']
+    opacity = 0.8 if 'opacity' not in kwargs else kwargs['opacity']
     title = f"Objective Space ({num_results} designs)" if 'title' not in kwargs else kwargs['title']
     
     y_min = min(combined_df[y[0]]+ [0])
@@ -1143,7 +1156,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
     # Find the pareto front
     pareto, idx, ut = get_pareto_front(combined_df, x="Cost", y="Perception Entropy", x_minimize=x_minimize, y_minimize=y_minimize)
 
-    #Add a column to the dataframe for pareto
+    # Add a column to the dataframe for pareto
     combined_df['Pareto Optimal'] = ''
     combined_df.loc[idx, 'Pareto Optimal'] = 'Pareto Optimal'
 
@@ -1154,8 +1167,8 @@ def plot_tradespace(combined_df:pd.DataFrame,
     # Plot the population of generated designs
     fig = px.scatter(
         generated_df, x=x[0], y=y[0], 
-        # color='Optimized', 
-        color_discrete_sequence=['#1276a4'], 
+        color='Generation', 
+        color_continuous_scale=color_scale_blue, 
         opacity=opacity,
         title=title, 
         template="plotly_white", 
@@ -1172,7 +1185,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
         y=prior_df[y[0]].values,
         mode='markers',
         opacity=opacity,
-        marker=dict(symbol='square', size=12 * (width / 600), color='#dd6b00'),
+        marker=dict(symbol='square', size=18 * (width / 600), color='#dd6b00'),
         name='Prior Design',
         hoverinfo='text',
         text=prior_df[hover_name],
@@ -1213,7 +1226,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
             hoverinfo='none',  # Disable hover data
         )
 
-    # Finally draw a circle around the selected design
+    # Finally draw a circle around the selected design, if there is one
     if selected_name is not None:
         selected_df = combined_df[combined_df['Name'] == selected_name]
         fig.add_scatter(
@@ -1238,7 +1251,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
         legend=dict(
             # orientation="h",
             yanchor="top",
-            y=0,
+            y=1,
             xanchor="right",
             x=1
         ),
