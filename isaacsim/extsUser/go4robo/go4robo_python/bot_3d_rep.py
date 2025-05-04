@@ -1930,15 +1930,18 @@ class Bot3D:
             torch.Tensor
                 A tensor of shape (N, S) where N is the number of voxels and S is the number of sensors.
             """
-            print(f"Calculating fused uncertainty for {uncertainties.shape[0]} voxels.") if verbose else None
+            print(f"Calculating fused uncertainty for {uncertainties.shape[0]} voxels and {uncertainties.shape[1]} sensors.") if verbose else None
             print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]}, {uncertainties.shape[1]})")  if verbose else None
             # Calculate the fused uncertainty using the formula
             # σ_fused = sqrt(1 / Σ(1/σ_i²))
-            fused_uncertainty = torch.sqrt(1 / torch.sum(1 / (uncertainties ** 2), dim=0))
+            fused_uncertainty = torch.sqrt(1 / torch.sum(1 / (uncertainties ** 2), dim=1))
+
+            print(f"  fused_uncertainty.shape: {fused_uncertainty.shape}, should be (N={uncertainties.shape[0]},)") if verbose else None
+            print(f"  fused_uncertainty min: {fused_uncertainty.min()}, fused_uncertainty max: {fused_uncertainty.max()}, fused_uncertainty mean:{fused_uncertainty.float().mean()}") if verbose else None
             
             return fused_uncertainty
         
-        def _calc_aps(measurements:torch.Tensor, a:torch.Tensor, b:torch.Tensor) -> torch.Tensor:
+        def _calc_aps(measurements:torch.Tensor, a:torch.Tensor, b:torch.Tensor, eps=1e-3) -> torch.Tensor:
             """Calculate the sensor AP for each voxel, where AP = a ln(m) + b
             This is based on the formula from the paper Ma et al. 2020 "Perception Entropy..."
             
@@ -1980,10 +1983,12 @@ class Bot3D:
         
             # ap = a * ln_m + b
             ap = as_t * torch.log(measurements) + bs_t
-
-            # Transpose and clamp AP to valid range
-            ap = torch.clamp(ap.T, min=0.001, max=0.999)
             print(f"  ap.shape: {ap.shape}, should be ({N}, {S})") if verbose else None
+            print(f"  ap (unclamped) min: {ap.min()}, ap max: {ap.max()}, ap mean:{ap.float().mean()}") if verbose else None
+
+            # clamp AP to valid range, avaoiding log(0)
+            ap = torch.clamp(ap, min=eps, max=1.0-eps)
+            print(f"  ap  (clamped)  min: {ap.min()}, ap max: {ap.max()}, ap mean:{ap.float().mean()}") if verbose else None
             
             return ap
         
@@ -2003,8 +2008,13 @@ class Bot3D:
             """
             # Calculate the uncertainty for each voxel using the formula
             # σ_i = (1 / AP) - 1
+
+            print(f"Calculating uncertainty for {aps.shape[0]} voxels and {aps.shape[1]} sensors.") if verbose else None
             
             uncertainties = (1 / aps) - 1
+
+            print(f"  uncertainties.shape: {uncertainties.shape}, should be {aps.shape}") if verbose else None
+            print(f"  uncertainties min: {uncertainties.min()}, uncertainties max: {uncertainties.max()}, uncertainties mean:{uncertainties.float().mean()}") if verbose else None
             
             return uncertainties
         
@@ -2023,21 +2033,20 @@ class Bot3D:
                 A tensor of shape (N,) where N is the number of voxels.
             """
             # Calculate the entropy for each voxel using the formula
-            # H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
-            # H(S|m,q) = 2 * torch.log(uncertainties) + 1 + torch.log(torch.tensor(2 * np.pi))
+            # H(S|m,q) = 2ln(σ + 1) + ln(2pi)
             print(f"Calculating entropy for {uncertainties.shape[0]} voxels.") if verbose else None
             print(f"  uncertainties.shape: {uncertainties.shape}, should be ({uncertainties.shape[0]},)") if verbose else None
 
-            ln2pi_p_1 = torch.tensor(1 + 2 * np.log(np.pi)).to(device)
-            entropy = 2 * torch.log(uncertainties) + ln2pi_p_1.repeat(uncertainties.shape[0], 1).T.to(device) # repeat for each voxel
+            ln2pi = (torch.log(torch.tensor(2*np.pi))).repeat(uncertainties.shape[0]).to(device) # repeat for each voxel
+            print(f"  '1+ln(2pi)'.shape: {ln2pi.shape}, should be ({uncertainties.shape[0]},)") if verbose else None
+            print(f"  '1+ln(2pi)' min: {ln2pi.min()}, max: {ln2pi.max()}, mean:{ln2pi.float().mean()}") if verbose else None
+            entropy = 2 * torch.log(uncertainties + 1) + ln2pi
 
             print(f"  entropy.shape: {entropy.shape}, should be ({uncertainties.shape[0]},)") if verbose else None
+            print(f"  entropy min: {entropy.min()}, max: {entropy.max()}, mean:{entropy.float().mean()}") if verbose else None
 
             # Reshape the entropy tensor to (N,) where N is the number of voxels
             entropy = entropy.view(-1)
-
-            # Normalize the entropy to be between 0 and 1
-            # entropy = (entropy - torch.min(entropy)) / (torch.max(entropy) - torch.min(entropy))
             
             return entropy
             
@@ -2047,8 +2056,13 @@ class Bot3D:
         # N is the number of voxels, and S is the number of sensors.
         start_time = time.time()
 
+        print(f"Calculating PE for {self.name}, with {len(self.sensors)} sensors.") if verbose else None
+
         sensor_ms = {}
         for sensor_inst in self.sensors:
+
+            print(f" Sensor: {sensor_inst.name}") if verbose else None
+
             o,d = sensor_inst.get_rays()
 
             name = sensor_inst.sensor.name
@@ -2056,8 +2070,8 @@ class Bot3D:
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
             sensor_m:torch.Tensor = perception_space.chunk_ray_voxel_intersections(o, d, verbose=False)
-            print(f"sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
-            print(f"sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.mean()}")  if verbose else None
+            print(f"  sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
+            print(f"  sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.float().mean()}")  if verbose else None
 
             # Add the sensor measurements to the tensor for the sensor type
             if name not in sensor_ms or sensor_ms[name].numel() == 0:
@@ -2066,8 +2080,8 @@ class Bot3D:
                 sensor_ms[name] = torch.cat((sensor_ms[name], sensor_m.unsqueeze(1)), dim=1)
         
         if sensor_ms == {}:
-            print("No sensors found in the bot. Returning 0.0 for perception entropy.")
-            return 0.0, 0.0
+            print("No sensors found in the bot!! Returning max perception entropy, and no coverage.")
+            return np.inf, 0.0
 
         # Apply early fusion to combine measurements of the same sensor per voxel
         early_fusion_ms = []
@@ -2085,7 +2099,7 @@ class Bot3D:
             sensor = sensors[0].sensor
             print(f"  a: {sensor.ap_constants['a']}, b: {sensor.ap_constants['b']}")  if verbose else None
             m = _apply_early_fusion(sensor_m_tensor).to(device)
-            print(f"  m.shape: {m.shape}, should be (N,)")  if verbose else None
+            print(f"  m.shape: {m.shape}, should be (N,) = num hits per voxel")  if verbose else None
 
             early_fusion_ms.append(m.unsqueeze(1))  # shape (N, 1)
             ap_as = torch.cat((ap_as, torch.Tensor([sensor.ap_constants['a']])), dim=0)
@@ -2094,7 +2108,9 @@ class Bot3D:
             # Each element is the number of rays that intersect with the voxel for that sensor type.
         
         early_fusion_ms = torch.cat(early_fusion_ms, dim=1)  # shape (N, S_types)
-        print(f"early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S_types)")  if verbose else None
+        print(f"Early Fusion for {len(sensor_ms)} sensors...") if verbose else None
+        print(f" early_fusion_ms.shape: {early_fusion_ms.shape}, should be (N, S_types) = num hits per voxel")  if verbose else None
+        print(f" early_fusion_ms min: {early_fusion_ms.min()}, early_fusion_ms max: {early_fusion_ms.max()}, early_fusion_ms mean:{early_fusion_ms.float().mean()}")  if verbose else None
 
         # Calculate the percent of the voxels that are covered by any sensor
         covered_voxels = torch.sum(early_fusion_ms > 0, dim=1) # shape (N,)
@@ -2111,7 +2127,7 @@ class Bot3D:
         late_fusion_Us = _apply_late_fusion(us)
 
         # Calculate the entropies for each voxel, where H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
-        # This is a tensor of shape (N) where N is the number of voxels.
+        # This is still a tensor of shape (N) where N is the number of voxels.
         entropies = _calc_entropies(late_fusion_Us)
 
         # Calculate the weighted average entropy for the bot

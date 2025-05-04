@@ -1601,7 +1601,7 @@ class GO4RExtension(omni.ext.IExt):
         self.percep_entr_results_data = {}
         for robot in self.robots:
             # Call the perception entropy calculation for each robot
-            self.percep_entr_results_data[robot.name] = robot.calculate_perception_entropy(self.perception_space)
+            self.percep_entr_results_data[robot.name] = robot.calculate_perception_entropy(self.perception_space, verbose=True)
 
         # Update the UI with the results
         self._update_percep_entr_results_ui()
