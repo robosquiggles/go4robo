@@ -105,45 +105,39 @@ class DesignRecorder:
         F = algorithm.pop.get("F")
         G = algorithm.pop.get("G") if algorithm.pop.has("G") else None
         for x, f, g in zip(X, F, G):
-            self.notify_single(x, f, g)
+            self.notify_single(x, f, g=g)
         self.notification_count += 1
-        if self.save_file and self.notification_count % self.gens_between_save == 0:
-            # Save the current records to a CSV file
-            df = self.to_dataframe()
-            df.to_csv(self.save_file, index=False)
-            print(f"Saved designs to {self.save_file}")
     
     def notify_single(self, x, f, g=None):
         # Store as dict for easy DataFrame conversion
-        self.records.append({
+        x_dict = {
             "design": x.copy(),
+            "Generation": self.notification_count,
             "Cost": float(f[1]),
             "Perception Entropy": float(f[0]),
-            "Generation": self.notification_count
-        })
-        if self.save_file and self.notification_count % self.gens_between_save == 0:
-            # Save the current records to a CSV file
-            pass #TODO: Save the current unsaved records to a CSV file
-
+            "Coverage": float(g[0]) if g is not None else None,
+        }
+        self.records.append(x_dict)
+        if self.save_file:
+            x_dict_cpy = x_dict.copy()
+            # Expand the design dict into separate columns
+            for dv in x_dict_cpy["design"].keys():
+                # Create new columns for each design variable
+                x_dict_cpy[dv] = x_dict_cpy["design"].get(f"{dv}", None)
+            # Drop the original design column
+            x_dict_cpy.pop("design", None)
+            # Save the new records to the CSV file in append mode
+            pd.DataFrame([x_dict_cpy]).to_csv(
+                self.save_file, 
+                mode='a' if self.notification_count > 0 else 'w', # this creates the file if it doesn't exist 
+                header=False if self.notification_count > 0 else True, 
+                index=False
+                )
 
     def notify_init(self, x, f, g=None):
         # Store as dict for easy DataFrame conversion
         self.notify_single(x, f, g)
         self.notification_count += 1
-
-    def dataframe_header(self):
-        # Create a header for the DataFrame
-        header = ["id", "Name", "Generation", "Cost", "Perception Entropy"]
-        for i in range(self.max_sensors):
-            header.append(f"s{i}_type")
-            header.append(f"s{i}_x")
-            header.append(f"s{i}_y")
-            header.append(f"s{i}_z")
-            header.append(f"s{i}_qw")
-            header.append(f"s{i}_qx")
-            header.append(f"s{i}_qy")
-            header.append(f"s{i}_qz")
-        return header
     
     def to_dataframe(self):
         # Convert to DataFrame for analysis/plotting
@@ -305,9 +299,7 @@ class SensorPkgOptimization(ElementwiseProblem):
         self.n_evals = 0
         self.n_designs_generated = 0
 
-        super().__init__(vars=variables, n_obj=2, **kwargs)
-
-        print(f"SensorPkgOptimization initialized. Bounds: {self.s_bounds}")
+        super().__init__(vars=variables, n_obj=2, n_ieq_constr=1, **kwargs)
 
     def to_json(self, file_path=None):
         """
@@ -536,6 +528,9 @@ class SensorPkgOptimization(ElementwiseProblem):
                 - sensor_types (list): A list of sensor types.
                 - positions_tensor (torch.Tensor): A tensor of shape (N, 3) containing sensor positions.
                 - quaternions_tensor (torch.Tensor): A tensor of shape (N, 4) containing sensor rotation quaternions."""
+        
+        assert isinstance(X, dict), "X must be a dictionary or a list"
+        
         sensor_types = []
         positions = []
         quaternions = []
@@ -643,12 +638,22 @@ class SensorPkgOptimization(ElementwiseProblem):
         if bot.get_design_validity():
             pe, cov = bot.calculate_perception_entropy(self.perception_space)
             cost = bot.calculate_cost()
+
             out["F"] = [
                 pe,                  # Minimize perception entropy
                 cost                 # Minimize cost
             ]
+            out["G"] = [         # Note G is usually used as a constraint
+                cov                 # Track coverage (extra info)
+            ]
         else:
-            out["F"] = [np.inf, np.inf]
+            out["F"] = [
+                np.inf,             # Inf perception entropy
+                np.inf              # Inf cost
+            ]
+            out["G"] = [
+                0.0                 # No coverage
+            ]
 
         if 'verbose' in kwargs and kwargs['verbose']:
             print(f"{bot.name} eval took {time.time() - start_time:.2f} sec. PE: {pe:.3f}, Cov: {cov:.3f}")
@@ -666,6 +671,7 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         if not sensor_types:
             out["F"] = [np.inf, np.inf]
+            out["G"] = [0.0]
             return
 
         bot:Bot3D = self.new_bot_design()

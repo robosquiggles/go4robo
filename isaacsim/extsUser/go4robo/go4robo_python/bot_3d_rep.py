@@ -1337,7 +1337,11 @@ class Sensor3D_Instance:
     
     def get_world_tfs(self) -> list[tuple[np.ndarray, np.ndarray]]:
         """Get the translation and rotation of the sensor in world coordinates,
-        using SciPy instead of tf_utils."""
+        using SciPy instead of tf_utils.
+        Returns:
+            list[tuple[np.ndarray, np.ndarray]]: A list of tuples containing the translation a
+            nd rotation of the sensor in world coordinates. ((x,y,z), (w,x,y,z))
+        """
         tfs = []
 
         if isinstance(self.sensor, StereoCamera3D):
@@ -1355,9 +1359,11 @@ class Sensor3D_Instance:
                 pos_rs = T_rs[:3, 3]
                 R_rs   = T_rs[:3, :3]
                 quat_rs_xyzw = R.from_matrix(R_rs).as_quat()
-                quat_rs_wxyz = np.roll(quat_rs_xyzw, 1)
+                quat_rs_wxyz = np.roll(quat_rs_xyzw, 1) # I think there is a bug here? quaternions seem to be wrong sometimes. See HACK below
                 
-                tfs.append((pos_rs, quat_rs_wxyz))
+                # tfs.append((pos_rs, quat_rs_wxyz))
+                # HACK: Uses the parent rotation quaternion all the time to fix stereo cameras
+                tfs.append((pos_rs, self.quat_rotation))
         else:
             # no parent frame; sensor is directly on robot
             tfs.append((np.array(self.translation, dtype=float),
@@ -1388,8 +1394,8 @@ class Sensor3D_Instance:
 
             if verbose:
                 print(f" Sensor {i}: {sensor.name}, is a ({type(sensor)})")
-                print(f"  POS:  {tfs[i][0]}")
-                print(f"  QUAT: {tfs[i][1]} (w,x,y,z)")
+                print(f"  POS:  {tfs[i][0]} (x,y,z)")
+                print(f"  QUAT: {tfs[i][1]} (w,x,y,z) - NOTE: HACK")
 
             hfov = sensor.h_fov
             vfov = sensor.v_fov

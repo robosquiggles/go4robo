@@ -1805,9 +1805,10 @@ class GO4RExtension(omni.ext.IExt):
                                     # If it's a float, just list the total entropy
                                     ui.Label(f"Total Entropy: {robot_results:.4f}")
                                 elif isinstance(robot_results, tuple):
-                                    entropy, percent_coverage = robot_results
-                                    ui.Label(f"Total Entropy: {entropy:.4f}")
-                                    ui.Label(f"Total Entropy: {entropy:.4f}")
+                                    with ui.VStack(spacing=5):
+                                        entropy, percent_coverage = robot_results
+                                        ui.Label(f"Total Entropy: {entropy:.4f}")
+                                        ui.Label(f"Total Coverage: {percent_coverage*100:.1f}%")
                                 elif isinstance(robot_results, dict):
                                     # If it's a dict, iterate through the keys and values
                                     with ui.VStack(spacing=5):
