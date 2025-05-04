@@ -280,6 +280,32 @@ class TF:
         quats = torch.randn(batch_size, 4, device=device)
         quats = quats / torch.norm(quats, dim=1, keepdim=True)  # Normalize to unit length
         return quats
+    
+    def tf_matrix_from_pose(translation: np.ndarray, quat_wxyz: np.ndarray) -> np.ndarray:
+        """
+        Build a 4x4 homogeneous transform from a translation and a scalar-first quaternion.
+        
+        Args:
+            translation: (3,) array [tx, ty, tz]
+            quat_wxyz:    (4,) array [w, x, y, z]
+        
+        Returns:
+            T: (4,4) array so that
+            [R t] 
+            [0 1]
+            where R is the 3x3 rotation matrix and t is the 3x1 translation.
+        """
+        # Convert to SciPy’s [x, y, z, w] convention
+        q_xyzw = np.roll(quat_wxyz, -1)
+        
+        # Build rotation matrix
+        R_mat = R.from_quat(q_xyzw).as_matrix()
+        
+        # Assemble into 4x4
+        T = np.eye(4, dtype=float)
+        T[:3, :3] = R_mat
+        T[:3,  3] = translation
+        return T
 
 class PerceptionSpace:
 
@@ -1314,38 +1340,24 @@ class Sensor3D_Instance:
         using SciPy instead of tf_utils."""
         tfs = []
 
-        def to_scipy_quat(q_sf):
-            # [w, x, y, z] -> [x, y, z, w]
-            return np.array((q_sf[1], q_sf[2], q_sf[3], q_sf[0]))
-
-        def to_scalar_first(q_sl):
-            # [x, y, z, w] -> [w, x, y, z]
-            return np.array((q_sl[3], q_sl[0], q_sl[1], q_sl[2]))
-
         if isinstance(self.sensor, StereoCamera3D):
-            # robot→parent
-            t_rp = np.array(self.translation, dtype=float)
-            q_rp_sf = np.array(self.quat_rotation, dtype=float)
-            q_rp_sl = to_scipy_quat(q_rp_sf)
-            r_rp = R.from_quat(q_rp_sl).as_matrix()
+            # robot to parent
+            T_rp = TF.tf_matrix_from_pose(self.translation, self.quat_rotation)
 
             for pos_ps, q_ps_sf in [self.sensor.tf_1, self.sensor.tf_2]:
-                # parent→sensor
-                t_ps = np.array(pos_ps, dtype=float)
-                q_ps_sl = to_scipy_quat(np.array(q_ps_sf, dtype=float))
-                r_ps = R.from_quat(q_ps_sl).as_matrix()
+                # parent to sensor
+                T_ps = TF.tf_matrix_from_pose(pos_ps, q_ps_sf)
 
-                # compose rotations: first robot→parent, then parent→sensor
                 # robot to sensor
-                r_rs = r_ps * r_rp
+                T_rs = T_rp @ T_ps
 
-                # compose translations: t_rs = R_ps.apply(t_rp) + t_ps
-                t_rs = r_ps.apply(t_rp) + t_ps
-
-                # back to scalar-first quaternion
-                q_rs_sf = to_scalar_first(r_rs.as_quat())
-
-                tfs.append((t_rs, q_rs_sf))
+                # extract translation and rotation
+                pos_rs = T_rs[:3, 3]
+                R_rs   = T_rs[:3, :3]
+                quat_rs_xyzw = R.from_matrix(R_rs).as_quat()
+                quat_rs_wxyz = np.roll(quat_rs_xyzw, 1)
+                
+                tfs.append((pos_rs, quat_rs_wxyz))
         else:
             # no parent frame; sensor is directly on robot
             tfs.append((np.array(self.translation, dtype=float),
