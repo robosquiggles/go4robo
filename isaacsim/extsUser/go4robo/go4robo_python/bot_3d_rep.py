@@ -595,7 +595,7 @@ class PerceptionSpace:
     def chunk_ray_voxel_intersections(self,
                                         ray_origins:torch.Tensor,
                                         ray_directions:torch.Tensor,
-                                        rays_per_chunk:int=15000,
+                                        rays_per_chunk:int=25000,
                                         voxels_per_chunk:int=1000,
                                         eps:float=1e-8,
                                         verbose:bool=False,
@@ -1735,7 +1735,7 @@ class Bot3D:
             "name": self.name,
             "path": str(self.path),  # Convert Path to string
             "body": None,  # [self.body], # TODO: support mesh JSON serialization?
-            "sensor_pose_constraint": None,  # [self.sensor_pose_constraint], # TODO: support mesh JSON serialization?
+            "sensor_pose_constraint": self.sensor_pose_constraint.tolist() if isinstance(self.sensor_pose_constraint, np.ndarray) else self.sensor_pose_constraint,
             "sensor_instances": [
                 {
                     "name": sensor.name,
@@ -1758,7 +1758,7 @@ class Bot3D:
         name = json_dict["name"]
         path = json_dict["path"]
         body = None, # TODO if you want to plot the body in the dash app, make this work.
-        sensor_pose_constraint = None # TODO if you want to plot the body in the dash app, make this work.
+        sensor_pose_constraint = json_dict["sensor_pose_constraint"]
         usd_context=None
         sensors = []
         for i, sensor in enumerate(json_dict["sensor_instances"]):
@@ -2238,6 +2238,7 @@ class Bot3D:
     def plot_bot_3d(
             self, 
             perception_space:PerceptionSpace=None, 
+            show_sensor_pose_constraints:bool=True,
             show=True, 
             save_path:str=None,
             **kwargs):
@@ -2299,8 +2300,12 @@ class Bot3D:
         # TODO: Add the bot body to the plot
 
         # Add the sensor pose constraints to the plot
-        if self.sensor_pose_constraint is not None:
-            print("TODO Adding sensor pose constraints to the plot.")
+        if self.sensor_pose_constraint is not None and show_sensor_pose_constraints:
+            mesh_data = box_mesh_data(self.sensor_pose_constraint.extents,
+                                      opacity=0.25,
+                                      color='green',
+                                      name='Sensor Pose Constraints',)
+            fig.add_trace(go.Mesh3d(**mesh_data))
 
         # Add the sensors to the plot
         for sensor_i in self.sensors:

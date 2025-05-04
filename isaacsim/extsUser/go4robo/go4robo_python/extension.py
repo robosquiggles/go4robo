@@ -9,10 +9,14 @@ from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
 from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade, PhysxSchema
+
+from isaacsim.sensors.physx import _range_sensor
+
 import isaacsim.core.utils.prims as prim_utils
 import isaacsim.core.utils.collisions as collisions_utils
 import isaacsim.core.utils.transformations as tf_utils
-from isaacsim.sensors.physx import _range_sensor
+import isaacsim.core.utils.bounds as bounds_utils
+
 
 import asyncio
 
@@ -174,8 +178,8 @@ class GO4RExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5, height=0):
                             with ui.HStack(spacing=5):
                                 self.selected_robot_label = ui.Label("(Select one or more robot from the stage)", style = {"color": ui.color("#FF0000")})
-                                self.refresh_sensors_btn = ui.Button("Refresh Robots & Sensors", clicked_fn=self._refresh_sensor_list, height=36, width=0)
-                                self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+                                self.refresh_robot_btn = ui.Button("Refresh Robots & Sensors", clicked_fn=self._refresh_robot_list, height=36, width=0)
+                                self.disable_ui_element(self.refresh_robot_btn, text_color=ui.color("#FF0000"))
                             self.sensor_list = ui.ScrollingFrame(height=300)
                             with ui.CollapsableFrame("Data Export", height=0, collapsed=True):
                                 with ui.VStack(spacing=5, height=0):
@@ -349,11 +353,11 @@ class GO4RExtension(omni.ext.IExt):
         if not selection:
             self.selected_robot_label.text = "(Select one or more robot from the stage)"
             self.selected_robot_label.style = {"color": ui.color("#FF0000")}
-            self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.refresh_robot_btn, text_color=ui.color("#FF0000"))
 
             self.perception_mesh_label.text = "(Select one mesh from the stage)"
             self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
-            self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.refresh_robot_btn, text_color=ui.color("#FF0000"))
             return
         
         for robot_path in selection:
@@ -361,7 +365,7 @@ class GO4RExtension(omni.ext.IExt):
             self.selected_prims.append(bot_prim)
 
         self.selected_robot_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_prims])}"
-        self.enable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#00FF00"))
+        self.enable_ui_element(self.refresh_robot_btn, text_color=ui.color("#00FF00"))
         self.selected_robot_label.style = {"color": ui.color("#00FF00")}
 
         if len(self.selected_prims) > 1:
@@ -814,7 +818,7 @@ class GO4RExtension(omni.ext.IExt):
         
         self._log_message("Settings reset to default values")
     
-    def _refresh_sensor_list(self):
+    def _refresh_robot_list(self):
         """Refresh the list of detected sensors without analysis"""
 
         def _remove_trailing_digits(name):
@@ -826,6 +830,48 @@ class GO4RExtension(omni.ext.IExt):
             while prim and not prim.IsA(UsdGeom.Xform):
                 prim = prim.GetParent()
             return prim
+        
+        def _find_sensor_constraints(prim:Usd.Prim) -> tuple[tuple[float]]:
+            """Find the constraints for sensor placement within the given prim. 
+            Performs a BFS starting at the given prim to find the first UsdGeom.Boundable
+            with the required attributes. Attributes are primarily to have "GO4R_CONSTRAINT" 
+            in the name; only one boundable is supported at the moment.
+            
+            Args:
+                prim (Usd.Prim): The prim to search for constraints.
+            Returns:
+                tuple: A tuple containing the min and max range for the sensor positions. Generally
+                       of the form ((x_min, x_max), (y_min, y_max), (z_min, z_max))"""
+            def _find_boundable_recurse(prim:Usd.Prim) -> UsdGeom.Boundable:
+                """Find the first UsdGeom.Boundable in the prim's hierarchy"""
+                for child in prim.GetChildren():
+                    if child.IsA(UsdGeom.Boundable) and "GO4R_CONSTRAINT" in child.GetName():
+                        return UsdGeom.Boundable(child)
+                    else:
+                        boundable = _find_boundable_recurse(child)
+                        if boundable:
+                            return boundable
+                return None
+            
+            # Find the boundable using BFS
+            boundable = _find_boundable_recurse(prim)
+            if boundable is None:
+                # If no boundable is found, create one and return it.
+                # Recommendation is to use the one created for you and re-initialize the robot
+                self._log_message(f"Warning: No GO4R_CONSTRAINT found within in {prim.GetName()}, creating one now!")
+                # Create a new boundable
+                prim_path = f"{prim.GetPath()}/GO4R_CONSTRAINT_{prim.GetName()}"
+                boundable = prim_utils.create_prim(prim_path=prim_path,
+                                                   prim_type="Cube",
+                                                   position=np.array([0, 0, 0.5]),
+                                                   )
+                self._log_message(f"        Created new {prim_path}.")
+                self._log_message(f"        Recommendation is to adjust it and re-initialize the robot")
+            
+            bb_cache = bounds_utils.create_bbox_cache()
+            x0, y0, z0, x1, y1, z1 = bounds_utils.compute_aabb(bbox_cache=bb_cache, prim_path=boundable.GetPath())
+            return ((x0, x1), (y0, y1), (z0, z1))
+                
 
         def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find cameras that are descendants of the selected robot"""
@@ -1191,6 +1237,10 @@ class GO4RExtension(omni.ext.IExt):
                 
             # Search for sensors in this robot (with a new empty processed_camera_paths set)
             _assign_sensors_to_robot(robot_prim, bot)
+            
+            # Search for sensor constraints in this robot
+            sensor_constraints = _find_sensor_constraints(robot_prim)
+            bot.sensor_pose_constraint = sensor_constraints # Would print a warning if not found
 
             for s in bot.get_unique_sensor_options():
                 self.sensor_options.add(s)
@@ -1204,7 +1254,7 @@ class GO4RExtension(omni.ext.IExt):
         self._log_message(f"Total sensors found: " + ', '.join([f"{total_sensors[type]} {type.__name__}(s)" for type in sensor_types]))
         
         # Update the UI
-        self._update_sensor_list_ui()
+        self._update_robots_ui()
         self._update_voxel_groups_ui()
         self._update_sensor_options_ui()
         if self.robots[0]:
@@ -1267,7 +1317,7 @@ class GO4RExtension(omni.ext.IExt):
                 ui.Label(f"{attr}: {value}")
 
     
-    def _update_sensor_list_ui(self):
+    def _update_robots_ui(self):
         """Update the sensor list UI with the detected sensors for all robots"""
         # Clear the current sensor list
         self.sensor_list.clear()
@@ -1330,6 +1380,18 @@ class GO4RExtension(omni.ext.IExt):
                                                             with ui.CollapsableFrame("Properties", height=0, collapsed=True):
                                                                 with ui.VStack(spacing=2):
                                                                     self._display_sensor_instance_properties(sensor_instance)
+                            
+                                # Add the other robot attributes
+                                with ui.CollapsableFrame("Other Robot Attributes", height=0, collapsed=True):
+                                    with ui.VStack(spacing=2):
+                                        # Add the robot's other attributes here
+                                        for attr, value in robot.__dict__.items():
+                                            if "sensors" not in attr:
+                                                ui.Label(f"{attr}: {value}")
+                                            else:
+                                                # Skip sensors attribute
+                                                continue
+
 
     def _update_optimization_problem(self):
         try:

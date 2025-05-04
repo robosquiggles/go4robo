@@ -96,6 +96,7 @@ class DesignRecorder:
         self.notification_count = 0
         self.save_file = save_file
         self.gens_between_save = gens_between_save
+        self.last_saved_index = 0
 
     def notify(self, algorithm):
         # Get the current population's variables and objectives
@@ -119,12 +120,30 @@ class DesignRecorder:
             "Perception Entropy": float(f[0]),
             "Generation": self.notification_count
         })
+        if self.save_file and self.notification_count % self.gens_between_save == 0:
+            # Save the current records to a CSV file
+            pass #TODO: Save the current unsaved records to a CSV file
+
 
     def notify_init(self, x, f, g=None):
         # Store as dict for easy DataFrame conversion
         self.notify_single(x, f, g)
         self.notification_count += 1
 
+    def dataframe_header(self):
+        # Create a header for the DataFrame
+        header = ["id", "Name", "Generation", "Cost", "Perception Entropy"]
+        for i in range(self.max_sensors):
+            header.append(f"s{i}_type")
+            header.append(f"s{i}_x")
+            header.append(f"s{i}_y")
+            header.append(f"s{i}_z")
+            header.append(f"s{i}_qw")
+            header.append(f"s{i}_qx")
+            header.append(f"s{i}_qy")
+            header.append(f"s{i}_qz")
+        return header
+    
     def to_dataframe(self):
         # Convert to DataFrame for analysis/plotting
         df = pd.DataFrame(self.records)
@@ -139,7 +158,7 @@ class DesignRecorder:
         df = self.expand_designs_into_df(df)
         return df
     
-    def expand_designs_into_df(self, df, sensor_list=None): #TODO fix for quats
+    def expand_designs_into_df(self, df, sensor_list=None):
 
         # Expand the design dict into separate columns
         for dv in df["design"].iloc[0].keys():
@@ -194,6 +213,7 @@ class SensorPkgOptimization(ElementwiseProblem):
             max_n_sensors:int, 
             sensor_options:list[Sensor3D|None], 
             perception_space:PerceptionSpace, 
+            sensor_pose_bounds:np.ndarray|list|tuple|None=None,
             **kwargs
             ):
         """
@@ -207,6 +227,8 @@ class SensorPkgOptimization(ElementwiseProblem):
             bot (Bot3D): The robot object to be optimized.
             sensor_options (list): List of sensor objects to be used in the optimization.
             max_n_sensors (int): Maximum number of sensor instances to be used in the optimization.
+            perception_space (PerceptionSpace): The perception space for the optimization.
+            sensor_pose_bounds (np.ndarray|list|tuple|None): The bounds for the sensor poses. If None, comes from the robot.
             **kwargs: Additional keyword arguments for the parent class.
         """
         
@@ -235,23 +257,32 @@ class SensorPkgOptimization(ElementwiseProblem):
         self.perception_space = perception_space
 
         # SENSOR POSE CONSTRAINTS
-        if bot.sensor_pose_constraint is None:
-            print("WARNING: No sensor pose constraint provided. Defaulting to a 1m cube.")
-            self.s_bounds = np.array([[0,1],
-                                      [0,1],
-                                      [0,1]]) # Default to a 1m cube
-        else:
-            if isinstance(bot.sensor_pose_constraint.bounds, list):
-                self.s_bounds = np.array(bot.sensor_pose_constraint.bounds)
-            elif isinstance(bot.sensor_pose_constraint.bounds, tuple):
-                self.s_bounds = np.array(bot.sensor_pose_constraint.bounds)
-            elif isinstance(bot.sensor_pose_constraint.bounds, np.ndarray):
-                self.s_bounds = bot.sensor_pose_constraint.bounds
-            elif isinstance(bot.sensor_pose_constraint.bounds, UsdGeom.Mesh):
-                self.s_bounds = np.array(bot.sensor_pose_constraint.bounds.GetExtent())
+        if sensor_pose_bounds is None:
+            if bot.sensor_pose_constraint is None:
+                print("WARNING: No sensor pose constraint provided. Defaulting to a 1m cube.")
+                self.s_bounds = np.array([[0,1],
+                                        [0,1],
+                                        [0,1]]) # Default to a 1m cube
             else:
-                raise ValueError("Invalid sensor pose constraint bounds type:", type(bot.sensor_pose_constraint.bounds))
-        
+                if isinstance(bot.sensor_pose_constraint, list):
+                    self.s_bounds = np.array(bot.sensor_pose_constraint)
+                elif isinstance(bot.sensor_pose_constraint, tuple):
+                    self.s_bounds = np.array(bot.sensor_pose_constraint)
+                elif isinstance(bot.sensor_pose_constraint, np.ndarray):
+                    self.s_bounds = bot.sensor_pose_constraint
+                else:
+                    raise ValueError("Invalid sensor pose constraint bounds type:", type(bot.sensor_pose_constraint.bounds))
+        else:
+            if isinstance(sensor_pose_bounds, list):
+                self.s_bounds = np.array(sensor_pose_bounds)
+            elif isinstance(sensor_pose_bounds, tuple):
+                self.s_bounds = np.array(sensor_pose_bounds)
+            elif isinstance(sensor_pose_bounds, np.ndarray):
+                self.s_bounds = sensor_pose_bounds
+            else:
+                raise ValueError("Invalid sensor pose constraint bounds type:", type(sensor_pose_bounds))
+        assert self.s_bounds.shape == (3, 2), "sensor_pose_constraint must be a 3x2 array of bounds, [[x0,x1], [y0,y1], [z0,z1]]"
+
         x_bounds = tuple(self.s_bounds[0])
         y_bounds = tuple(self.s_bounds[1])
         z_bounds = tuple(self.s_bounds[2])
@@ -317,7 +348,7 @@ class SensorPkgOptimization(ElementwiseProblem):
             sensor_options=[Sensor3D.from_json(sensor_dict) for sensor_dict in json_dict["sensor_options"].values()], # This should handle the None case, StereoCamera, or a MonoCamera or Lidar
             max_n_sensors=json_dict["max_n_sensors"],
             perception_space=PerceptionSpace.from_json(json_dict["perception_space"]),
-            s_bounds=np.array(json_dict["sensor_pose_bounds"]),
+            sensor_pose_bounds=np.array(json_dict["sensor_pose_bounds"]),
         )
 
     def new_bot_design(self, incr=True) -> Bot3D:
