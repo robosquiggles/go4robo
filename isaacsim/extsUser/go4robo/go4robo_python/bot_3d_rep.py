@@ -595,8 +595,8 @@ class PerceptionSpace:
     def chunk_ray_voxel_intersections(self,
                                         ray_origins:torch.Tensor,
                                         ray_directions:torch.Tensor,
-                                        rays_per_chunk:int=25000,
-                                        voxels_per_chunk:int=1000,
+                                        rays_per_chunk:int=20000,
+                                        voxels_per_chunk:int=2000,
                                         eps:float=1e-8,
                                         verbose:bool=False,
                                         ) -> torch.Tensor:

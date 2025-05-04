@@ -1496,7 +1496,7 @@ class GO4RExtension(omni.ext.IExt):
                                                 cost_field.model.set_value(sensor.cost)
                                                 
                                                 def on_cost_val_changed(new_value, sensor=sensor):
-                                                    cost = max(0.0, min(1.0, new_value.get_value_as_float()))
+                                                    cost = new_value.get_value_as_float()
                                                     sensor.cost = cost
                                                 
                                                 cost_field.model.add_value_changed_fn(on_cost_val_changed)

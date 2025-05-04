@@ -306,6 +306,8 @@ class SensorPkgOptimization(ElementwiseProblem):
 
         super().__init__(vars=variables, n_obj=2, **kwargs)
 
+        print(f"SensorPkgOptimization initialized. Bounds: {self.s_bounds}")
+
     def to_json(self, file_path=None):
         """
         Serialize the problem definition to a JSON-compatible dictionary.
@@ -694,14 +696,15 @@ class SensorPkgRandomSampling(Sampling):
         Returns:
             list[dict]: A list of dictionaries representing the sampled designs.
         """
-        # Get bounds for translation and rotation
-        xl, xu = problem.bounds()
-        xl = np.array(list(xl.values()))
-        xu = np.array(list(xu.values()))
-        assert np.all(xu >= xl), "Upper bounds must be greater than or equal to lower bounds."
-
+        # Get the number of sensors and sensor types
         n_sensors = problem.max_n_sensors
         n_types = len(problem.sensor_options)
+
+        # Get bounds for translation and rotation
+        xl, xu = problem.bounds()
+        xl = np.array(list(xl.values())).reshape(n_sensors,-1)
+        xu = np.array(list(xu.values())).reshape(n_sensors,-1)
+        assert np.all(xu >= xl), "Upper bounds must be greater than or equal to lower bounds."
 
         # Sensor type probabilities
         if self.p is None:
@@ -719,7 +722,11 @@ class SensorPkgRandomSampling(Sampling):
         sensor_types = np.take_along_axis(sensor_types, sorted_indices, axis=1)
         
         # Vectorized sampling of translations and rotations
-        translations = np.random.uniform(low=xl[:3], high=xu[:3], size=(n_samples, n_sensors, 3))  # x, y, z; shape (n_samples, n_sensors, 3)
+        lower_bounds = xl[:,1:4] # shape (n_sensors, 3)
+        upper_bounds = xu[:,1:4] # shape (n_sensors, 3)
+        lower_bounds = np.tile(lower_bounds, (n_samples, 1, 1))  # shape (n_samples, n_sensors, 3)
+        upper_bounds = np.tile(upper_bounds, (n_samples, 1, 1))  # shape (n_samples, n_sensors, 3)
+        translations = np.random.uniform(lower_bounds, upper_bounds, size=(n_samples, n_sensors, 3))  # shape (n_samples, n_sensors, 3)
         quaternions = TF.batch_random_quaternions(n_samples * n_sensors, device=device).reshape(n_samples, n_sensors, 4).cpu().numpy()  # qw, qx, qy, qz; shape (n_samples, n_sensors, 4). These are already normalized.
 
         # Prepare X as a list of dicts for batch conversion
@@ -790,11 +797,11 @@ class SensorPkgFlatCrossover(Crossover):
                     c1[idx[f"type{i}"]], c2[idx[f"type{i}"]] = p2[idx[f"type{i}"]], p1[idx[f"type{i}"]]
 
                 # 2) Position: simple blend
-                α = np.random.rand()
+                alpha = np.random.rand()
                 for axis in ("x", "y", "z"):
                     ia = idx[f"{axis}{i}"]
-                    c1[ia] = α * p1[ia] + (1-α)*p2[ia]
-                    c2[ia] = (1-α)*p1[ia] + α * p2[ia]
+                    c1[ia] = alpha * p1[ia] + (1-alpha)*p2[ia]
+                    c2[ia] = (1-alpha)*p1[ia] + alpha * p2[ia]
 
                 # 3) Quaternion LERP + normalize
                 q1 = np.array([p1[idx[f"qw{i}"]],
@@ -805,8 +812,8 @@ class SensorPkgFlatCrossover(Crossover):
                                p2[idx[f"qx{i}"]],
                                p2[idx[f"qy{i}"]],
                                p2[idx[f"qz{i}"]]])
-                qt1 = α*q1 + (1-α)*q2
-                qt2 = (1-α)*q1 + α*q2
+                qt1 = alpha*q1 + (1-alpha)*q2
+                qt2 = (1-alpha)*q1 + alpha*q2
 
                 # Normalize
                 nt1 = np.linalg.norm(qt1)
