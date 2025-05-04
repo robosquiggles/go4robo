@@ -820,6 +820,12 @@ class GO4RExtension(omni.ext.IExt):
         def _remove_trailing_digits(name):
             """Remove trailing underscore+digits from a name, if they are present, using re"""
             return re.sub(r'(_\d+)?$', '', name)
+        
+        def _find_xform_ancestor(prim:Usd.Prim) -> Usd.Prim:
+            """Find the nearest XForm ancestor of the given prim"""
+            while prim and not prim.IsA(UsdGeom.Xform):
+                prim = prim.GetParent()
+            return prim
 
         def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find cameras that are descendants of the selected robot"""
@@ -827,6 +833,12 @@ class GO4RExtension(omni.ext.IExt):
             # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
 
             if prim.IsA(UsdGeom.Camera):
+                xform_ancestor = _find_xform_ancestor(prim)
+                if xform_ancestor.GetName() == "World":
+                    self._log_message(f"Sensors must be children of a XForm, World")
+                
+                xform_ancestor_path = str(xform_ancestor.GetPath())
+                xform_ancestor_name = xform_ancestor.GetName()
                 # Skip editor cameras if a specific robot is selected
                 name = prim.GetName()
                 
@@ -885,12 +897,16 @@ class GO4RExtension(omni.ext.IExt):
                     else:
                         self.sensor_options.add(cam3d)
 
-                    tf = self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim)
+                    tf = self._get_relative_trans_quat(source_prim=robot_prim, target_prim=xform_ancestor) # ASSUME THAT THE USER HAS PROPERLY TRANSFORMED THE CAMERA
+                    self._log_message(f"NOTE: Camera is assumed to be properly transformed to the parent transform {xform_ancestor.GetName()}")
+                    self._log_message(f"      https://docs.isaacsim.omniverse.nvidia.com/latest/reference_material/reference_conventions.html#default-camera-axes")
+                    self._log_message(f"        - Required: X+ is forward, Y+ is left, Z+ is up")
+                    self._log_message(f"        - Cameras in Isaac Sim are by default pointed Z- forward, Y+ up")
 
-                    tf = (tf[0], self._reorient_camera_to_sensor_quat(tf[1]))
+                    # tf = (tf[0], self._reorient_camera_to_sensor_quat(tf[1]))
                     
                     cam3d_instance = Sensor3D_Instance(cam3d, 
-                                                       path=str(prim.GetPath()), 
+                                                       path=xform_ancestor_path, 
                                                        name=_remove_trailing_digits(name), 
                                                        tf=tf, # This is the transform from the robot to the camera INSTANCE
                                                        usd_context=self._usd_context)
@@ -908,6 +924,13 @@ class GO4RExtension(omni.ext.IExt):
             """Find LiDARs that are descendants of the selected robot"""
 
             # self._log_message(f"DEBUG: Checking for LiDAR prim {prim.GetName()} of type {prim.GetTypeName()}")
+
+            xform_ancestor = _find_xform_ancestor(prim)
+            if xform_ancestor.GetName() == "World":
+                self._log_message(f"Sensors must be children of a XForm, World")
+            
+            xform_ancestor_path = str(xform_ancestor.GetPath())
+            xform_ancestor_name = xform_ancestor.GetName()
 
             type_name = str(prim.GetTypeName()).lower()
             lidar_instance = None
@@ -939,7 +962,7 @@ class GO4RExtension(omni.ext.IExt):
                         self.sensor_options.add(lidar)
                     
                     lidar_instance = Sensor3D_Instance(lidar, 
-                                                       path=str(prim.GetPath()), 
+                                                       path=xform_ancestor_path, 
                                                        name=_remove_trailing_digits(name), 
                                                        tf=self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
                                                        usd_context=self._usd_context)
@@ -1063,7 +1086,8 @@ class GO4RExtension(omni.ext.IExt):
                          prim.GetAttribute("stereoRole").Get().lower() == role)):
                         this_cam_role = role
                         this_cam_name = camera.name
-                        this_cam_path_str = prim.GetPath().pathString
+                        xform_ancestor_prim = _find_xform_ancestor(prim)
+                        this_cam_path_str = xform_ancestor_prim.GetPath().pathString
                         other_cam_role = "left" if role == "right" else "right"
                         
                         # Case-insensitive replacement for the other camera name

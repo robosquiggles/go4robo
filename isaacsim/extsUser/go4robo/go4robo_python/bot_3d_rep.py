@@ -876,7 +876,11 @@ class MonoCamera3D(Sensor3D):
                  ap_constants:dict = {
                         "a": 0.055,  # coefficient from the paper for camera
                         "b": 0.155   # coefficient from the paper for camera
-                    }
+                    },
+                 h_fov:float=None, # If you get this, the sensor is being reconstructed from a json file
+                 v_fov:float=None, # If you get this, the sensor is being reconstructed from a json file
+                 max_range:float=100.0, # If you get this, the sensor is being reconstructed from a json file
+                 min_range:float=0.0, # If you get this, the sensor is being reconstructed from a json file
                  ):
         """
         Initialize a new instance of the class.
@@ -892,31 +896,47 @@ class MonoCamera3D(Sensor3D):
             cost (float): The cost of the sensor.
             focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
         """
-
         self.name = name
-        self.h_aperture = h_aperture
-        self.v_aperture = v_aperture
-        self.aspect_ratio = aspect_ratio
         self.body = body
         self.cost = cost
-        if isinstance(focal_point, (list, tuple)):
-            self.focal_point = np.array([[1, 0, 0, focal_point[0]],
-                                         [0, 1, 0, focal_point[1]],
-                                         [0, 0, 1, focal_point[2]],
-                                         [0,0,0,1]])
+        if h_fov is None or v_fov is None:
+            assert focal_length is not None, "Focal length must be provided if h_fov and v_fov are not provided"
+            assert h_aperture is not None, "Horizontal aperture must be provided if h_fov and v_fov are not provided"
+            assert v_aperture is not None, "Vertical aperture must be provided if h_fov and v_fov are not provided"
+            assert aspect_ratio is not None, "Aspect ratio must be provided if h_fov and v_fov are not provided"
+            assert h_res is not None, "Horizontal resolution must be provided if h_fov and v_fov are not provided"
+            assert v_res is not None, "Vertical resolution must be provided if h_fov and v_fov are not provided"
+            self.h_aperture = h_aperture
+            self.v_aperture = v_aperture
+            self.aspect_ratio = aspect_ratio
+            if isinstance(focal_point, (list, tuple)):
+                self.focal_point = np.array([[1, 0, 0, focal_point[0]],
+                                            [0, 1, 0, focal_point[1]],
+                                            [0, 0, 1, focal_point[2]],
+                                            [0,0,0,1]])
+            else:
+                self.focal_point = focal_point
+
+            self.h_fov = np.rad2deg(2 * np.arctan(h_aperture / (2 * focal_length)))
+            self.v_fov = np.rad2deg(2 * np.arctan(v_aperture / (2 * focal_length)))
+
+            self.h_res = self.h_fov/h_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
+            self.v_res = self.v_fov/v_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
+
+            self.max_range = max_range
+            self.min_range = min_range
+
+            self.ap_constants = ap_constants
         else:
-            self.focal_point = focal_point
+            assert h_fov is not None, "Horizontal field of view must be provided"
+            assert v_fov is not None, "Vertical field of view must be provided"
+            assert max_range is not None, "Maximum range must be provided"
+            assert min_range is not None, "Minimum range must be provided"
+            assert h_res is not None, "Horizontal resolution must be provided"
+            assert v_res is not None, "Vertical resolution must be provided"
+            assert cost is not None, "Cost must be provided"
 
-        self.h_fov = np.rad2deg(2 * np.arctan(h_aperture / (2 * focal_length)))
-        self.v_fov = np.rad2deg(2 * np.arctan(v_aperture / (2 * focal_length)))
-
-        self.h_res = self.h_fov/h_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
-        self.v_res = self.v_fov/v_res # number of degrees between pixels. It is the way it is for isaac sim ray casting, don't ask me why
-
-        self.max_range = 100.0 # TODO: This should be clipping distance?
-        self.min_range = 0.0 # TODO: This should be clipping distance?
-
-        self.ap_constants = ap_constants
+            super().__init__(name, h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point, ap_constants=ap_constants)
         
 
 class StereoCamera3D(Sensor3D):
@@ -952,7 +972,7 @@ class StereoCamera3D(Sensor3D):
         self.tf_2 = tf_sensor2
         self.cost = cost
         self.body = body
-        self.base_line = np.linalg.norm(tf_sensor1[0] - tf_sensor2[0])
+        # self.base_line = np.linalg.norm(tf_sensor1[0] - tf_sensor2[0])
         self.h_fov = sensor1.h_fov
         self.v_fov = sensor1.v_fov
         self.h_res = sensor1.h_res
@@ -968,22 +988,22 @@ class StereoCamera3D(Sensor3D):
         Args:
             json_dict (dict): A dictionary representation of the sensor.
         """
-        if not isinstance(json_dict, dict):
-            raise ValueError("Invalid sensor data")
         
         assert "name" in json_dict, "Invalid sensor data, no name found"
         assert "sensor1" in json_dict, "Invalid sensor data, no sensor1 found"
         assert "sensor2" in json_dict, "Invalid sensor data, no sensor2 found"
-        assert "tf_sensor1" in json_dict, "Invalid sensor data, no tf_sensor1 found"
-        assert "tf_sensor2" in json_dict, "Invalid sensor data, no tf_sensor2 found"
+        assert "pos_sensor1" in json_dict, "Invalid sensor data, no pos_sensor1 found"
+        assert "pos_sensor2" in json_dict, "Invalid sensor data, no pos_sensor2 found"
+        assert "rot_sensor1" in json_dict, "Invalid sensor data, no rot_sensor1 found"
+        assert "rot_sensor2" in json_dict, "Invalid sensor data, no rot_sensor2 found"
         assert "cost" in json_dict, "Invalid sensor data, no cost found"
 
         return StereoCamera3D(
             name=json_dict["name"],
             sensor1=MonoCamera3D.from_json(json_dict["sensor1"]),
             sensor2=MonoCamera3D.from_json(json_dict["sensor2"]),
-            tf_sensor1=json_dict["tf_sensor1"],
-            tf_sensor2=json_dict["tf_sensor2"],
+            tf_sensor1=(json_dict["pos_sensor1"], json_dict["rot_sensor1"]),
+            tf_sensor2=(json_dict["pos_sensor2"], json_dict["rot_sensor2"]),
             cost=json_dict["cost"]
         )
     
@@ -994,11 +1014,14 @@ class StereoCamera3D(Sensor3D):
             dict: A dictionary representation of the sensor.
         """
         data = {
+            "type": self.__class__.__name__,
             "name": self.name,
             "sensor1": self.sensor1.to_json(),
             "sensor2": self.sensor2.to_json(),
-            "tf_sensor1": self.tf_1,
-            "tf_sensor2": self.tf_2,
+            "pos_sensor1": list(self.tf_1[0]), #(x,y,z)
+            "rot_sensor1": list(self.tf_1[1]), #(qw,qx,qy,qz)
+            "pos_sensor2": list(self.tf_2[0]), #(x,y,z)
+            "rot_sensor2": list(self.tf_2[1]), #(qw,qx,qy,qz)
             "cost": self.cost
         }
         return data
@@ -1269,20 +1292,65 @@ class Sensor3D_Instance:
         
         return world_transform
     
-    def get_world_tfs(self) -> list[tuple[float, float, float], tuple[float, float, float, float]]:
-        """Get the translation and rotation of the sensor in world coordinates"""
+    # def get_world_tfs(self) -> list[tuple[float, float, float], tuple[float, float, float, float]]:
+    #     """Get the translation and rotation of the sensor in world coordinates"""
+    #     tfs = []
+    #     if isinstance(self.sensor, StereoCamera3D):
+    #         # Calculate the transforms robot -> sensor1 and robot -> sensor2
+            
+    #         for tf in [self.sensor.tf_1, self.sensor.tf_2]:
+    #             mat_parent_to_sensor = tf_utils.tf_matrix_from_pose(translation=tf[0], orientation=tf[1]) #tf from parent to sensor
+    #             mat_robot_to_parent = tf_utils.tf_matrix_from_pose(translation=self.translation, orientation=self.quat_rotation) #tf from robot to parent
+    #             mat_robot_to_sensor = mat_parent_to_sensor @ mat_robot_to_parent #tf from robot to sensor
+    #             pos, rot = tf_utils.pose_from_tf_matrix(mat_robot_to_sensor) #tf from robot to sensor
+    #             tfs.append((pos, rot))
+    #     else:
+    #         # Just return the transform of the sensor inside a list
+    #         tfs.append((self.translation, self.quat_rotation))
+    #     return tfs
+    
+    def get_world_tfs(self) -> list[tuple[np.ndarray, np.ndarray]]:
+        """Get the translation and rotation of the sensor in world coordinates,
+        using SciPy instead of tf_utils."""
         tfs = []
+
+        def to_scipy_quat(q_sf):
+            # [w, x, y, z] -> [x, y, z, w]
+            return np.array((q_sf[1], q_sf[2], q_sf[3], q_sf[0]))
+
+        def to_scalar_first(q_sl):
+            # [x, y, z, w] -> [w, x, y, z]
+            return np.array((q_sl[3], q_sl[0], q_sl[1], q_sl[2]))
+
         if isinstance(self.sensor, StereoCamera3D):
-            # Calculate the transforms robot -> sensor1 and robot -> sensor2
-            for tf in [self.sensor.tf_1, self.sensor.tf_2]:
-                mat_parent_to_sensor = tf_utils.tf_matrix_from_pose(translation=tf[0], orientation=tf[1]) #tf from parent to sensor
-                mat_robot_to_parent = tf_utils.tf_matrix_from_pose(translation=self.translation, orientation=self.quat_rotation) #tf from robot to parent
-                mat_robot_to_sensor = mat_parent_to_sensor @ mat_robot_to_parent #tf from robot to sensor
-                pos, rot = tf_utils.pose_from_tf_matrix(mat_robot_to_sensor) #tf from robot to sensor
-                tfs.append((pos, rot))
+            # robot→parent
+            t_rp = np.array(self.translation, dtype=float)
+            q_rp_sf = np.array(self.quat_rotation, dtype=float)
+            q_rp_sl = to_scipy_quat(q_rp_sf)
+            r_rp = R.from_quat(q_rp_sl).as_matrix()
+
+            for pos_ps, q_ps_sf in [self.sensor.tf_1, self.sensor.tf_2]:
+                # parent→sensor
+                t_ps = np.array(pos_ps, dtype=float)
+                q_ps_sl = to_scipy_quat(np.array(q_ps_sf, dtype=float))
+                r_ps = R.from_quat(q_ps_sl).as_matrix()
+
+                # compose rotations: first robot→parent, then parent→sensor
+                # robot to sensor
+                r_rs = r_ps * r_rp
+
+                # compose translations: t_rs = R_ps.apply(t_rp) + t_ps
+                t_rs = r_ps.apply(t_rp) + t_ps
+
+                # back to scalar-first quaternion
+                q_rs_sf = to_scalar_first(r_rs.as_quat())
+
+                tfs.append((t_rs, q_rs_sf))
         else:
-            # Just return the transform of the sensor inside a list
-            tfs.append((self.translation, self.quat_rotation))
+            # no parent frame; sensor is directly on robot
+            tfs.append((np.array(self.translation, dtype=float),
+                        np.array(self.quat_rotation, dtype=float)))
+
         return tfs
 
     def get_rays(self, verbose:bool=False) -> Tuple[np.ndarray, np.ndarray]:
@@ -1375,11 +1443,12 @@ class Sensor3D_Instance:
         torch.cuda.empty_cache()
 
         print(f"Rays for {self.name} calculated in {time.time() - start_time:.3f} sec.") if verbose else None
+        print(f"  RAY TENSOR shape: {ray_origins.shape}") if verbose else None
         print(f"  RAY ORIGINS max: {torch.max(ray_origins)}, min: {torch.min(ray_origins)}, mean: {torch.mean(ray_origins)}") if verbose else None
         print(f"  RAY DIRECTIONS max: {torch.max(ray_directions)}, min: {torch.min(ray_directions)}, mean: {torch.mean(ray_directions)}") if verbose else None
         return ray_origins, ray_directions
     
-    def plot_rays(self, ray_origins, ray_directions, ray_length=1.0, fig=None, show=True):
+    def plot_rays(self, ray_origins, ray_directions, ray_length=1.0, sparse=10000, fig=None, show=True):
         """Plot the rays in 3D using plotly"""
 
         # Convert to numpy arrays
@@ -1391,7 +1460,7 @@ class Sensor3D_Instance:
             fig = go.Figure()
 
         # Add rays
-        for i in range(ray_origins.shape[0]):
+        for i in range(0, ray_origins.shape[0], sparse):
             fig.add_trace(go.Scatter3d(
                 x=[ray_origins[i, 0], ray_origins[i, 0] + ray_directions[i, 0]*ray_length],
                 y=[ray_origins[i, 1], ray_origins[i, 1] + ray_directions[i, 1]*ray_length],
@@ -1661,9 +1730,7 @@ class Bot3D:
                     "path": str(sensor.path),  # Convert Path to string
                     "translation": sensor.translation.tolist() if isinstance(sensor.translation, np.ndarray) else sensor.translation,
                     "rotation": sensor.quat_rotation.tolist() if isinstance(sensor.quat_rotation, np.ndarray) else sensor.quat_rotation,
-                    "sensor": sensor.sensor.to_json()  if not isinstance(sensor.sensor, StereoCamera3D) else None,
-                    "sensor1": sensor.sensor.sensor1.to_json() if isinstance(sensor.sensor, StereoCamera3D) else None,
-                    "sensor2": sensor.sensor.sensor2.to_json() if isinstance(sensor.sensor, StereoCamera3D) else None,
+                    "sensor": sensor.sensor.to_json(),
                 }
                 for sensor in self.sensors
             ],
@@ -1692,7 +1759,7 @@ class Bot3D:
             if sensor["sensor"] is not None:
                 sensor = Sensor3D.from_json(sensor["sensor"])
             elif sensor["sensor1"] is not None and sensor["sensor2"] is not None:
-                sensor = StereoCamera3D.from_json(sensor["sensor1"], sensor["sensor2"])
+                sensor = StereoCamera3D.from_json(sensor["sensor"])
             else:
                 sensor = None
             sensor_instance = Sensor3D_Instance(name=f"s{i}={sensor_name}",
