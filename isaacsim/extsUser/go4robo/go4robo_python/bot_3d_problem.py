@@ -89,7 +89,7 @@ class DesignRecorder:
             self, 
             max_sensors:int, 
             save_file=None, 
-            gens_between_save=None):
+            gens_between_save=None,):
         assert isinstance(max_sensors, int), "max_sensors must be an int"
         assert max_sensors > 0, "max_sensors must be greater than 0"
         self.records = []
@@ -98,6 +98,25 @@ class DesignRecorder:
         self.save_file = save_file
         self.gens_between_save = gens_between_save
         self.last_saved_index = 0
+
+        variables = [
+            [f"s{i}_type",
+             f"s{i}_x",
+             f"s{i}_y",
+             f"s{i}_z",
+             f"s{i}_qw",
+             f"s{i}_qx",
+             f"s{i}_qy",
+             f"s{i}_qz"] for i in range(max_sensors)
+               ]
+        self.df_column_order = [
+            "id",
+            "Name",
+            "Generation", 
+            "Cost", 
+            "Perception Entropy", 
+            "Coverage"
+        ] + [var for var_set in variables for var in var_set]  # Flatten the list of lists
 
     def notify(self, algorithm):
         # Get the current population's variables and objectives
@@ -112,6 +131,8 @@ class DesignRecorder:
         # Store as dict for easy DataFrame conversion
         x_dict = {
             "design": x.copy(),
+            "id": self.notification_count,
+            "Name": f"Design {self.notification_count}",
             "Generation": self.notification_count,
             "Cost": float(f[1]),
             "Perception Entropy": float(f[0]),
@@ -126,8 +147,11 @@ class DesignRecorder:
                 x_dict_cpy[dv] = x_dict_cpy["design"].get(f"{dv}", None)
             # Drop the original design column
             x_dict_cpy.pop("design", None)
+            # Reorder columns to put Index and Name at the beginning
+            df = pd.DataFrame([x_dict_cpy])
+            df = df[self.df_column_order]
             # Save the new records to the CSV file in append mode
-            pd.DataFrame([x_dict_cpy]).to_csv(
+            df.to_csv(
                 self.save_file, 
                 mode='a' if self.notification_count > 0 else 'w', # this creates the file if it doesn't exist 
                 header=False if self.notification_count > 0 else True, 
@@ -718,11 +742,21 @@ class SensorPkgRandomSampling(Sampling):
             p = np.ones(n_types) / n_types # Uniform distribution
         else:
             p = np.array(self.p)
-            assert len(p) == n_types, "Probabilities must match the number of sensor types."
-            assert np.isclose(np.sum(p), 1), "Probabilities must sum to 1."
+            
+        assert len(p) == n_types, "Probabilities must match the number of sensor types."
+        assert np.isclose(np.sum(p), 1), "Probabilities must sum to 1."
+
+        print(f"Batch sampling {n_samples} designs with {n_sensors} sensors, out of {n_types} sensor options with probabilities {p}")
+
+        # The first sensor cannot be None
+        p_first = p.copy()
+        p_first[0] = 0.0
+        p_first /= np.sum(p_first)  # Normalize to sum to 1
 
         # Vectorized sampling of sensor types for all samples and all sensors
-        sensor_types = np.random.choice(list(problem.sensor_options.keys()), size=(n_samples, n_sensors), p=p)
+        first_sensor_type = np.random.choice(list(problem.sensor_options.keys()), size=(n_samples,1), p=p_first)
+        other_sensor_types = np.random.choice(list(problem.sensor_options.keys()), size=(n_samples, n_sensors-1), p=p)
+        sensor_types = np.concatenate((first_sensor_type, other_sensor_types), axis=1)  # shape (n_samples, n_sensors)
 
         # Sort sensor types numerically for each sample, with all 0s at the end
         sorted_indices = np.argsort(sensor_types == 0, axis=1)  # Prioritize non-zero values
@@ -847,6 +881,11 @@ class SensorPkgFlatCrossover(Crossover):
             Y[0, k] = c1
             Y[1, k] = c2
 
+        # Check to make sure all the sensor types are integers
+        for i in range(max_n):
+            if not isinstance(Y[:, idx[f"type{i}"]], int):
+                raise ValueError(f"Sensor type {Y[:, idx[f'type{i}']]} is not an integer after CROSSOVER.")
+
         return Y
     
 
@@ -911,6 +950,11 @@ class SensorPkgFlatMutation(Mutation):
                     qs[:] = 0
                 Y[p, idx[f"qw{i}"]:idx[f"qw{i}"]+4] = qs
 
+        # Check to make sure all the sensor types are integers
+        for i in range(max_n):
+            if not isinstance(Y[:, idx[f"type{i}"]], int):
+                raise ValueError(f"Sensor type {Y[:, idx[f'type{i}']]} is not an integer after MUTATION.")
+
         return Y
     
 
@@ -924,7 +968,9 @@ class SensorPkgQuaternionRepairTorch(Repair):
         eps = 1e-10 # Small value to avoid division by zero
         for x in X:
             for i in range(problem.max_n_sensors):
-                if x[f"s{i}_type"] == 0:  # If sensor type is 0, set quaternion to zero
+                if not x[f"s{i}_type"] in problem.sensor_options.keys():
+                    raise ValueError(f"Sensor type {x[f's{i}_type']} must be one of {problem.sensor_options.keys()}.")
+                if x[f"s{i}_type"] == 0:  # If sensor type is 0, set everything to zero
                     x[f"s{i}_qw"] = 0.0
                     x[f"s{i}_qx"] = 0.0
                     x[f"s{i}_qy"] = 0.0
@@ -1092,7 +1138,7 @@ def run_moo(problem:SensorPkgOptimization,
     
     if prior_bot is not None:
         first_bot_out = problem._eval_bot_obj(prior_bot)  # Evaluate the first design
-        problem.recorder_callback.notify_init(problem.convert_bot_to_1D(prior_bot, dtype=dict), first_bot_out["F"])  # Initialize the recorder with the first design
+        problem.recorder_callback.notify_init(problem.convert_bot_to_1D(prior_bot, dtype=dict), first_bot_out["F"], first_bot_out["G"])  # Initialize the recorder with the first design
 
     try:
         res = minimize( problem,
