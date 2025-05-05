@@ -2666,7 +2666,6 @@ class GO4RExtension(omni.ext.IExt):
                             population_size=self.optimization_population_size,
                             prior_bot=self.robots[0],
                             progress_callback=progress_callback,
-                            gens_between_save=2,
                             save_dir=self.opt_results_folder_path)
         
         progress_callback.close()

@@ -88,16 +88,15 @@ class DesignRecorder:
     def __init__(
             self, 
             max_sensors:int, 
-            save_file=None, 
-            gens_between_save=None,):
+            save_file=None, ):
         assert isinstance(max_sensors, int), "max_sensors must be an int"
         assert max_sensors > 0, "max_sensors must be greater than 0"
         self.records = []
         self.max_sensors = max_sensors
-        self.notification_count = 0
+        self.n_notifs = 0
         self.save_file = save_file
-        self.gens_between_save = gens_between_save
         self.last_saved_index = 0
+        self.n_designs = 0
 
         variables = [
             [f"s{i}_type",
@@ -115,7 +114,7 @@ class DesignRecorder:
             "Generation", 
             "Cost", 
             "Perception Entropy", 
-            "Coverage"
+            "Perception Coverage"
         ] + [var for var_set in variables for var in var_set]  # Flatten the list of lists
 
     def notify(self, algorithm):
@@ -125,18 +124,18 @@ class DesignRecorder:
         G = algorithm.pop.get("G") if algorithm.pop.has("G") else None
         for x, f, g in zip(X, F, G):
             self.notify_single(x, f, g=g)
-        self.notification_count += 1
+        self.n_notifs += 1
     
     def notify_single(self, x, f, g=None):
         # Store as dict for easy DataFrame conversion
         x_dict = {
             "design": x.copy(),
-            "id": self.notification_count,
-            "Name": f"Design {self.notification_count}",
-            "Generation": self.notification_count,
+            "id": self.n_designs,
+            "Name": f"Design {self.n_designs}",
+            "Generation": self.n_notifs,
             "Cost": float(f[1]),
             "Perception Entropy": float(f[0]),
-            "Coverage": float(g[0]) if g is not None else None,
+            "Perception Coverage": float(g[0]) if g is not None else None,
         }
         self.records.append(x_dict)
         if self.save_file:
@@ -153,15 +152,16 @@ class DesignRecorder:
             # Save the new records to the CSV file in append mode
             df.to_csv(
                 self.save_file, 
-                mode='a' if self.notification_count > 0 else 'w', # this creates the file if it doesn't exist 
-                header=False if self.notification_count > 0 else True, 
+                mode='a' if self.n_notifs > 0 else 'w', # this creates the file if it doesn't exist 
+                header=False if self.n_notifs > 0 else True, 
                 index=False
                 )
+        self.n_designs += 1
 
     def notify_init(self, x, f, g=None):
         # Store as dict for easy DataFrame conversion
         self.notify_single(x, f, g)
-        self.notification_count += 1
+        self.n_notifs += 1
     
     def to_dataframe(self):
         # Convert to DataFrame for analysis/plotting
@@ -746,7 +746,7 @@ class SensorPkgRandomSampling(Sampling):
         assert len(p) == n_types, "Probabilities must match the number of sensor types."
         assert np.isclose(np.sum(p), 1), "Probabilities must sum to 1."
 
-        print(f"Batch sampling {n_samples} designs with {n_sensors} sensors, out of {n_types} sensor options with probabilities {p}")
+        # print(f"Batch sampling {n_samples} designs with {n_sensors} sensors, out of {n_types} sensor options with probabilities {p}")
 
         # The first sensor cannot be None
         p_first = p.copy()
@@ -1083,7 +1083,7 @@ def run_moo(problem:SensorPkgOptimization,
             prior_bot:Bot3D=None,
             progress_callback=None,
             save_dir:str=os.path.join(os.path.dirname(__file__), 'results'),
-            gens_between_save=2) -> Tuple[OptimizeResult, pd.DataFrame]:
+        ) -> Tuple[OptimizeResult, pd.DataFrame]:
     """Run the mixed-variable multi-objective optimization algorithm on the bot.
     Args:
         problem (SensorPkgOptimization): The optimization problem instance.
@@ -1093,7 +1093,6 @@ def run_moo(problem:SensorPkgOptimization,
         verbose (bool): If True, print detailed information during the optimization process.
         prior_bot (Bot3D): A prior design to initialize the optimization with.
         progress_callback: A callback function to update progress during optimization.
-        gens_between_save (int): Number of generations between saving designs. If None, don't save results until the end.
     Returns:
         Tuple[OptimizeResult, pd.DataFrame]: The optimization result and the design space DataFrame, including all the generated designs.
     """
@@ -1132,8 +1131,7 @@ def run_moo(problem:SensorPkgOptimization,
 
     problem.recorder_callback = DesignRecorder(
         problem.max_n_sensors, 
-        save_file=unique_df_file_name, 
-        gens_between_save=gens_between_save
+        save_file=unique_df_file_name,
         )
     
     if prior_bot is not None:
@@ -1213,8 +1211,8 @@ def plot_tradespace(combined_df:pd.DataFrame,
     combined_df.loc[idx, 'Pareto Optimal'] = 'Pareto Optimal'
 
     # Split the "Prior Design" from the rest of the designs as a df
-    prior_df = combined_df[combined_df['Name'] == 'Prior Design']
-    generated_df = combined_df[combined_df['Name'] != 'Prior Design']
+    prior_df = combined_df[combined_df['Name'] == 'Design 0']
+    generated_df = combined_df[combined_df['Name'] != 'Design 0']
 
     # Plot the population of generated designs
     fig = px.scatter(
