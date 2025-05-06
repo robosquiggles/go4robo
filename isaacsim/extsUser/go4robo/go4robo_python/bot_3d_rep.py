@@ -656,6 +656,96 @@ class PerceptionSpace:
         print(f"  VOXEL HITS max: {torch.max(counts)}, min: {torch.min(counts)}") if verbose else None
 
         return counts
+    
+    def chunk_occluded_ray_voxel_intersections(
+        self,
+        ray_origins: torch.Tensor,
+        ray_directions: torch.Tensor,
+        body_aabbs: torch.Tensor,
+        rays_per_chunk: int = 20_000,
+        voxels_per_chunk: int = 2_000,
+        eps: float = 1e-8,
+        verbose: bool = False,
+    ) -> torch.Tensor:
+        """
+        Count ray-vs-voxel intersections in chunks, with occlusion from self.body AABBs.
+
+        Args:
+            ray_origins:    (R,3) tensor of ray start points.
+            ray_directions: (R,3) tensor of ray directions.
+            rays_per_chunk: max rays to process at once.
+            voxels_per_chunk: max voxels to process at once.
+            eps:            tiny value to avoid div-zero.
+            verbose:        if True, prints timing & stats.
+
+        Returns:
+            counts: (V,) long tensor, number of rays hitting each voxel (occluded rays excluded).
+        """
+        device = ray_origins.device
+        if verbose:
+            t0 = time.time()
+
+        torch.cuda.empty_cache()
+
+        # Voxel bounds
+        box_mins = self.get_voxel_mins().to(device)    # (V,3)
+        box_maxs = self.get_voxel_maxs().to(device)    # (V,3)
+        V = box_mins.shape[0]
+
+        # Occluder bounds
+        oc_mins = body_aabbs[:, :3].to(device)  # (O,3)
+        oc_maxs = body_aabbs[:, 3:6].to(device)  # (O,3)
+
+        R = ray_origins.shape[0]
+        counts = torch.zeros(V, dtype=torch.long, device=device)
+
+        # Chunked traversal
+        for i in range(0, R, rays_per_chunk):
+            o_chunk = ray_origins[i:i+rays_per_chunk]      # (r,3)
+            d_chunk = ray_directions[i:i+rays_per_chunk]   # (r,3)
+
+            # prep for broadcast
+            O = o_chunk.unsqueeze(1)    # (r,1,3)
+            D = d_chunk.unsqueeze(1)    # (r,1,3)
+            D_safe = torch.where(D.abs() < eps, torch.full_like(D, eps), D)
+
+            # 1) Compute first‐hit on occluders
+            Oc_min = oc_mins.unsqueeze(0)  # (1,O,3)
+            Oc_max = oc_maxs.unsqueeze(0)  # (1,O,3)
+
+            t1_oc = (Oc_min - O) / D_safe   # (r,O,3)
+            t2_oc = (Oc_max - O) / D_safe   # (r,O,3)
+            t_enter_oc = torch.max(torch.min(t1_oc, t2_oc), dim=2).values  # (r,O)
+            t_exit_oc  = torch.min(torch.max(t1_oc, t2_oc), dim=2).values  # (r,O)
+
+            hit_oc = (t_exit_oc >= t_enter_oc) & (t_exit_oc >= 0)          # (r,O)
+            inf = torch.full_like(t_enter_oc, float('inf'))
+            t_enter_oc = torch.where(hit_oc, t_enter_oc, inf)              # (r,O)
+            t_first_oc, _ = t_enter_oc.min(dim=1)                          # (r,)
+
+            # 2) Now loop voxel‐chunks
+            for j in range(0, V, voxels_per_chunk):
+                Bmin = box_mins[j:j+voxels_per_chunk].unsqueeze(0)  # (1,v,3)
+                Bmax = box_maxs[j:j+voxels_per_chunk].unsqueeze(0)  # (1,v,3)
+
+                t1 = (Bmin - O) / D_safe     # (r,v,3)
+                t2 = (Bmax - O) / D_safe     # (r,v,3)
+                t_enter = torch.max(torch.min(t1, t2), dim=2).values  # (r,v)
+                t_exit  = torch.min(torch.max(t1, t2), dim=2).values  # (r,v)
+
+                hits = (t_exit >= t_enter) & (t_exit >= 0)             # (r,v)
+
+                # cull any hits that occur past the first occluder
+                oc_block = t_enter > t_first_oc.unsqueeze(1)           # (r,v)
+                hits = hits & (~oc_block)
+
+                counts[j:j+voxels_per_chunk] += hits.sum(dim=0).to(torch.long)
+
+        if verbose:
+            print(f"Chunked traversal w/ occlusion took {time.time()-t0:.2f}s "
+                f"for {R} rays × {V} voxels; hits max={counts.max()}, min={counts.min()}")
+
+        return counts
 
     
     def plot_me(self, fig=None, show=True, mode='centers'):
@@ -2064,6 +2154,10 @@ class Bot3D:
 
         print(f"Calculating PE for {self.name}, with {len(self.sensors)} sensors.") if verbose else None
 
+        # Get the robot body aabbs once TODO
+        # body_mins = torch.zeros((len(self.sensors), 3)).to(device)
+        # body_maxs = self.
+
         sensor_ms = {}
         for sensor_inst in self.sensors:
 
@@ -2076,6 +2170,7 @@ class Bot3D:
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
             sensor_m:torch.Tensor = perception_space.chunk_ray_voxel_intersections(o, d, verbose=False)
+            # sensor_m:torch.Tensor = perception_space.chunk_occluded_ray_voxel_intersections(o,d,body_mins, body_maxs) #TODO occluded measurements
             print(f"  sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
             print(f"  sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.float().mean()}")  if verbose else None
 
@@ -2298,7 +2393,8 @@ class Bot3D:
                     z=voxel_centers[:, 2],
                     mode='markers',
                     marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.25),
-                    name='Perception Space'
+                    name='Perception Space',
+                    text=[f"Weight: {w:.2f}" for w in weights]
                 ))
 
         height = 500 if 'height' not in kwargs else kwargs['height']

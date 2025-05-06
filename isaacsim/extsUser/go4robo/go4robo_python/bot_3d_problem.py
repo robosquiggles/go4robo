@@ -135,7 +135,7 @@ class DesignRecorder:
             "Generation": self.n_notifs,
             "Cost": float(f[1]),
             "Perception Entropy": float(f[0]),
-            "Perception Coverage": float(g[0]) if g is not None else None,
+            "Perception Coverage": -float(g[0]) if g is not None else None, # FLIP THE SIGN (because this is used as a constraint)
         }
         self.records.append(x_dict)
         if self.save_file:
@@ -471,7 +471,6 @@ class SensorPkgOptimization(ElementwiseProblem):
         )
         
         if sensor_type > 0 and sensor_type in self.sensor_options: # 0 is None
-            print(f"Found sensor type {sensor_type} in problem sensor options.")
             sensor = self.sensor_options[sensor_type]
             sensor_instance = Sensor3D_Instance(sensor=sensor,
                                                 name=f"sensor_{idx}",
@@ -664,19 +663,19 @@ class SensorPkgOptimization(ElementwiseProblem):
             cost = bot.calculate_cost()
 
             out["F"] = [
-                pe,                  # Minimize perception entropy
-                cost                 # Minimize cost
+                pe,           # Minimize perception entropy
+                cost          # Minimize cost
             ]
-            out["G"] = [         # Note G is usually used as a constraint
-                cov                 # Track coverage (extra info)
+            out["G"] = [  # Note G is usually used as a constraint
+                -cov          # Track coverage (extra info). Tracking negative because the gonstraint is G <= 0
             ]
         else:
             out["F"] = [
-                np.inf,             # Inf perception entropy
-                np.inf              # Inf cost
+                np.inf,      # Inf perception entropy
+                np.inf       # Inf cost
             ]
             out["G"] = [
-                0.0                 # No coverage
+                0.0          # No coverage
             ]
 
         if 'verbose' in kwargs and kwargs['verbose']:
@@ -993,86 +992,6 @@ class SensorPkgQuaternionRepairTorch(Repair):
                     x[f"s{i}_qw"], x[f"s{i}_qx"], x[f"s{i}_qy"], x[f"s{i}_qz"] = quat.tolist()
         return X
 
-        
-        
-
-def get_pareto_front(df, x='Cost', y='Perception Entropy',
-                     x_minimize=True, y_minimize=True):
-    """
-    Get the non-dominated Pareto front for a DataFrame of bi-objective designs.
-
-    Args:
-        df (pd.DataFrame): DataFrame containing at least the columns x and y.
-        x (str): Name of the first objective column.
-        y (str): Name of the second objective column.
-        x_minimize (bool): If True, smaller x is better; if False, larger x is better.
-        y_minimize (bool): If True, smaller y is better; if False, larger y is better.
-
-    Returns:
-        pareto_points (np.ndarray): Array of shape (k,2) of the Pareto designs' (x,y).
-        pareto_idx   (List[int]):  Indices in `df` corresponding to those designs.
-        utopia_point (tuple):      The “best possible” utopia corner for these objectives.
-    """
-    # 1) Extract raw points
-    raw = df[[x, y]].values.astype(float)  # shape (n,2)
-    pts = raw.copy()
-
-    # 2) Flip signs if we’re maximizing
-    if not x_minimize:
-        pts[:, 0] = -pts[:, 0]
-    if not y_minimize:
-        pts[:, 1] = -pts[:, 1]
-
-    n = pts.shape[0]
-    is_dominated = np.zeros(n, dtype=bool)
-
-    # 3) Pairwise check: i is dominated if any j beats it on both dims,
-    #    and strictly better in at least one.
-    for i in range(n):
-        for j in range(n):
-            if j == i:
-                continue
-            # j dominates i?
-            if (pts[j] <= pts[i]).all() and (pts[j] < pts[i]).any():
-                is_dominated[i] = True
-                break
-
-    # 4) Collect non-dominated
-    pareto_idx = np.where(~is_dominated)[0]
-    pareto_pts = pts[pareto_idx, :]
-
-    # 5) Restore original signs
-    restored = pareto_pts.copy()
-    if not x_minimize:
-        restored[:, 0] = -restored[:, 0]
-    if not y_minimize:
-        restored[:, 1] = -restored[:, 1]
-
-    # 6) Sort points for continuity
-    restored = restored[np.argsort(restored[:, 0])]
-
-    # 7) Compute utopia point (ideal corner)
-    ux = restored[:, 0].min() if x_minimize else restored[:, 0].max()
-    uy = restored[:, 1].min() if y_minimize else restored[:, 1].max()
-    utopia = (ux, uy)
-
-    return restored, df.index[pareto_idx].tolist(), utopia
-
-
-def get_hypervolume(df, ref_point, x='Cost', y='Perception Coverage', x_minimize=True, y_minimize=False):
-    pareto, idx, u = get_pareto_front(df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
-    if not x_minimize:
-        pareto[:, 0] = -pareto[:, 0]
-    if not y_minimize:
-        pareto[:, 1] = -pareto[:, 1]
-    ref_point = np.array(ref_point)
-    
-    # Calculate the hypervolume
-    hv = HV(ref_point=ref_point)
-    hypervolume = hv(pareto)
-    
-    return hypervolume
-
 def run_moo(problem:SensorPkgOptimization,
             num_generations:int=10, 
             num_offsprings:int=5,
@@ -1157,12 +1076,217 @@ def run_moo(problem:SensorPkgOptimization,
 
     return res, all_bots_df
 
+################################ Plotting Functions ################################
+
+def get_pareto_front(df, x='Cost', y='Perception Entropy',
+                     x_minimize=True, y_minimize=True):
+    """
+    Get the non-dominated Pareto front for a DataFrame of bi-objective designs.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing at least the columns x and y.
+        x (str): Name of the first objective column.
+        y (str): Name of the second objective column.
+        x_minimize (bool): If True, smaller x is better; if False, larger x is better.
+        y_minimize (bool): If True, smaller y is better; if False, larger y is better.
+
+    Returns:
+        pareto_points (np.ndarray): Array of shape (k,2) of the Pareto designs' (x,y).
+        pareto_idx   (List[int]):  Indices in `df` corresponding to those designs.
+        utopia_point (tuple):      The “best possible” utopia corner for these objectives.
+        hv_ref       (tuple):      The hypervolume reference point.
+    """
+    # 1) Extract raw points
+    raw = df[[x, y]].values.astype(float)  # shape (n,2)
+    pts = raw.copy()
+
+    # 2) Flip signs if we’re maximizing
+    if not x_minimize:
+        pts[:, 0] = -pts[:, 0]
+    if not y_minimize:
+        pts[:, 1] = -pts[:, 1]
+
+    n = pts.shape[0]
+    is_dominated = np.zeros(n, dtype=bool)
+
+    # 3) Pairwise check: i is dominated if any j beats it on both dims,
+    #    and strictly better in at least one.
+    for i in range(n):
+        for j in range(n):
+            if j == i:
+                continue
+            # j dominates i?
+            if (pts[j] <= pts[i]).all() and (pts[j] < pts[i]).any():
+                is_dominated[i] = True
+                break
+
+    # 4) Collect non-dominated
+    pareto_idx = np.where(~is_dominated)[0]
+    pareto_pts = pts[pareto_idx, :]
+
+    # 5) Restore original signs
+    restored = pareto_pts.copy()
+    if not x_minimize:
+        restored[:, 0] = -restored[:, 0]
+    if not y_minimize:
+        restored[:, 1] = -restored[:, 1]
+
+    # 6) Sort points for continuity
+    restored = restored[np.argsort(restored[:, 0])]
+
+    # 7) Compute utopia point (ideal corner)
+    utopia = (
+        restored[:, 0].min() if x_minimize else restored[:, 0].max(),
+        restored[:, 1].min() if y_minimize else restored[:, 1].max()
+    )
+
+    # 8) Compute hypervolume reference point
+    hv_ref = (
+        restored[:, 0].max() if x_minimize else restored[:, 0].min(),
+        restored[:, 1].max() if y_minimize else restored[:, 1].min()
+    )
+
+    return restored, df.index[pareto_idx].tolist(), utopia, hv_ref
+
+
+def get_hypervolume(df, ref_point=None, x='Cost', y='Perception Coverage', x_minimize=True, y_minimize=False):
+    """
+    Calculate the hypervolume of a Pareto front from a DataFrame of designs.
+    Args:
+        df (pd.DataFrame): DataFrame containing at least the columns x and y.
+        ref_point (tuple): Reference point for hypervolume calculation. If None, the
+            extent of all the data is used (depending on specified x_minimize and y_minimize).
+        x (str): Name of the first objective column.
+        y (str): Name of the second objective column.
+        x_minimize (bool): If True, smaller x is better; if False, larger x is better.
+        y_minimize (bool): If True, smaller y is better; if False, larger y is better.
+    Returns:
+        hypervolume (float): The hypervolume of the Pareto front.
+        ref_point (tuple): The reference point used for hypervolume calculation.
+    """
+    pareto, idx, u, hv_ref = get_pareto_front(df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
+
+    # If the provided ref_point is None, use the hv_ref from get_pareto_front
+    if ref_point is None:
+        ref_point = hv_ref
+    
+    return get_hypervolume_from_pareto(pareto, ref_point, x_minimize=x_minimize, y_minimize=y_minimize)
+
+def get_hypervolume_from_pareto(pareto, ref_point, x_minimize=True, y_minimize=False):
+    if not x_minimize:
+        pareto[:, 0] = -pareto[:, 0]
+    if not y_minimize:
+        pareto[:, 1] = -pareto[:, 1]
+    ref_point = np.array(ref_point)
+    
+    # Calculate the hypervolume
+    hv = HV(ref_point=ref_point)
+    hypervolume = hv(pareto)
+    
+    return hypervolume, ref_point
+
+def plot_hypervolume(
+        pareto:np.ndarray,
+        ref_point:tuple[float, float],
+        x='Cost',
+        y='Perception Entropy',
+        x_minimize=True,
+        y_minimize=True,
+        verbose=False,
+        ) -> go.Figure:
+    """
+    Plot the hypervolume of a a pareto front.
+    Args:
+        pareto (np.ndarray): Pareto front points of shape (k,2).
+        ref_point (tuple): Reference point for hypervolume calculation.
+        x (str): Name of the first objective column.
+        y (str): Name of the second objective column.
+        x_minimize (bool): If True, smaller x is better; if False, larger x is better.
+        y_minimize (bool): If True, smaller y is better; if False, larger y is better.
+    Returns:
+        The plotly figure object, the reference point used for hypervolume calculation.
+    """
+    assert PLOTLY_MODE, "Plotly is not available in this environment. Please install plotly to use this function."
+
+    assert isinstance(pareto, np.ndarray), "pareto must be a numpy array of shape (k,2)"
+    assert len(pareto.shape) == 2, "pareto must be a 2D array of shape (k,2)"
+    assert pareto.shape[1] == 2, "pareto must be a 2D array of shape (k,2)"
+
+
+
+
+def plot_hypervolume_over_time(
+        df:pd.DataFrame, 
+        ref_point:tuple[float, float]=None, 
+        x='Cost', 
+        y='Perception Entropy', 
+        x_minimize=True, 
+        y_minimize=True,
+        verbose=False,
+        ) -> go.Figure:
+    """
+    Plot the hypervolume over time for a given DataFrame of designs.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing at least the columns x and y.
+        ref_point (tuple): Reference point for hypervolume calculation. If None, the
+            extent of all the data is used (depending on specified x_minimize and y_minimize).
+        x (str): Name of the first objective column.
+        y (str): Name of the second objective column.
+        x_minimize (bool): If True, smaller x is better; if False, larger x is better.
+        y_minimize (bool): If True, smaller y is better; if False, larger y is better.
+
+    Returns:
+        The plotly figure object, the reference point used for hypervolume calculation.
+    """
+    generations = df['Generation'].unique()
+    if ref_point is None:
+        ref_point = (
+            max(df[x]) if x_minimize else min(df[x]),
+            max(df[y]) if y_minimize else min(df[y])
+        )
+    
+    assert isinstance(ref_point, tuple), "ref_point must be a tuple of (x_ref, y_ref)"
+    assert len(ref_point) == 2, "ref_point must be a tuple of length 2, (x_ref, y_ref)"
+
+    print(f"Using {ref_point} as the reference point for hypervolume calculation.") if verbose else None
+            
+    hv = []
+    for i, gen in enumerate(generations):
+        # Get the designs for this generation
+        gen_df = df[df['Generation'] == i]
+        hv_gen, ref_pt = get_hypervolume(gen_df, ref_point, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
+        hv.append(hv_gen)
+        print(f" Gen {i} with {len(gen_df)} designs has hypervolume of {hv[-1]}") if verbose else None
+    
+    # Create the plot
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=generations,
+        y=hv,
+        mode='lines',
+        name='Hypervolume',
+        line=dict(color=color_scale_blue[-1], width=2),
+        showlegend=False,
+    ))
+    fig.update_layout(
+        title=f'Hypervolume ({x} vs {y}) Over Time',
+        xaxis_title='Generation',
+        yaxis_title='Hypervolume',
+        template="plotly_white",
+        showlegend=True,
+    )
+
+    return fig, ref_point
+
 def plot_tradespace(combined_df:pd.DataFrame, 
                     selected_name=None,
                     x=('Cost', '$'), 
                     y=('Perception Entropy', '-'), 
                     x_minimize=True,
                     y_minimize=True,
+                    x_utopia=None,
+                    y_utopia=None,
                     hover_name='Name',
                     show_pareto=True, 
                     show=False, 
@@ -1175,14 +1299,16 @@ def plot_tradespace(combined_df:pd.DataFrame,
     Parameters:
         combined_df (pd.DataFrame): DataFrame containing the data to plot, with at least the columns 'Name', 'Cost',
                                     'Perception Entropy'.
-        num_results (int): The number of top concepts to include in the title of the plot.
-        show (bool, optional): If True, display the plot. Defaults to False.
-        panzoom (bool, optional): If False, disables panning and zooming by fixing the axis ranges. Defaults to False.
-        **kwargs: Additional keyword arguments to pass to the plotly express scatter function.
-            height (int, optional): The height of the plot in pixels. Defaults to 600.
-            width (int, optional): The width of the plot in pixels. Defaults to 600.
-            opacity (float, optional): The opacity of the points on the plot (0 to 1). Defaults to 0.9.
-            title (str, optional): The title of the plot. Defaults to "Objective Space (best of {num_results} concepts)".
+        selected_name (str): Name of the design to highlight in the plot.
+        x (tuple): Tuple containing the name of the x-axis column and its unit.
+        y (tuple): Tuple containing the name of the y-axis column and its unit.
+        x_minimize (bool): If True, smaller x is better; if False, larger x is better.
+        y_minimize (bool): If True, smaller y is better; if False, larger y is better.
+        hover_name (str): Column name to use for hover information.
+        show_pareto (bool): If True, show the Pareto front in the plot.
+        show (bool): If True, display the plot.
+        panzoom (bool): If True, enable pan and zoom functionality in the plot.
+        **kwargs: Additional keyword arguments for customizing the plot.
     Returns:
         plotly.graph_objs._figure.Figure: The generated Plotly figure object.
     """
@@ -1196,15 +1322,19 @@ def plot_tradespace(combined_df:pd.DataFrame,
     opacity = 0.8 if 'opacity' not in kwargs else kwargs['opacity']
     title = f"Objective Space ({num_results} designs)" if 'title' not in kwargs else kwargs['title']
     
-    y_min = min(combined_df[y[0]]+ [0])
+    y_min = min(min(combined_df[y[0]]), 0)
     y_max = max(combined_df[y[0]])
     y_range = y_max - y_min
-    x_min = min(combined_df[x[0]]+ [0])
+    x_min = min(min(combined_df[x[0]]), 0)
     x_max = max(combined_df[x[0]])
     x_range = x_max - x_min
 
     # Find the pareto front
-    pareto, idx, ut = get_pareto_front(combined_df, x="Cost", y="Perception Entropy", x_minimize=x_minimize, y_minimize=y_minimize)
+    pareto, idx, ut, hv_ref = get_pareto_front(combined_df, x=x[0], y=y[0], x_minimize=x_minimize, y_minimize=y_minimize)
+
+    # alt_ut = (  (x_utopia, y_utopia) if x_utopia is not None and y_utopia is not None else ut,
+    #             (x[0], y[0]) if x_minimize and y_minimize else (x[0], -y[0]) if x_minimize else (-x[0], y[0]),
+    #             ut)
 
     # Add a column to the dataframe for pareto
     combined_df['Pareto Optimal'] = ''
@@ -1229,21 +1359,6 @@ def plot_tradespace(combined_df:pd.DataFrame,
         custom_data=[hover_name]
         )
     
-    # Plot the prior/original design
-    fig.add_scatter(
-        x=prior_df[x[0]].values,
-        y=prior_df[y[0]].values,
-        mode='markers',
-        opacity=opacity,
-        marker=dict(symbol='square', size=18 * (width / 600), color='#dd6b00'),
-        name='Prior Design',
-        hoverinfo='text',
-        text=prior_df[hover_name],
-        # hover_name=hover_name,
-        # hover_data=[x[0], y[0]],
-        customdata=[hover_name]
-    )
-    
     # Set the hover template for the designs
     fig.update_traces(
         marker=dict(size=5*(width/600)),
@@ -1252,6 +1367,21 @@ def plot_tradespace(combined_df:pd.DataFrame,
         f"{x[0]} [{x[1]}]: "+"%{x:.2f}",
         f"{y[0]} [{y[1]}]: "+"%{y:.2f} ",
         ])
+    )
+    
+    # Plot the prior/original design
+    fig.add_scatter(
+        x=prior_df[x[0]].values,
+        y=prior_df[y[0]].values,
+        mode='markers',
+        opacity=opacity,
+        marker=dict(symbol='square', size=8 * (width / 600), color='#dd6b00'),
+        name='Prior Design',
+        hoverinfo='text',
+        text="Prior Design",
+        # hover_name=hover_name,
+        # hover_data=[x[0], y[0]],
+        customdata=[hover_name]
     )
 
     # Plot the utopia point
