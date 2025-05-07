@@ -11,7 +11,7 @@ import random
 import numpy as np
 import math
 
-from typing import List, Dict, Tuple, Optional, Union
+from typing import List, Dict, Tuple, Optional, Union, Sequence
 import hashlib
 
 import pandas as pd
@@ -400,14 +400,14 @@ class PerceptionSpace:
             "voxel_groups": [],
             "weights": []
         }
-        for voxel_group in self.voxel_groups:
+        for i, voxel_group in enumerate(self.voxel_groups):
             data["voxel_groups"].append({
                 "name": voxel_group.name,
                 # "voxels": voxel_group.voxels,
                 "voxel_centers": voxel_group.voxel_centers.tolist(),
                 "voxel_sizes": voxel_group.voxel_sizes.tolist()
             })
-        data["weights"] = self.weights.tolist()
+            data["weights"].append(self.weights[i])
 
         if file_path is not None:
             import json
@@ -659,27 +659,37 @@ class PerceptionSpace:
     
     def chunk_occluded_ray_voxel_intersections(
         self,
-        ray_origins: torch.Tensor,
-        ray_directions: torch.Tensor,
-        body_aabbs: torch.Tensor,
+        ray_origins: torch.Tensor,        # (R,3)
+        ray_directions: torch.Tensor,     # (R,3)
+        body_aabbs: Optional[Sequence[Tuple[
+            Tuple[float,float],           # (xmin, xmax)
+            Tuple[float,float],           # (ymin, ymax)
+            Tuple[float,float]            # (zmin, zmax)
+        ]]] = None,
         rays_per_chunk: int = 20_000,
         voxels_per_chunk: int = 2_000,
         eps: float = 1e-8,
+        min_distance: float = 0.0,
+        max_distance: float = float('inf'),
         verbose: bool = False,
     ) -> torch.Tensor:
         """
-        Count ray-vs-voxel intersections in chunks, with occlusion from self.body AABBs.
+        Count ray-vs-voxel intersections in chunks, with optional occlusion and distance windowing.
 
         Args:
-            ray_origins:    (R,3) tensor of ray start points.
-            ray_directions: (R,3) tensor of ray directions.
-            rays_per_chunk: max rays to process at once.
-            voxels_per_chunk: max voxels to process at once.
-            eps:            tiny value to avoid div-zero.
-            verbose:        if True, prints timing & stats.
+        ray_origins:    (R,3) tensor of ray start points.
+        ray_directions: (R,3) tensor of ray directions.
+        body_aabbs:     optional list of occluder AABBs as
+                        ((xmin,xmax),(ymin,ymax),(zmin,zmax)).
+                        If None or empty, occlusion is skipped.
+        rays_per_chunk, voxels_per_chunk: chunk sizes to limit GPU memory.
+        eps:             tiny value to avoid div-zero.
+        min_distance:    ignore hits closer than this.
+        max_distance:    ignore hits farther than this.
+        verbose:         print timing/stats if True.
 
         Returns:
-            counts: (V,) long tensor, number of rays hitting each voxel (occluded rays excluded).
+        counts: (V,) long tensor, number of valid, un-occluded rays hitting each voxel.
         """
         device = ray_origins.device
         if verbose:
@@ -688,62 +698,79 @@ class PerceptionSpace:
         torch.cuda.empty_cache()
 
         # Voxel bounds
-        box_mins = self.get_voxel_mins().to(device)    # (V,3)
-        box_maxs = self.get_voxel_maxs().to(device)    # (V,3)
-        V = box_mins.shape[0]
+        box_mins = self.get_voxel_mins().to(device)   # (V,3)
+        box_maxs = self.get_voxel_maxs().to(device)   # (V,3)
+        V = box_mins.size(0)
 
-        # Occluder bounds
-        oc_mins = body_aabbs[:, :3].to(device)  # (O,3)
-        oc_maxs = body_aabbs[:, 3:6].to(device)  # (O,3)
+        # Occluder bounds (if any)
+        if body_aabbs:
+            oc_min_list, oc_max_list = [], []
+            for (xmin, xmax), (ymin, ymax), (zmin, zmax) in body_aabbs:
+                oc_min_list.append([xmin, ymin, zmin])
+                oc_max_list.append([xmax, ymax, zmax])
+            oc_mins = torch.tensor(oc_min_list, dtype=ray_origins.dtype, device=device)  # (O,3)
+            oc_maxs = torch.tensor(oc_max_list, dtype=ray_origins.dtype, device=device)  # (O,3)
+            has_occluders = True
+        else:
+            has_occluders = False
 
-        R = ray_origins.shape[0]
+        R = ray_origins.size(0)
         counts = torch.zeros(V, dtype=torch.long, device=device)
 
-        # Chunked traversal
+        # Main chunked loop
         for i in range(0, R, rays_per_chunk):
-            o_chunk = ray_origins[i:i+rays_per_chunk]      # (r,3)
-            d_chunk = ray_directions[i:i+rays_per_chunk]   # (r,3)
+            o_chunk = ray_origins[i : i + rays_per_chunk]    # (r,3)
+            d_chunk = ray_directions[i : i + rays_per_chunk] # (r,3)
 
-            # prep for broadcast
             O = o_chunk.unsqueeze(1)    # (r,1,3)
             D = d_chunk.unsqueeze(1)    # (r,1,3)
-            D_safe = torch.where(D.abs() < eps, torch.full_like(D, eps), D)
+            D_safe = torch.where(D.abs() < eps,
+                                torch.full_like(D, eps),
+                                D)
 
-            # 1) Compute first‐hit on occluders
-            Oc_min = oc_mins.unsqueeze(0)  # (1,O,3)
-            Oc_max = oc_maxs.unsqueeze(0)  # (1,O,3)
+            # 1) Occlusion: either compute first‐hit or set to ∞
+            if has_occluders:
+                Oc_min = oc_mins.unsqueeze(0)  # (1,O,3)
+                Oc_max = oc_maxs.unsqueeze(0)  # (1,O,3)
+                t1_oc = (Oc_min - O) / D_safe   # (r,O,3)
+                t2_oc = (Oc_max - O) / D_safe   # (r,O,3)
+                t_ent_oc = torch.max(torch.min(t1_oc, t2_oc), dim=2).values  # (r,O)
+                t_exi_oc = torch.min(torch.max(t1_oc, t2_oc), dim=2).values  # (r,O)
+                hit_oc = (t_exi_oc >= t_ent_oc) & (t_exi_oc >= 0)             # (r,O)
+                inf = torch.full_like(t_ent_oc, float('inf'))
+                t_ent_oc = torch.where(hit_oc, t_ent_oc, inf)                # (r,O)
+                t_first_oc, _ = t_ent_oc.min(dim=1)                          # (r,)
+            else:
+                # no occluders → nothing blocks any ray
+                t_first_oc = torch.full((o_chunk.size(0),), float('inf'),
+                                        device=device, dtype=o_chunk.dtype)
 
-            t1_oc = (Oc_min - O) / D_safe   # (r,O,3)
-            t2_oc = (Oc_max - O) / D_safe   # (r,O,3)
-            t_enter_oc = torch.max(torch.min(t1_oc, t2_oc), dim=2).values  # (r,O)
-            t_exit_oc  = torch.min(torch.max(t1_oc, t2_oc), dim=2).values  # (r,O)
-
-            hit_oc = (t_exit_oc >= t_enter_oc) & (t_exit_oc >= 0)          # (r,O)
-            inf = torch.full_like(t_enter_oc, float('inf'))
-            t_enter_oc = torch.where(hit_oc, t_enter_oc, inf)              # (r,O)
-            t_first_oc, _ = t_enter_oc.min(dim=1)                          # (r,)
-
-            # 2) Now loop voxel‐chunks
+            # 2) Voxel chunks
             for j in range(0, V, voxels_per_chunk):
-                Bmin = box_mins[j:j+voxels_per_chunk].unsqueeze(0)  # (1,v,3)
-                Bmax = box_maxs[j:j+voxels_per_chunk].unsqueeze(0)  # (1,v,3)
+                Bmin = box_mins[j : j + voxels_per_chunk].unsqueeze(0)  # (1,v,3)
+                Bmax = box_maxs[j : j + voxels_per_chunk].unsqueeze(0)  # (1,v,3)
 
                 t1 = (Bmin - O) / D_safe     # (r,v,3)
                 t2 = (Bmax - O) / D_safe     # (r,v,3)
-                t_enter = torch.max(torch.min(t1, t2), dim=2).values  # (r,v)
-                t_exit  = torch.min(torch.max(t1, t2), dim=2).values  # (r,v)
+                t_ent = torch.max(torch.min(t1, t2), dim=2).values    # (r,v)
+                t_exi = torch.min(torch.max(t1, t2), dim=2).values    # (r,v)
 
-                hits = (t_exit >= t_enter) & (t_exit >= 0)             # (r,v)
+                # basic slab‐hit test
+                hits = (t_exi >= t_ent)
 
-                # cull any hits that occur past the first occluder
-                oc_block = t_enter > t_first_oc.unsqueeze(1)           # (r,v)
-                hits = hits & (~oc_block)
+                # distance window [min_distance, max_distance]
+                hits &= (t_exi  >= min_distance)
+                hits &= (t_ent <= max_distance)
 
-                counts[j:j+voxels_per_chunk] += hits.sum(dim=0).to(torch.long)
+                # occlusion cull
+                oc_block = t_ent > t_first_oc.unsqueeze(1)  # (r,v)
+                hits &= ~oc_block
+
+                counts[j : j + voxels_per_chunk] += hits.sum(dim=0).to(torch.long)
 
         if verbose:
-            print(f"Chunked traversal w/ occlusion took {time.time()-t0:.2f}s "
-                f"for {R} rays × {V} voxels; hits max={counts.max()}, min={counts.min()}")
+            print(f"Done in {time.time()-t0:.2f}s for {R} rays × {V} voxels; "
+                f"hits max={counts.max().item()}, min={counts.min().item()}")
 
         return counts
 
@@ -757,63 +784,70 @@ class PerceptionSpace:
             show (bool): Whether to show the plot.
             mode (str): The mode of the plot. Can be 'centers' or 'boxes'.
         """
+
+        if fig is None:
+            fig = fig or go.Figure()
+            fig.update_layout(
+                title='Perception Space',
+                scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'),
+                margin=dict(l=0, r=0, b=0, t=0)
+            )
+    
         # Get voxel data
         centers = self.get_voxel_centers().cpu().numpy()
-        weights = self.get_voxel_weights()
-        weights = (weights - weights.min()) / (weights.max() - weights.min())
-        weights = weights.cpu().numpy()
+        weights = self.get_voxel_weights().cpu().numpy()
+        names = []
+        for i, voxel_group in enumerate(self.voxel_groups):
+            names += [voxel_group.name] * len(voxel_group.voxels)
+        text = [f"{n}<br>Weight:{w:.2f}" for n,w in zip(names,weights)]
         
         if mode == 'centers':
-            fig = fig or go.Figure()
             fig.add_trace(go.Scatter3d(
-                x=centers[:,0], y=centers[:,1], z=centers[:,2],
+                x=centers[:,0], 
+                y=centers[:,1], 
+                z=centers[:,2],
                 mode='markers',
-                marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.25),
-                name='Perception Space'
-            ))
-            if show: fig.show()
-            return fig
-
-        # BOXES mode: build Mesh3d per voxel
-        mins = self.get_voxel_mins().cpu().numpy()
-        maxs = self.get_voxel_maxs().cpu().numpy()
-
-        # Define static face‐index arrays for a cube
-        i_faces = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2]
-        j_faces = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3]
-        k_faces = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6]
-
-        mesh_traces = []
-        for idx in range(len(centers)):
-            x0,y0,z0 = mins[idx]
-            x1,y1,z1 = maxs[idx]
-            # Eight corners
-            x_verts = [x0, x0, x1, x1, x0, x0, x1, x1]
-            y_verts = [y0, y1, y1, y0, y0, y1, y1, y0]
-            z_verts = [z0, z0, z0, z0, z1, z1, z1, z1]
-            # Per‐face intensity (replicate weight per triangle)
-            face_intensity = [weights[idx]] * len(i_faces)
-
-            mesh_traces.append(go.Mesh3d(
-                x=x_verts, y=y_verts, z=z_verts,
-                i=i_faces, j=j_faces, k=k_faces,
-                intensity=face_intensity, colorscale='Viridis',
-                opacity=0.25, showscale=False,
-                name='Perception Space'
+                marker=dict(size=6, color=weights, colorscale='Darkmint', opacity=0.25),
+                name='Perception Space',
+                text=text,
+                hovertemplate='(%{x:.2f}, %{y:.2f}, %{z:.2f})<br>%{text}<extra></extra>',
             ))
 
-        # Add traces to figure
-        if fig is None:
-            fig = go.Figure(data=mesh_traces)
-        else:
+        elif mode == 'boxes':
+            # BOXES mode: build Mesh3d per voxel
+            mins = self.get_voxel_mins().cpu().numpy()
+            maxs = self.get_voxel_maxs().cpu().numpy()
+
+            # Define static face‐index arrays for a cube
+            i_faces = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2]
+            j_faces = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3]
+            k_faces = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6]
+
+            mesh_traces = []
+            for idx in range(len(centers)):
+                x0,y0,z0 = mins[idx]
+                x1,y1,z1 = maxs[idx]
+                # Eight corners
+                x_verts = [x0, x0, x1, x1, x0, x0, x1, x1]
+                y_verts = [y0, y1, y1, y0, y0, y1, y1, y0]
+                z_verts = [z0, z0, z0, z0, z1, z1, z1, z1]
+                # Per‐face intensity (replicate weight per triangle)
+                face_intensity = [weights[idx]] * len(i_faces)
+
+                mesh_traces.append(go.Mesh3d(
+                    x=x_verts, y=y_verts, z=z_verts,
+                    i=i_faces, j=j_faces, k=k_faces,
+                    intensity=face_intensity, colorscale='Viridis',
+                    opacity=0.25, showscale=False,
+                    name='Perception Space'
+                ))
+
+            # Add traces to figure
             for mesh in mesh_traces:
                 fig.add_trace(mesh)
 
-        fig.update_layout(
-            title='Perception Space',
-            scene=dict(xaxis_title='X', yaxis_title='Y', zaxis_title='Z', aspectmode='data'),
-            margin=dict(l=0, r=0, b=0, t=0)
-        )
+        else:
+            raise ValueError("Invalid plot mode for perception_space. Use 'centers' or 'boxes'.")
         if show: fig.show()
         return fig
 
@@ -876,7 +910,7 @@ class Sensor3D:
     
     def __hash__(self):
         # Hash by class and name (customize as needed)
-        return hash((self.__class__, self.name, self.h_fov, self.h_res, self.v_fov, self.v_res, self.max_range, self.min_range, self.cost))
+        return hash((self.__class__, self.name, self.h_fov, self.h_res, self.v_fov, self.v_res))
     
     def __repr__(self):
         return f"{self.__class__.__name__}(name={self.name}, h_fov={self.h_fov}, h_res={self.h_res}, v_fov={self.v_fov}, v_res={self.v_res}, max_range={self.max_range}, min_range={self.min_range}, cost={self.cost})"
@@ -1556,7 +1590,15 @@ class Sensor3D_Instance:
         print(f"  RAY DIRECTIONS max: {torch.max(ray_directions)}, min: {torch.min(ray_directions)}, mean: {torch.mean(ray_directions)}") if verbose else None
         return ray_origins, ray_directions
     
-    def plot_rays(self, ray_origins, ray_directions, ray_length=1.0, sparse=10000, fig=None, show=True):
+    def plot_rays(
+            self, 
+            ray_origins, 
+            ray_directions, 
+            ray_length=1.0, 
+            sparse=10000, 
+            fig=None, 
+            show=True
+            ):
         """Plot the rays in 3D using plotly"""
 
         # Convert to numpy arrays
@@ -1765,7 +1807,11 @@ class Bot3D:
     def __init__(self, 
                  name:str,
                  usd_context=None,
-                 body:list[UsdGeom.Mesh]=None,
+                 body:Optional[Sequence[Tuple[
+                    Tuple[float,float],           # (xmin, xmax)
+                    Tuple[float,float],           # (ymin, ymax)
+                    Tuple[float,float]            # (zmin, zmax)
+                ]]] = None,
                  path:str=None,
                  sensor_pose_constraint:np.ndarray[float]=None,
                  sensors:list[Sensor3D_Instance]=[]):
@@ -1774,16 +1820,16 @@ class Bot3D:
         Args:
             name (str): The name of the bot.
             usd_context (omni.usd.UsdContext): The USD context (if there is one).
-            body (list[UsdGeom.Mesh]): The body of the bot.
+            body (list[UsdGeom.Mesh]): List of aabbs for the bot body. If None, use the default body. [((x0, x1), (y0, y1), (z0, z1)),...]
             path (str): The path to the bot in the USD stage.
-            sensor_pose_constraint (np.ndarray): The pose constraint for the sensors as an array [[x-bounds], [y-bounds], [z-bounds]]. ex. [[0,1], [0,1], [0,1]]
+            sensor_pose_constraint (np.ndarray): The pose constraint for the sensors as an array ((x0, x1), (y0, y1), (z0, z1))
             sensors (list[Sensor3D_Instance]): A list of sensor instances attached to the bot.
         """
         self.name = name
         self.path = path
-        self.body = body
         self.sensor_pose_constraint = sensor_pose_constraint
         self.sensors = sensors
+        self.body = body
 
         self.usd_context = usd_context
         if self.usd_context is not None:
@@ -1830,7 +1876,7 @@ class Bot3D:
         bot_dict = {
             "name": self.name,
             "path": str(self.path),  # Convert Path to string
-            "body": None,  # [self.body], # TODO: support mesh JSON serialization?
+            "body": self.body,
             "sensor_pose_constraint": self.sensor_pose_constraint.tolist() if isinstance(self.sensor_pose_constraint, np.ndarray) else self.sensor_pose_constraint,
             "sensor_instances": [
                 {
@@ -1853,7 +1899,7 @@ class Bot3D:
         """Deserialize from a dict to create a Bot3D object. The dict should be in the same format as the one returned by to_json()."""
         name = json_dict["name"]
         path = json_dict["path"]
-        body = None, # TODO if you want to plot the body in the dash app, make this work.
+        body = json_dict["body"]
         sensor_pose_constraint = json_dict["sensor_pose_constraint"]
         usd_context=None
         sensors = []
@@ -2233,7 +2279,7 @@ class Bot3D:
 
         # Calculate the weighted average entropy for the bot
         weights = perception_space.get_voxel_weights()
-        sum_weights = torch.sum(weights, dim=0) #this should be a float
+        sum_weights = torch.sum(weights, dim=0)
         weights = weights / sum_weights #normalize the weights
         entropy = torch.sum(entropies * weights, dim=0)        
 
@@ -2356,6 +2402,7 @@ class Bot3D:
             self, 
             perception_space:PerceptionSpace=None, 
             show_sensor_pose_constraints:bool=True,
+            show_body:bool=True,
             show=True, 
             save_path:str=None,
             **kwargs):
@@ -2382,7 +2429,7 @@ class Bot3D:
                 # Get the weights of the voxels
                 weights = perception_space.get_voxel_weights()
                 # Normalize the weights to be between 0 and 1
-                weights = (weights - torch.min(weights)) / (torch.max(weights) - torch.min(weights))
+                # weights = (weights - torch.min(weights)) / (torch.max(weights) - torch.min(weights))
                 # Convert to numpy arrayslen
                 voxel_centers = voxel_centers.cpu().numpy()
                 weights = weights.cpu().numpy()
@@ -2392,7 +2439,7 @@ class Bot3D:
                     y=voxel_centers[:, 1],
                     z=voxel_centers[:, 2],
                     mode='markers',
-                    marker=dict(size=5, color=weights, colorscale='Viridis', opacity=0.25),
+                    marker=dict(size=5, color=weights, colorscale='Darkmint', opacity=0.25),
                     name='Perception Space',
                     text=[f"Weight: {w:.2f}" for w in weights]
                 ))
@@ -2414,23 +2461,35 @@ class Bot3D:
             name='ORIGIN'  # Legend label
         ))
 
-        # Add the bot body to the plot
-        # TODO: Add the bot body to the plot
-
         # Add the sensor pose constraints to the plot
-        if self.sensor_pose_constraint is not None and show_sensor_pose_constraints:
-            mesh_data = box_mesh_data(self.sensor_pose_constraint.extents,
-                                      opacity=0.25,
-                                      color='green',
-                                      name='Sensor Pose Constraints',)
-            fig.add_trace(go.Mesh3d(**mesh_data))
+        if show_sensor_pose_constraints and self.sensor_pose_constraint is not None:
+            mesh_data = box_mesh_data(
+                self.sensor_pose_constraint.extents,
+                opacity=0.25,
+                color='green',
+                name='Sensor Pose Constraints',
+                showlegend=True
+            )
+            fig.add_trace(go.Mesh3d(mesh_data))
+
+        # Add the robot body to the plot
+        if show_body and self.body is not None and None not in self.body:
+            for i, aabb in enumerate(self.body):
+                mesh_data = box_mesh_data(
+                        extents=aabb, 
+                        color="red", 
+                        opacity=0.2, 
+                        name=f"Robot Body"
+                    )
+                fig.add_trace(go.Mesh3d(mesh_data))
 
         # Add the sensors to the plot
         for sensor_i in self.sensors:
             sensor_i.plot_me(fig)
 
         # Add the perception space
-        add_perception_space(fig)
+        if perception_space is not None:
+            perception_space.plot_me(fig, show=False)
 
         # Adjust the layout of the plot
         fig.update_layout(
@@ -2438,9 +2497,18 @@ class Bot3D:
             width=width,
             title=title,
             scene=dict(
-                xaxis=dict(title='X'),
-                yaxis=dict(title='Y'),
-                zaxis=dict(title='Z'),
+                xaxis=dict(
+                    title='X',
+                    zerolinecolor="black",
+                    ),
+                yaxis=dict(
+                    title='Y',
+                    zerolinecolor="black",
+                    ),
+                zaxis=dict(
+                    title='Z',
+                    zerolinecolor="black",
+                    ),
                 camera=dict(
                     eye=dict(x=1.25, y=1.25, z=1.25),  # Adjust the camera position
                     center=dict(x=0, y=0, z=0),  # Center the camera on the origin
@@ -2466,7 +2534,7 @@ def box_mesh_data(extents:tuple[tuple,tuple,tuple], opacity:float=0.25, **kwargs
     Returns:
         mesh_data: The mesh data for the box. Can me used to create a mesh in plotly. For example, add to an existing fig:
             mesh_data = box_mesh_data(((0,1),(0,1),(0,1)))
-            fig.add_trace(go.Mesh3d(**mesh_data))
+            fig.add_trace(mesh_data)
     """
     x0, x1 = extents[0]
     y0, y1 = extents[1]

@@ -854,6 +854,7 @@ class GO4RExtension(omni.ext.IExt):
                 return None
             
             # Find the boundable using BFS
+
             boundable = _find_boundable_recurse(prim)
             if boundable is None:
                 # If no boundable is found, create one and return it.
@@ -871,7 +872,42 @@ class GO4RExtension(omni.ext.IExt):
             bb_cache = bounds_utils.create_bbox_cache()
             x0, y0, z0, x1, y1, z1 = bounds_utils.compute_aabb(bbox_cache=bb_cache, prim_path=boundable.GetPath())
             return ((x0, x1), (y0, y1), (z0, z1))
+        
+        def _find_robot_body_aabbs(prim:Usd.Prim) -> tuple[tuple[float]]:
+            """Find the occluding robot body Axis-Aligned Bounding Boxes within the given prim. 
+            Performs a BFS starting at the given prim to find the first UsdGeom.Boundable
+            with the required attributes. Attributes are primarily to have "GO4R_BODY" 
+            in the name; can have multiple boundables!.
+            
+            Args:
+                prim (Usd.Prim): The prim to search for constraints.
+            Returns:
+                tuple: A tuple containing the min and max range for the sensor positions. Generally
+                       of the form ((x_min, x_max), (y_min, y_max), (z_min, z_max))"""
+            def _find_boundable_recurse(prim:Usd.Prim, boundable_prims:list) -> UsdGeom.Boundable:
+                """Find the first UsdGeom.Boundable in the prim's hierarchy"""
+                for child in prim.GetChildren():
+                    if child.IsA(UsdGeom.Boundable) and "GO4R_BODY" in child.GetName():
+                        boundable_prims.append(UsdGeom.Boundable(child))
+                    else:
+                        _find_boundable_recurse(child, boundable_prims)
+                return None
+            
+            # Find the boundable using BFS
+            boundable_prims = []
+            _find_boundable_recurse(prim, boundable_prims)
+            if boundable_prims is []:
+                # If no boundable is found, log a message saying so!
+                self._log_message(f"Warning: No GO4R_BODY found within in {prim.GetName()}.")
+                return None
                 
+            aabb_extents = []
+            for boundable in boundable_prims:
+                bb_cache = bounds_utils.create_bbox_cache()
+                x0, y0, z0, x1, y1, z1 = bounds_utils.compute_aabb(bbox_cache=bb_cache, prim_path=boundable.GetPath())
+                aabb_extents.append(((x0, x1), (y0, y1), (z0, z1)))
+
+            return aabb_extents                
 
         def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find cameras that are descendants of the selected robot"""
@@ -1242,6 +1278,10 @@ class GO4RExtension(omni.ext.IExt):
             sensor_constraints = _find_sensor_constraints(robot_prim)
             bot.sensor_pose_constraint = sensor_constraints # Would print a warning if not found
 
+            # Search for occluding robot bodies in this robot
+            robot_body_aabbs = _find_robot_body_aabbs(robot_prim)
+            bot.body = robot_body_aabbs # Would print a warning if not found
+
             for s in bot.get_unique_sensor_options():
                 self.sensor_options.add(s)
             
@@ -1386,11 +1426,15 @@ class GO4RExtension(omni.ext.IExt):
                                     with ui.VStack(spacing=2):
                                         # Add the robot's other attributes here
                                         for attr, value in robot.__dict__.items():
-                                            if "sensors" not in attr:
-                                                ui.Label(f"{attr}: {value}")
-                                            else:
-                                                # Skip sensors attribute
+                                            if "sensors" in attr:
                                                 continue
+                                            if "body" in attr:
+                                                for i, body in enumerate(value):
+                                                    with ui.VStack(spacing=2):
+                                                        ui.Label(f"Body {i+1}: {body}")
+                                            else:
+                                                ui.Label(f"{attr}: {value}")
+                                            
 
 
     def _update_optimization_problem(self):
