@@ -862,7 +862,6 @@ class Sensor3D:
                  min_range:float=None,
                  cost:float=None,
                  body:UsdGeom.Mesh=None, 
-                 focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
                  ap_constants:dict = {
                         "a": 0.055,  # coefficient from the paper for camera
                         "b": 0.155   # coefficient from the paper for camera
@@ -879,7 +878,6 @@ class Sensor3D:
             distance (float): The distance that the sensor can sense in meters.
             cost (float): The cost of the sensor.
             body (USDGeom.Mesh): The body of the sensor.
-            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
         """
         self.h_fov = h_fov
         self.h_res = h_res
@@ -889,14 +887,7 @@ class Sensor3D:
         self.min_range = min_range
         self.cost = cost
         self.name = name
-        self.body = body # The body of the sensor is saved relative to the xform
-        if isinstance(focal_point, (list, tuple)):
-            self.focal_point = np.array([[1, 0, 0, focal_point[0]],
-                                         [0, 1, 0, focal_point[1]],
-                                         [0, 0, 1, focal_point[2]],
-                                         [0,0,0,1]])
-        else:
-            self.focal_point = focal_point
+        self.body = body # Not implemented
 
         self.ap_constants = ap_constants
 
@@ -1011,6 +1002,38 @@ class Sensor3D:
         return entropy
 
 
+class Lidar3D(Sensor3D):
+    def __init__(self, 
+                 name:str,
+                 h_fov:float, 
+                 h_res:int,
+                 v_fov:float,
+                 v_res:int,
+                 max_range:float,
+                 min_range:float,
+                 cost:float,
+                 body:UsdGeom.Mesh, # Not implemented
+                 ap_constants = {
+                        "a": 0.152,  # coefficient from Ma et. al. 2021
+                        "b": 0.659   # coefficient from Ma et. al. 2021
+                    }
+                 ):
+        """
+        Initialize a new instance of the class.
+        Args:
+            name (str): The name of the sensor.
+            h_fov (float): The horizontal field of view *in radians*.
+            h_res (int): The horizontal resolution of the sensor.
+            v_fov (float): The vertical field of view *in radians*.
+            v_res (int): The vertical resolution of the sensor.
+            distance (float): The distance that the sensor can sense in meters.
+            cost (float): The cost of the sensor.
+            body (USDGeom.Mesh): The body of the sensor.
+        """
+        super().__init__(name, h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, ap_constants=ap_constants)
+
+
+
 class MonoCamera3D(Sensor3D):
     def __init__(self,
                  name:str,
@@ -1022,7 +1045,6 @@ class MonoCamera3D(Sensor3D):
                  v_res:int=None,
                  body:UsdGeom.Mesh=None,
                  cost:float=None,
-                 focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
                  ap_constants:dict = {
                         "a": 0.055,  # coefficient from the paper for camera
                         "b": 0.155   # coefficient from the paper for camera
@@ -1044,7 +1066,6 @@ class MonoCamera3D(Sensor3D):
             v_res (int): The vertical resolution of the camera.
             body (USDGeom.Mesh): The body of the sensor.
             cost (float): The cost of the sensor.
-            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
         """
         self.name = name
         self.body = body
@@ -1059,13 +1080,6 @@ class MonoCamera3D(Sensor3D):
             self.h_aperture = h_aperture
             self.v_aperture = v_aperture
             self.aspect_ratio = aspect_ratio
-            if isinstance(focal_point, (list, tuple)):
-                self.focal_point = np.array([[1, 0, 0, focal_point[0]],
-                                            [0, 1, 0, focal_point[1]],
-                                            [0, 0, 1, focal_point[2]],
-                                            [0,0,0,1]])
-            else:
-                self.focal_point = focal_point
 
             self.h_fov = np.rad2deg(2 * np.arctan(h_aperture / (2 * focal_length)))
             self.v_fov = np.rad2deg(2 * np.arctan(v_aperture / (2 * focal_length)))
@@ -1086,7 +1100,7 @@ class MonoCamera3D(Sensor3D):
             assert v_res is not None, "Vertical resolution must be provided"
             assert cost is not None, "Cost must be provided"
 
-            super().__init__(name, h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point, ap_constants=ap_constants)
+            super().__init__(name, h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, ap_constants=ap_constants)
         
 
 class StereoCamera3D(Sensor3D):
@@ -1177,39 +1191,6 @@ class StereoCamera3D(Sensor3D):
         return data
 
 
-class Lidar3D(Sensor3D):
-    def __init__(self, 
-                 name:str,
-                 h_fov:float, 
-                 h_res:int,
-                 v_fov:float,
-                 v_res:int,
-                 max_range:float,
-                 min_range:float,
-                 cost:float,
-                 body:UsdGeom.Mesh, 
-                 focal_point:tuple[float, float, float]=(0.0, 0.0, 0.0), 
-                 ap_constants = {
-                        "a": 0.152,  # coefficient from the paper for lidar
-                        "b": 0.659   # coefficient from the paper for lidar
-                    }
-                 ):
-        """
-        Initialize a new instance of the class.
-        Args:
-            name (str): The name of the sensor.
-            h_fov (float): The horizontal field of view *in radians*.
-            h_res (int): The horizontal resolution of the sensor.
-            v_fov (float): The vertical field of view *in radians*.
-            v_res (int): The vertical resolution of the sensor.
-            distance (float): The distance that the sensor can sense in meters.
-            cost (float): The cost of the sensor.
-            body (USDGeom.Mesh): The body of the sensor.
-            focal_point (tuple[float]): The focal point of the sensor (relative to the body geometry).
-        """
-        super().__init__(name, h_fov, h_res, v_fov, v_res, max_range, min_range, cost, body, focal_point, ap_constants=ap_constants)
-
-
 class Sensor3D_Instance:
     def __init__(self,
                  sensor:Sensor3D,
@@ -1217,7 +1198,7 @@ class Sensor3D_Instance:
                  tf:tuple[tuple[float], tuple[float]],
                  usd_context=None,
                  name:str|None=None,
-                 body:UsdGeom.Mesh=None,
+                 body:UsdGeom.Mesh=None, # Not implemented
                  ):
         """Initialize a new instance of the class.
         Args:
@@ -1251,20 +1232,17 @@ class Sensor3D_Instance:
         self.path = str(path)
 
         self.ray_casters = []
-        self.body = body
 
         # If a usd_context is provided, create the sensor body and ray casters in isaac sim
-        if ISAAC_SIM_MODE and self.usd_context is not None and self.body is not None:
-            self.ray_casters = self.create_ray_casters()
-            self.body = self.create_sensor_body(sensor.body)
-
+        # if ISAAC_SIM_MODE and self.usd_context is not None and self.body is not None:
+        #     self.ray_casters = self.create_ray_casters()
+        #     self.body = self.create_sensor_body(sensor.body)
 
     def replace_sensor(self, sensor:Sensor3D):
         """Replace the sensor in the instance with a new sensor. This will also replace the ray casters."""
         self.sensor = sensor
         # self.ray_casters = self.create_ray_casters() # Don't replace the ray casters because they should be the same
-        # self.body = self.create_sensor_body(sensor.body) # Don't replace the body because isaac sim needs it
-        
+        # self.body = self.create_sensor_body(sensor.body) # Don't replace the body because isaac sim needs it  
 
     def create_sensor_body(self, body:UsdGeom.Mesh):
         """Create the sensor body in the USD stage. Returns the created sensor body."""
@@ -1442,23 +1420,6 @@ class Sensor3D_Instance:
         
         return world_transform
     
-    # def get_world_tfs(self) -> list[tuple[float, float, float], tuple[float, float, float, float]]:
-    #     """Get the translation and rotation of the sensor in world coordinates"""
-    #     tfs = []
-    #     if isinstance(self.sensor, StereoCamera3D):
-    #         # Calculate the transforms robot -> sensor1 and robot -> sensor2
-            
-    #         for tf in [self.sensor.tf_1, self.sensor.tf_2]:
-    #             mat_parent_to_sensor = tf_utils.tf_matrix_from_pose(translation=tf[0], orientation=tf[1]) #tf from parent to sensor
-    #             mat_robot_to_parent = tf_utils.tf_matrix_from_pose(translation=self.translation, orientation=self.quat_rotation) #tf from robot to parent
-    #             mat_robot_to_sensor = mat_parent_to_sensor @ mat_robot_to_parent #tf from robot to sensor
-    #             pos, rot = tf_utils.pose_from_tf_matrix(mat_robot_to_sensor) #tf from robot to sensor
-    #             tfs.append((pos, rot))
-    #     else:
-    #         # Just return the transform of the sensor inside a list
-    #         tfs.append((self.translation, self.quat_rotation))
-    #     return tfs
-    
     def get_world_tfs(self) -> list[tuple[np.ndarray, np.ndarray]]:
         """Get the translation and rotation of the sensor in world coordinates,
         using SciPy instead of tf_utils.
@@ -1495,8 +1456,18 @@ class Sensor3D_Instance:
 
         return tfs
 
-    def get_rays(self, verbose:bool=False) -> Tuple[np.ndarray, np.ndarray]:
-        """Returns (ray_origins, ray_directions) for this sensor instance, vectorized with torch."""
+    def get_rays(
+            self, 
+            verbose:bool=False
+            ) -> Tuple[np.ndarray, np.ndarray]:
+        """Returns (ray_origins, ray_directions) for this sensor instance, vectorized with torch.
+        Args:
+            verbose (bool): If True, print debug information.
+            
+        Returns:
+            Tuple[torch.Tensor]: A tuple of two tensors: (ray_origins, ray_directions)
+                ray_origins: The origins of the rays, shape (N, 3)
+                ray_directions: The directions of the rays, shape (N, 3)"""
 
         start_time = time.time()
         torch.cuda.empty_cache()
@@ -1510,11 +1481,6 @@ class Sensor3D_Instance:
         ray_directions_list = []
 
         for i, sensor in enumerate(sensors):
-            # # Get the ray information from the ray caster object
-            # hfov = ray_caster.GetAttribute("horizontalFov").Get() # degrees
-            # vfov = ray_caster.GetAttribute("verticalFov").Get() # degrees
-            # hres = int(hfov / ray_caster.GetAttribute("horizontalResolution").Get()) # number of rays, horizontal
-            # vres = int(vfov / ray_caster.GetAttribute("verticalResolution").Get()) # Number of rays, vertical
 
             if verbose:
                 print(f" Sensor {i}: {sensor.name}, is a ({type(sensor)})")
@@ -1590,39 +1556,126 @@ class Sensor3D_Instance:
         print(f"  RAY DIRECTIONS max: {torch.max(ray_directions)}, min: {torch.min(ray_directions)}, mean: {torch.mean(ray_directions)}") if verbose else None
         return ray_origins, ray_directions
     
+    def get_ray_distances(
+            self,
+            ray_origins:torch.Tensor, 
+            ray_directions:torch.Tensor,
+            occlusion_aabs:Optional[Sequence[Tuple[
+                    Tuple[float,float],           # (xmin, xmax)
+                    Tuple[float,float],           # (ymin, ymax)
+                    Tuple[float,float]            # (zmin, zmax)
+                ]]], 
+            max_range:float,
+            min_range:float=0.0
+            ) -> torch.Tensor:
+        """
+        For each ray, get the distance to the nearest occlusion AABB in occlusion_aabs.
+        If a ray never hits any occluder in front of it, distance = max_range.
+
+        Args:
+            ray_origins:     (R,3) tensor of ray start points.
+            ray_directions:  (R,3) tensor of ray direction vectors.
+            occlusion_aabs:  optional list of occluder AABBs as
+                            [((xmin,xmax),(ymin,ymax),(zmin,zmax)), …].
+            max_range:       the maximum sensor range.
+
+        Returns:
+            distances:       (R,) tensor of hit distances (clamped to [0, max_range]).
+        """
+        assert ray_origins.shape[0] == ray_directions.shape[0], "Ray origins and directions must have the same number of rays"
+        assert isinstance(occlusion_aabs, (list, tuple)) or occlusion_aabs is None, "Occlusion aabs must be a list, tuple, or None"
+
+        device = ray_origins.device
+        R = ray_origins.size(0)
+
+        # If no occluders provided, every ray travels full range
+        if not occlusion_aabs:
+            return torch.full((R,), max_range,
+                            device=device,
+                            dtype=ray_origins.dtype)
+
+        # Build occluder min/max tensors
+        oc_min_list = []
+        oc_max_list = []
+        for (xmin, xmax), (ymin, ymax), (zmin, zmax) in occlusion_aabs:
+            oc_min_list.append([xmin, ymin, zmin])
+            oc_max_list.append([xmax, ymax, zmax])
+        oc_mins = torch.tensor(oc_min_list,
+                            dtype=ray_origins.dtype,
+                            device=device)  # (O,3)
+        oc_maxs = torch.tensor(oc_max_list,
+                            dtype=ray_origins.dtype,
+                            device=device)  # (O,3)
+
+        # Prepare for batched slab‐tests
+        O = ray_origins.unsqueeze(1)     # (R,1,3)
+        D = ray_directions.unsqueeze(1)  # (R,1,3)
+        eps = 1e-8
+        D_safe = torch.where(D.abs() < eps,
+                            torch.full_like(D, eps),
+                            D)
+
+        Oc_min = oc_mins.unsqueeze(0)    # (1,O,3)
+        Oc_max = oc_maxs.unsqueeze(0)    # (1,O,3)
+
+        # Ray–occluder intersections
+        t1 = (Oc_min - O) / D_safe        # (R,O,3)
+        t2 = (Oc_max - O) / D_safe        # (R,O,3)
+        t_near = torch.min(t1, t2)        # (R,O,3)
+        t_far  = torch.max(t1, t2)        # (R,O,3)
+
+        t_enter = torch.max(t_near, dim=2).values  # (R,O)
+        t_exit  = torch.min(t_far,  dim=2).values  # (R,O)
+
+        # Valid hits: exit ≥ enter and exit ≥ 0
+        hit_mask = (t_exit >= t_enter) & (t_exit >= 0)
+
+        # Replace non‐hits with +inf so they won’t be chosen
+        inf = torch.full_like(t_enter, float('inf'))
+        t_enter_valid = torch.where(hit_mask, t_enter, inf)  # (R,O)
+
+        # Nearest occlusion‐entry per ray
+        t_first, _ = t_enter_valid.min(dim=1)  # (R,)
+
+        # Clamp to [0, max_range]
+        distances = torch.clamp(t_first, min=min_range, max=max_range)
+
+        return distances
+
     def plot_rays(
             self, 
             ray_origins, 
             ray_directions, 
-            ray_length=1.0, 
-            sparse=10000, 
+            ray_length=1.0,
+            occlusion_aabs=None,
+            max_rays=100, 
             fig=None, 
             show=True
             ):
         """Plot the rays in 3D using plotly"""
 
+        ray_distances = self.get_ray_distances(ray_origins, ray_directions, occlusion_aabs, ray_length)
+        
         # Convert to numpy arrays
         ray_origins = ray_origins.cpu().numpy()
         ray_directions = ray_directions.cpu().numpy()
+        ray_distances = ray_distances.cpu().numpy()
 
         # Create a 3D scatter plot
         if fig is None:
             fig = go.Figure()
 
         # Add rays
-        for i in range(0, ray_origins.shape[0], sparse):
+        for i in range(0, ray_origins.shape[0], int(ray_origins.shape[0]/max_rays)+1):
             fig.add_trace(go.Scatter3d(
-                x=[ray_origins[i, 0], ray_origins[i, 0] + ray_directions[i, 0]*ray_length],
-                y=[ray_origins[i, 1], ray_origins[i, 1] + ray_directions[i, 1]*ray_length],
-                z=[ray_origins[i, 2], ray_origins[i, 2] + ray_directions[i, 2]*ray_length],
+                x=[ray_origins[i, 0], ray_origins[i, 0] + ray_directions[i, 0]*ray_distances[i]],
+                y=[ray_origins[i, 1], ray_origins[i, 1] + ray_directions[i, 1]*ray_distances[i]],
+                z=[ray_origins[i, 2], ray_origins[i, 2] + ray_directions[i, 2]*ray_distances[i]],
                 mode='lines',
                 line=dict(color=random_color(self.name), width=2),
                 hoverinfo='none',
                 showlegend=False
             ))
-
-        # Add the sensor
-        self.plot_me(fig)
 
         # Set the layout
         fig.update_layout(
@@ -1643,7 +1696,15 @@ class Sensor3D_Instance:
         return fig
 
 
-    def plot_me(self, fig, group_mode="type", plot_rays=False, vec_length=0.2):
+    def plot_me(
+            self, 
+            fig, 
+            group_mode="type", 
+            plot_rays=False, 
+            ray_length=1.0,
+            occlusion_aabs=None, 
+            max_rays=100, 
+            vec_length=0.2):
         """Plot the sensor in 3D using plotly
         Args:
             fig (plotly.graph_objects.Figure): The figure to plot on.
@@ -1725,7 +1786,14 @@ class Sensor3D_Instance:
         if plot_rays:
             # Plot the rays
             ray_origins, ray_directions = self.get_rays()
-            fig = self.plot_rays(ray_origins, ray_directions, vec_length=vec_length, fig=fig, show=False)
+            self.plot_rays(
+                ray_origins, 
+                ray_directions, 
+                occlusion_aabs=occlusion_aabs, 
+                max_rays=max_rays,
+                ray_length=ray_length,
+                fig=fig, 
+                show=False)
 
         return fig
     
@@ -1807,7 +1875,7 @@ class Bot3D:
     def __init__(self, 
                  name:str,
                  usd_context=None,
-                 body:Optional[Sequence[Tuple[
+                 body:Optional[Sequence[Tuple[    # AABBs for the bot body
                     Tuple[float,float],           # (xmin, xmax)
                     Tuple[float,float],           # (ymin, ymax)
                     Tuple[float,float]            # (zmin, zmax)
@@ -1820,9 +1888,9 @@ class Bot3D:
         Args:
             name (str): The name of the bot.
             usd_context (omni.usd.UsdContext): The USD context (if there is one).
-            body (list[UsdGeom.Mesh]): List of aabbs for the bot body. If None, use the default body. [((x0, x1), (y0, y1), (z0, z1)),...]
+            body (list[UsdGeom.Mesh]): List of aabbs for the bot body. If None, no AABBs are used. [((x0, x1), (y0, y1), (z0, z1)),...]
             path (str): The path to the bot in the USD stage.
-            sensor_pose_constraint (np.ndarray): The pose constraint for the sensors as an array ((x0, x1), (y0, y1), (z0, z1))
+            sensor_pose_constraint (np.ndarray): The pose constraint for the sensors as an array. Only one constraint AABB is supported. ((x0, x1), (y0, y1), (z0, z1))
             sensors (list[Sensor3D_Instance]): A list of sensor instances attached to the bot.
         """
         self.name = name
@@ -2403,6 +2471,9 @@ class Bot3D:
             perception_space:PerceptionSpace=None, 
             show_sensor_pose_constraints:bool=True,
             show_body:bool=True,
+            show_sensor_rays:bool=None,
+            ray_length:float=1.0,
+            max_rays:int=100,
             show=True, 
             save_path:str=None,
             **kwargs):
@@ -2415,34 +2486,18 @@ class Bot3D:
 
         Args:
             perception_space (PerceptionSpace): The perception space to plot. If None, the perception space is not plotted.
-            show (bool): If True, show the plot. If False, return the figure.
-            save_path (str): The path to save the plot. If None, the plot is not saved.
+            show_sensor_pose_constraints (bool): If True, show the sensor pose constraints as a mesh.
+            show_body (bool): If True, show the bot body as a mesh.
+            show_sensor_rays (bool): If None, no rays are shown. If True, show all rays from all sensors.
+                    If an int, show the rays of that sensor; if a list, show the rays of all sensors in the list.
+            ray_length (float): The length of the rays to show. Only used if show_sensor_rays is not None.
+            max_rays (int): The maximum number of rays to show PER SENSOR. Only used if show_sensor_rays is not None.
+            show (bool): If True, show the plot. If False, save the plot to save_path.
+            save_path (str): The path to save the plot. If None, do not save the plot.
+            **kwargs: Additional arguments to pass to the plot
         Returns:
             fig (plotly.graph_objects.Figure): The plotly figure object.
         """
-        
-        def add_perception_space(fig):
-            """ Add the perception space as a point cloud of all the voxel centers."""
-            if perception_space is not None:
-                # Get the voxel centers
-                voxel_centers = perception_space.get_voxel_centers()
-                # Get the weights of the voxels
-                weights = perception_space.get_voxel_weights()
-                # Normalize the weights to be between 0 and 1
-                # weights = (weights - torch.min(weights)) / (torch.max(weights) - torch.min(weights))
-                # Convert to numpy arrayslen
-                voxel_centers = voxel_centers.cpu().numpy()
-                weights = weights.cpu().numpy()
-                
-                fig.add_trace(go.Scatter3d(
-                    x=voxel_centers[:, 0],
-                    y=voxel_centers[:, 1],
-                    z=voxel_centers[:, 2],
-                    mode='markers',
-                    marker=dict(size=5, color=weights, colorscale='Darkmint', opacity=0.25),
-                    name='Perception Space',
-                    text=[f"Weight: {w:.2f}" for w in weights]
-                ))
 
         height = 500 if 'height' not in kwargs else kwargs['height']
         width = 500 if 'width' not in kwargs else kwargs['width']
@@ -2468,24 +2523,40 @@ class Bot3D:
                 opacity=0.25,
                 color='green',
                 name='Sensor Pose Constraints',
-                showlegend=True
+                legendgroup="Sensor Pose Constraints",
+                showlegend=True,
+                hoverinfo='skip'
             )
-            fig.add_trace(go.Mesh3d(mesh_data))
+            fig.add_trace(mesh_data)
 
         # Add the robot body to the plot
         if show_body and self.body is not None and None not in self.body:
+            showlegend = True
             for i, aabb in enumerate(self.body):
                 mesh_data = box_mesh_data(
                         extents=aabb, 
                         color="red", 
                         opacity=0.2, 
-                        name=f"Robot Body"
+                        name=f"Robot Body",
+                        legendgroup="Robot Body",
+                        showlegend=showlegend,
+                        hoverinfo='skip'
                     )
-                fig.add_trace(go.Mesh3d(mesh_data))
+                fig.add_trace(mesh_data)
+                showlegend = False  # Only show legend for the first box
 
         # Add the sensors to the plot
-        for sensor_i in self.sensors:
-            sensor_i.plot_me(fig)
+        if isinstance(show_sensor_rays, bool) and show_sensor_rays:
+            show_sensor_rays = [i for i,s in enumerate(self.sensors)]
+        if isinstance(show_sensor_rays, int):
+            show_sensor_rays = [show_sensor_rays]
+        else:
+            show_sensor_rays = []
+        for i, sensor_i in enumerate(self.sensors):
+            if i in show_sensor_rays:
+                sensor_i.plot_me(fig, plot_rays=True, ray_length=ray_length, occlusion_aabs=self.body, max_rays=max_rays)
+            else:
+                sensor_i.plot_me(fig)
 
         # Add the perception space
         if perception_space is not None:
