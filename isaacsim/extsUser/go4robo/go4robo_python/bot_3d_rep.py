@@ -666,8 +666,8 @@ class PerceptionSpace:
             Tuple[float,float],           # (ymin, ymax)
             Tuple[float,float]            # (zmin, zmax)
         ]]] = None,
-        rays_per_chunk: int = 20_000,
-        voxels_per_chunk: int = 2_000,
+        rays_per_chunk: int = 20000,
+        voxels_per_chunk: int = 2000,
         eps: float = 1e-8,
         min_distance: float = 0.0,
         max_distance: float = float('inf'),
@@ -775,7 +775,7 @@ class PerceptionSpace:
         return counts
 
     
-    def plot_me(self, fig=None, show=True, mode='centers'):
+    def plot_me(self, fig=None, show=True, colors='weights', bot=None, mode='centers', voxels_per_chunk=None, rays_per_chunk=None, **kwargs):
         """
         Plot the perception space.
         Args:
@@ -800,6 +800,30 @@ class PerceptionSpace:
         for i, voxel_group in enumerate(self.voxel_groups):
             names += [voxel_group.name] * len(voxel_group.voxels)
         text = [f"{n}<br>Weight:{w:.2f}" for n,w in zip(names,weights)]
+
+        entropies = None
+        if colors == 'entropy':
+            if bot is None:
+                raise ValueError("bot must not be None if colors is 'ap'")
+            assert isinstance(bot, Bot3D), "bot must be a Bot3D if colors is 'ap'"
+            assert voxels_per_chunk is not None, "voxels_per_chunk must passed if colors is 'entropy'"
+            assert rays_per_chunk is not None, "rays_per_chunk must passed if colors is 'entropy'"
+            # Calculate the per-voxel entropy
+            entropies = bot.calculate_perception_entropies(
+                perception_space=self, 
+                voxels_per_chunk=voxels_per_chunk, 
+                rays_per_chunk=rays_per_chunk
+                ).cpu().numpy()
+            text = [f"{n}<br>Weight:{w:.2f}<br>Entropy:{e:.4f}" for n,w,e in zip(names,weights,entropies)]
+            color = entropies
+        elif colors == 'weights':
+            # Use weights as color
+            color = weights
+        elif colors == 'names':
+            # Use names as color
+            color = names
+        else:
+            raise ValueError("Invalid color mode. Use 'm', 'weights' or 'names'.")
         
         if mode == 'centers':
             fig.add_trace(go.Scatter3d(
@@ -807,7 +831,7 @@ class PerceptionSpace:
                 y=centers[:,1], 
                 z=centers[:,2],
                 mode='markers',
-                marker=dict(size=6, color=weights, colorscale='Darkmint', opacity=0.25),
+                marker=dict(size=6, color=color, colorscale='Portland', opacity=0.25),
                 name='Perception Space',
                 text=text,
                 hovertemplate='(%{x:.2f}, %{y:.2f}, %{z:.2f})<br>%{text}<extra></extra>',
@@ -837,7 +861,7 @@ class PerceptionSpace:
                 mesh_traces.append(go.Mesh3d(
                     x=x_verts, y=y_verts, z=z_verts,
                     i=i_faces, j=j_faces, k=k_faces,
-                    intensity=face_intensity, colorscale='Viridis',
+                    intensity=face_intensity, colorscale='Portland',
                     opacity=0.25, showscale=False,
                     name='Perception Space'
                 ))
@@ -849,7 +873,7 @@ class PerceptionSpace:
         else:
             raise ValueError("Invalid plot mode for perception_space. Use 'centers' or 'boxes'.")
         if show: fig.show()
-        return fig
+        return fig, entropies
 
 class Sensor3D:
     def __init__(self, 
@@ -932,6 +956,7 @@ class Sensor3D:
             assert "max_range" in json_dict, "Invalid sensor data, no max_range found"
             assert "min_range" in json_dict, "Invalid sensor data, no min_range found"
             assert "cost" in json_dict, "Invalid sensor data, no cost found"
+            assert "ap_constants" in json_dict, "Invalid sensor data, no ap_constants found"
             h_fov = json_dict["h_fov"]
             h_res = json_dict["h_res"]
             v_fov = json_dict["v_fov"]
@@ -940,11 +965,12 @@ class Sensor3D:
             min_range = json_dict["min_range"]
             cost = json_dict["cost"]
             name = json_dict["name"]
+            ap_constants = json_dict["ap_constants"]
             body = None # TODO: This should be the body of the sensor
             
             # Create a new instance of the class of type json_dict["type"]
             sensor_class = globals()[json_dict["type"]]
-            sensor = sensor_class(name=name, h_fov=h_fov, h_res=h_res, v_fov=v_fov, v_res=v_res, max_range=max_range, min_range=min_range, cost=cost, body=body)
+            sensor = sensor_class(name=name, h_fov=h_fov, h_res=h_res, v_fov=v_fov, v_res=v_res, max_range=max_range, min_range=min_range, cost=cost, body=body, ap_constants=ap_constants)
             return sensor
             
 
@@ -964,7 +990,8 @@ class Sensor3D:
             "v_res": self.v_res,
             "max_range": self.max_range,
             "min_range": self.min_range,
-            "cost": self.cost
+            "cost": self.cost,
+            "ap_constants": self.ap_constants
         }
         return data
 
@@ -1000,6 +1027,93 @@ class Sensor3D:
         sigma = self.calculate_ap_sigma(sigma)
         entropy = 2 * math.log(sigma) + 1 + math.log(2 * math.pi)
         return entropy
+    
+    def plot_ap_h_u_m(self, show=True, epsilon=1e-3, verbose=True) -> plt.Figure:
+        """
+        Plot the Average Precision (AP), sigma_i, and Perception Entropy H vs. m 
+        using the sensor's AP constants.
+        Args:
+            show (bool): Whether to show the plot.
+            epsilon (float): A small value to avoid division by zero.
+            max_m (float): The maximum value of m for the plot.
+        Returns:
+            fig (matplotlib.figure.Figure): The figure object.
+        """
+
+        from mpl_toolkits.axes_grid1 import host_subplot
+        import mpl_toolkits.axisartist as AA
+
+        # Range of m values, assume that all rays can land on one voxel
+
+        h_rays = int(self.h_fov/self.h_res)+1
+        v_rays = int(self.v_fov/self.v_res)+1
+        rays = h_rays * v_rays
+
+        if isinstance(self, StereoCamera3D):
+            rays = rays * 2
+
+        if verbose:
+            print(f"Sensor: {self.name}\n  FOV: {self.h_fov}x{self.v_fov}\n  Resolution: {h_rays}x{v_rays}\n  Rays: {rays}")
+            print(f"  AP Constants: a={self.ap_constants['a']}, b={self.ap_constants['b']}")
+        
+        m_values = np.linspace(0.01, (h_rays*v_rays), 500)
+        ln_m = np.log(m_values)
+
+        # Calculate unclamped AP
+        ap_raw = self.ap_constants["a"] * ln_m + self.ap_constants["b"]
+
+        # Clamp AP
+        ap_clamped = np.clip(ap_raw, epsilon, 1 - epsilon)
+
+        # Calculate sigma_i
+        sigma_i = 1 / ap_clamped - 1
+
+        # Calculate Perception Entropy
+        perception_entropy = 2 * np.log(sigma_i) + 1 + np.log(2 * np.pi)
+
+        # Create host subplot for 3-axis plot
+        fig = plt.figure(figsize=(8, 6))
+        host = host_subplot(111, axes_class=AA.Axes)
+        plt.subplots_adjust(right=0.75)
+
+        # Create parasite axes
+        par1 = host.twinx()
+        par2 = host.twinx()
+
+        # Offset the third axis
+        offset = 60
+        new_fixed_axis = par2.get_grid_helper().new_fixed_axis
+        par2.axis["right"] = new_fixed_axis(loc="right", axes=par2, offset=(offset, 0))
+        par2.axis["right"].toggle(all=True)
+
+        # Ensure par1 uses the middle right axis
+        par1.axis["right"].toggle(all=True)
+
+        # Plot AP
+        p1, = host.plot(m_values, ap_clamped, color="#004666", label="Clamped AP")
+        host.set_ylabel("Clamped AP")
+        host.set_xlabel("m")
+        host.axis["left"].label.set_color(p1.get_color())
+
+        # Plot sigma_i
+        p2, = par1.plot(m_values, sigma_i, color="orange", label=r"$\sigma_i$")
+        par1.set_ylabel(r"$\sigma_i$")
+        par1.axis["right"].label.set_color(p2.get_color())
+
+        # Plot perception entropy
+        p3, = par2.plot(m_values, perception_entropy, color="green", linestyle="--", label=r"$H_i(S_i|m_i,q)$")
+        par2.set_ylabel(r"$H_i(S_i|m_i,q)$")
+        par2.axis["right"].label.set_color(p3.get_color())
+
+        # Title and legend
+        subtitle = r"AP, $\sigma_i$, and $H_i$ vs. m"
+        plt.title(f"{self.name}\n{subtitle}")
+        lines = [p1, p2, p3]
+        labels = [l.get_label() for l in lines]
+        host.legend(lines, labels, loc='upper right')
+
+        plt.show() if show else None
+        return fig
 
 
 class Lidar3D(Sensor3D):
@@ -1161,6 +1275,7 @@ class StereoCamera3D(Sensor3D):
         assert "rot_sensor1" in json_dict, "Invalid sensor data, no rot_sensor1 found"
         assert "rot_sensor2" in json_dict, "Invalid sensor data, no rot_sensor2 found"
         assert "cost" in json_dict, "Invalid sensor data, no cost found"
+        # assert "ap_constants" in json_dict, "Invalid sensor data, no ap_constants found"
 
         return StereoCamera3D(
             name=json_dict["name"],
@@ -1168,7 +1283,8 @@ class StereoCamera3D(Sensor3D):
             sensor2=MonoCamera3D.from_json(json_dict["sensor2"]),
             tf_sensor1=(json_dict["pos_sensor1"], json_dict["rot_sensor1"]),
             tf_sensor2=(json_dict["pos_sensor2"], json_dict["rot_sensor2"]),
-            cost=json_dict["cost"]
+            cost=json_dict["cost"],
+            # ap_constants=json_dict["ap_constants"]
         )
     
     def to_json(self):
@@ -1186,7 +1302,8 @@ class StereoCamera3D(Sensor3D):
             "rot_sensor1": list(self.tf_1[1]), #(qw,qx,qy,qz)
             "pos_sensor2": list(self.tf_2[0]), #(x,y,z)
             "rot_sensor2": list(self.tf_2[1]), #(qw,qx,qy,qz)
-            "cost": self.cost
+            "cost": self.cost,
+            "ap_constants": self.ap_constants
         }
         return data
 
@@ -2092,7 +2209,7 @@ class Bot3D:
         
         return world_transform
     
-    def calculate_perception_entropy(self, perception_space:PerceptionSpace, verbose:bool=False) -> float:
+    def calculate_perception_entropies(self, perception_space:PerceptionSpace, verbose:bool=False, rays_per_chunk:int=20000, voxels_per_chunk:int=2000) -> tuple:
         """
         Calculate the perception entropy of the bot based on the sensors and the perception space.
         Args:
@@ -2283,7 +2400,7 @@ class Bot3D:
 
             # This is a tensor of shape (R, N) where R is the number of rays and N is the number of voxels. 
             # Each element is True if the ray intersects with the voxel, False otherwise.
-            sensor_m:torch.Tensor = perception_space.chunk_ray_voxel_intersections(o, d, verbose=False)
+            sensor_m:torch.Tensor = perception_space.chunk_ray_voxel_intersections(o, d, rays_per_chunk=rays_per_chunk, voxels_per_chunk=voxels_per_chunk, verbose=False)
             # sensor_m:torch.Tensor = perception_space.chunk_occluded_ray_voxel_intersections(o,d,body_mins, body_maxs) #TODO occluded measurements
             print(f"  sensor_m.shape: {sensor_m.shape}, should be (N,)")  if verbose else None
             print(f"  sensor_m min: {sensor_m.min()}, sensor_m max: {sensor_m.max()}, sensor_m mean:{sensor_m.float().mean()}")  if verbose else None
@@ -2344,6 +2461,25 @@ class Bot3D:
         # Calculate the entropies for each voxel, where H(S|m,q) = 2ln(σ) + 1 + ln(2pi)
         # This is still a tensor of shape (N) where N is the number of voxels.
         entropies = _calc_entropies(late_fusion_Us)
+
+        return entropies #, early_fusion_ms, aps, us, late_fusion_Us
+    
+    def calculate_perception_entropy(self, perception_space:PerceptionSpace, verbose:bool=False, rays_per_chunk:int=20000, voxels_per_chunk:int=2000) -> float:
+        """
+        Calculate the perception entropy of the bot based on the sensors and the perception space.
+        Args:
+            perception_space (PerceptionSpace): The perception space to calculate the entropy for.
+
+        Returns:
+            float: The perception entropy of the bot. Lower entropy indicates better coverage.
+        """
+
+        entropies = self.calculate_perception_entropies(
+            perception_space, 
+            rays_per_chunk=rays_per_chunk, 
+            voxels_per_chunk=voxels_per_chunk, 
+            verbose=verbose
+            )
 
         # Calculate the weighted average entropy for the bot
         weights = perception_space.get_voxel_weights()
@@ -2469,6 +2605,7 @@ class Bot3D:
     def plot_bot_3d(
             self, 
             perception_space:PerceptionSpace=None, 
+            perception_space_colors='weights',
             show_sensor_pose_constraints:bool=True,
             show_body:bool=True,
             show_sensor_rays:bool=None,
@@ -2476,6 +2613,8 @@ class Bot3D:
             max_rays:int=100,
             show=True, 
             save_path:str=None,
+            rays_per_chunk:int=10000,
+            voxels_per_chunk:int=1000,
             **kwargs):
         """Plot the bot in 3D using plotly.
         
@@ -2494,6 +2633,8 @@ class Bot3D:
             max_rays (int): The maximum number of rays to show PER SENSOR. Only used if show_sensor_rays is not None.
             show (bool): If True, show the plot. If False, save the plot to save_path.
             save_path (str): The path to save the plot. If None, do not save the plot.
+            rays_per_chunk (int): The number of rays to use per chunk. Only used if show_sensor_rays is not None.
+            voxels_per_chunk (int): The number of voxels to use per chunk. Only used if show_sensor_rays is not None.
             **kwargs: Additional arguments to pass to the plot
         Returns:
             fig (plotly.graph_objects.Figure): The plotly figure object.
@@ -2559,8 +2700,20 @@ class Bot3D:
                 sensor_i.plot_me(fig)
 
         # Add the perception space
+        entropies = None
         if perception_space is not None:
-            perception_space.plot_me(fig, show=False)
+            if perception_space_colors == 'entropy':
+                assert rays_per_chunk is not None, "If using 'entropy' as colors, rays_per_chunk must be set."
+                assert voxels_per_chunk is not None, "If using 'entropy' as colors, voxels_per_chunk must be set."
+                _, entropies = perception_space.plot_me(
+                    fig, show=False, bot=self, colors=perception_space_colors, mode='centers', 
+                    voxels_per_chunk=voxels_per_chunk, rays_per_chunk=rays_per_chunk
+                    )
+            else:
+                print(f"Using {perception_space_colors} as colors for the perception space.")
+                _, entropies = perception_space.plot_me(
+                    fig, show=False, bot=self, colors=perception_space_colors, mode='centers',
+                    )
 
         # Adjust the layout of the plot
         fig.update_layout(
@@ -2595,7 +2748,7 @@ class Bot3D:
         if save_path is not None:
             fig.write_image(save_path)
 
-        return fig
+        return fig, entropies
 
 def box_mesh_data(extents:tuple[tuple,tuple,tuple], opacity:float=0.25, **kwargs):
     """Create a box mesh data for a box with given extents.

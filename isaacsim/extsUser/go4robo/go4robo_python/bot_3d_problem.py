@@ -1,6 +1,7 @@
 from .bot_3d_rep import *
 
 import numpy as np
+from scipy.stats import gaussian_kde
 
 import sys
 import traceback
@@ -1456,3 +1457,103 @@ def plot_pairplot(df:pd.DataFrame,
     pair_plot_df = df[axes]
     plot = sns.pairplot(pair_plot_df, hue=hue, diag_kind="kde")
     return plot
+
+def compare_entropy_histograms(
+        design_idxs,
+        entropies,
+        colors=['blue', 'orange', 'green', 'red', 'purple'],
+        bin_size=0.25,
+        min_entr=0.0,
+        max_entr=15.0,
+    ) -> go.Figure:
+    """
+    Compare the entropy distributions of different designs using histograms and CDFs.
+    Args:
+        design_idxs (list): List of design indices to compare.
+        entropies (list): List of entropy values for each design.
+        colors (list): List of colors for each design.
+        bin_size (float): Size of the histogram bins.
+    Returns:
+        fig (go.Figure): Plotly figure object containing the histograms and CDFs.
+    """
+    assert PLOTLY_MODE, "Plotly is not available in this environment. Please install plotly to use this function."
+    
+    fig = go.Figure()
+
+    # find global max for binning
+    if max_entr is None:
+        max_entr = int(max([max(entr) for entr in entropies if entr is not None]))+1
+    print(f"Max Entropy: {max_entr}")
+
+    # add histogram traces
+    for idx, entr, color in zip(design_idxs, entropies, colors):
+        if entr is None:
+            continue
+        print(f"design_{idx}_Hs: {entr}")
+        print(f"Type: {type(entr)}, Length: {len(entr)}")
+        fig.add_trace(
+            go.Histogram(
+            x=entr,
+            histnorm='',
+            name=f'Hist Design {idx}',
+            marker_color=color,
+            opacity=0.5,
+            xbins=dict(
+                start=min_entr,
+                end=max_entr,
+                size=bin_size,
+            ),
+            hovertemplate="Entropy: %{x:.2f}<br>Voxels: %{y:.2f}<extra></extra>",
+            )
+        )
+
+        sorted_vals = sorted(entr)
+        cdf = [i / len(sorted_vals) for i in range(1, len(sorted_vals) + 1)]
+        fig.add_trace(
+            go.Scatter(
+            x=sorted_vals,
+            y=cdf,
+            mode='lines',
+            name=f'CDF Design {idx}',
+            line=dict(color=color, dash='dash'),
+            yaxis='y2',
+            hovertemplate="Entropy: %{x:.2f}<br>CDF: %{y:.2f}<extra></extra>",
+            )
+        )
+
+        # compute and plot smoothed PDF via KDE
+        kde = gaussian_kde(entr)
+
+        # evaluate KDE on a fine grid
+        x_vals = np.linspace(0, max_entr, 500)
+        pdf = kde(x_vals)
+
+        fig.add_trace(
+            go.Scatter(
+                x=x_vals,
+                y=pdf,
+                mode='lines',
+                name=f'PDF Design {idx}',
+                line=dict(color=color),
+                yaxis='y2',
+                hovertemplate="Entropy: %{x:.2f}<br>PDF: %{y:.2f}<extra></extra>"
+            )
+        )
+
+        # layout with two y-axes
+        fig.update_layout(
+            title="Voxel Entropy Distribution & CDF",
+            xaxis_title="Entropy",
+            yaxis=dict(
+                title="Voxels",
+            ),
+            yaxis2=dict(
+                title="CDF, PDF",
+                overlaying='y',
+                side='right',
+                rangemode='tozero',
+            ),
+            barmode='overlay',
+        )
+
+    fig.show()

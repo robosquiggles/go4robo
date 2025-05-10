@@ -971,7 +971,6 @@ class GO4RExtension(omni.ext.IExt):
                                         v_res=resolution[1] if resolution else None,
                                         body=None,#_find_sensor_body(prim) if not has_stereo_role(prim, name) else None,
                                         cost=1.0,
-                                        focal_point=(0, 0, 0)
                                         )
                     # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
                     if cam3d in self.sensor_options:
@@ -1556,9 +1555,10 @@ class GO4RExtension(omni.ext.IExt):
                                                     a_field.model.set_value(sensor.ap_constants['a'])
                                                     
                                                     def on_a_val_changed(new_value, sensor=sensor):
-                                                        a = max(0.0, min(1.0, new_value.get_value_as_float()))
-                                                        sensor.sensor.ap_constants['a'] = a
+                                                        a = new_value.get_value_as_float()
+                                                        sensor.ap_constants['a'] = a
                                                         self._log_message(f"Set {sensor.name} average precision to {a:.2f}")
+                                                        self._update_optimization_problem()
                                                     
                                                     a_field.model.add_value_changed_fn(on_a_val_changed)
 
@@ -1567,9 +1567,10 @@ class GO4RExtension(omni.ext.IExt):
                                                     b_field.model.set_value(sensor.ap_constants['b'])
 
                                                     def on_b_val_changed(new_value, sensor=sensor):
-                                                        b = max(0.0, min(1.0, new_value.get_value_as_float()))
-                                                        sensor.sensor.ap_constants['b'] = b
+                                                        b = new_value.get_value_as_float()
+                                                        sensor.ap_constants['b'] = b
                                                         self._log_message(f"Set {sensor.name} average precision to {b:.2f}")
+                                                        self._update_optimization_problem()
                                             
                                                     b_field.model.add_value_changed_fn(on_b_val_changed)
 
