@@ -775,7 +775,18 @@ class PerceptionSpace:
         return counts
 
     
-    def plot_me(self, fig=None, show=True, colors='weights', bot=None, mode='centers', voxels_per_chunk=None, rays_per_chunk=None, **kwargs):
+    def plot_me(
+            self, 
+            fig=None, 
+            show=True, 
+            colors='weights', 
+            entropy_scale=[0.0, 4.5, 17.0],
+            bot=None, 
+            mode='centers', 
+            voxels_per_chunk=None, 
+            rays_per_chunk=None,
+            **kwargs
+            ):
         """
         Plot the perception space.
         Args:
@@ -805,7 +816,7 @@ class PerceptionSpace:
         if colors == 'entropy':
             if bot is None:
                 raise ValueError("bot must not be None if colors is 'ap'")
-            assert isinstance(bot, Bot3D), "bot must be a Bot3D if colors is 'ap'"
+            assert isinstance(bot, Bot3D), "bot must be a Bot3D if colors is 'entropy'"
             assert voxels_per_chunk is not None, "voxels_per_chunk must passed if colors is 'entropy'"
             assert rays_per_chunk is not None, "rays_per_chunk must passed if colors is 'entropy'"
             # Calculate the per-voxel entropy
@@ -815,24 +826,62 @@ class PerceptionSpace:
                 rays_per_chunk=rays_per_chunk
                 ).cpu().numpy()
             text = [f"{n}<br>Weight:{w:.2f}<br>Entropy:{e:.4f}" for n,w,e in zip(names,weights,entropies)]
-            color = entropies
+
+            # LOGARITHMIC COLORBAR
+            # Assume color is a numpy array of scalar values
+            max_entropy = np.max(entropies)
+            min_entropy = np.min(entropies)
+            mean_entropy = np.mean(entropies)
+            print(f"Entropy color scale:  {entropy_scale}")
+            print(f"Entropy actual scale: {[min_entropy, mean_entropy, max_entropy]}")
+            if max_entropy > entropy_scale[2]:
+                print(f" WARNING: max entropy {max_entropy} is HIGHER than the provided colorscale max {entropy_scale[2]}.")
+            if min_entropy < entropy_scale[0]:
+                print(f" WARNING: min entropy {min_entropy} is LOWER than the provided colorscale min {entropy_scale[0]}.")
+            color = np.log10(np.clip(entropies, 1e-8, entropy_scale[2]))
+            log_ticks = np.linspace(0, np.log10(entropy_scale[2]), num=5)
+            tickvals = log_ticks
+            ticktext = [f"{10**val:.3f}" for val in log_ticks]
+            colorbar=dict(
+                title="Entropy",
+                tickvals=tickvals,
+                ticktext=ticktext,
+            )
+            cmid = np.log10(entropy_scale[1])
+
         elif colors == 'weights':
             # Use weights as color
             color = weights
+            colorbar=dict(
+                title='Weight',
+                tickvals=np.linspace(np.min(weights), np.max(weights), num=5),
+                ticktext=[f"{w:.2f}" for w in np.linspace(np.min(weights), np.max(weights), num=5)],
+            )
         elif colors == 'names':
             # Use names as color
             color = names
+            colorbar=None
         else:
             raise ValueError("Invalid color mode. Use 'm', 'weights' or 'names'.")
         
         if mode == 'centers':
+
             fig.add_trace(go.Scatter3d(
                 x=centers[:,0], 
                 y=centers[:,1], 
                 z=centers[:,2],
                 mode='markers',
-                marker=dict(size=6, color=color, colorscale='Portland', opacity=0.25),
+                marker=dict(
+                    size=5, 
+                    color=color, 
+                    colorscale='Portland' if colors != 'weights' else 'Portland_r',
+                    cmid=cmid if colors == 'entropy' else None,
+                    opacity=0.25,
+                    showscale=True if colors != 'names' else False,
+                    colorbar=colorbar,
+                    ),
                 name='Perception Space',
+                showlegend=False if colors != 'names' else True,
                 text=text,
                 hovertemplate='(%{x:.2f}, %{y:.2f}, %{z:.2f})<br>%{text}<extra></extra>',
             ))
@@ -1767,7 +1816,8 @@ class Sensor3D_Instance:
             occlusion_aabs=None,
             max_rays=100, 
             fig=None, 
-            show=True
+            show=True,
+            legendgroup=None,
             ):
         """Plot the rays in 3D using plotly"""
 
@@ -1779,8 +1829,10 @@ class Sensor3D_Instance:
         ray_distances = ray_distances.cpu().numpy()
 
         # Create a 3D scatter plot
+        alone_on_fig = False
         if fig is None:
             fig = go.Figure()
+            alone_on_fig = True
 
         # Add rays
         for i in range(0, ray_origins.shape[0], int(ray_origins.shape[0]/max_rays)+1):
@@ -1791,21 +1843,23 @@ class Sensor3D_Instance:
                 mode='lines',
                 line=dict(color=random_color(self.name), width=2),
                 hoverinfo='none',
-                showlegend=False
+                showlegend=False,
+                legendgroup=legendgroup,
             ))
 
         # Set the layout
-        fig.update_layout(
-            title='Rays',
-            scene=dict(
-                xaxis_title='X',
-                yaxis_title='Y',
-                zaxis_title='Z',
-                aspectmode='data'
-            ),
-            width=800,
-            height=800,
-        )
+        if alone_on_fig:
+            fig.update_layout(
+                title=f'{self.name} Rays',
+                scene=dict(
+                    xaxis_title='X',
+                    yaxis_title='Y',
+                    zaxis_title='Z',
+                    aspectmode='data'
+                ),
+                width=800,
+                height=800,
+            )
 
         if show:
             fig.show()
@@ -1813,19 +1867,21 @@ class Sensor3D_Instance:
         return fig
 
 
-    def plot_me(
+    def plot_sensor(
             self, 
             fig, 
             group_mode="type", 
+            idx=None,
             plot_rays=False, 
             ray_length=1.0,
             occlusion_aabs=None, 
             max_rays=100, 
-            vec_length=0.2):
+            vec_length=0.2,
+            ):
         """Plot the sensor in 3D using plotly
         Args:
             fig (plotly.graph_objects.Figure): The figure to plot on.
-            group_mode (str): The mode to group the sensor by. Can be "type" or "idx".
+            group_mode (str): The mode to group the sensor by. Can be "instance", "type", or "idx".
             vec_length (float): The length of the vectors to plot.
         """
 
@@ -1845,6 +1901,20 @@ class Sensor3D_Instance:
         x_direction = x_direction / np.linalg.norm(x_direction) * vec_length
         y_direction = y_direction / np.linalg.norm(y_direction) * vec_length
         z_direction = z_direction / np.linalg.norm(z_direction) * vec_length
+
+        if group_mode == "type":
+            assert idx is not None, "idx must be provided when group_mode is 'type'"
+            legendgroup = self.sensor.name
+            legendgrouptitle_text=self.sensor.name
+            name = f"Sensor {idx}"
+        if group_mode == "instance":
+            legendgroup = "Sensors"
+            legendgrouptitle_text = "Sensors"
+            name = f"Sensor {idx}: {self.name}" if idx is not None else self.name
+        if group_mode == "idx":
+            legendgroup = None
+            legendgrouptitle_text=None
+            name = f"Sensor {idx}: {self.name}" if idx is not None else self.name
         
         color = random_color(self.name)
 
@@ -1855,8 +1925,9 @@ class Sensor3D_Instance:
             z=[float(translation[2])],
             mode='markers',  # Display as markers
             marker=dict(size=3, color=color),  # Marker size and color
-            name=self.name if group_mode=="idx" else self.sensor.name,  # Legend label
-            legendgroup=self.name,  # Group in the legend
+            name=name,  # Legend label
+            legendgroup=legendgroup,  # Group in the legend
+            legendgrouptitle_text=legendgrouptitle_text,  # Group title
             text=[
                 f"Translation:<br>  (x={translation[0]:.2f},<br>  y={translation[1]:.2f},<br>  z={translation[2]:.2f})",  # Hover text for the first point
                 f"Quaternion:<br>  (qw={self.quat_rotation[0]:.2f},"
@@ -1875,7 +1946,7 @@ class Sensor3D_Instance:
             mode='lines',  # Display as a line
             line=dict(color='red', width=2),  # Line color and width
             showlegend=False,  # Hide legend for the line itself
-            legendgroup=self.name,  # Group in the legend
+            legendgroup=legendgroup,  # Group in the legend
         ))
 
         # Add a Y+ line between the two points
@@ -1886,7 +1957,7 @@ class Sensor3D_Instance:
             mode='lines',  # Display as a line
             line=dict(color='green', width=2),  # Line color and width
             showlegend=False,  # Hide legend for the line itself
-            legendgroup=self.name,  # Group in the legend
+            legendgroup=legendgroup,  # Group in the legend
         ))
 
         # Add a Z+ line between the two points
@@ -1897,7 +1968,7 @@ class Sensor3D_Instance:
             mode='lines',  # Display as a line
             line=dict(color='blue', width=2),  # Line color and width
             showlegend=False,  # Hide legend for the line itself
-            legendgroup=self.name,  # Group in the legend
+            legendgroup=legendgroup,  # Group in the legend
         ))
 
         if plot_rays:
@@ -1910,7 +1981,8 @@ class Sensor3D_Instance:
                 max_rays=max_rays,
                 ray_length=ray_length,
                 fig=fig, 
-                show=False)
+                show=False,
+                legendgroup=legendgroup)
 
         return fig
     
@@ -2612,9 +2684,12 @@ class Bot3D:
             ray_length:float=1.0,
             max_rays:int=100,
             show=True, 
+            show_origin:bool=False,
+            plot_margin_dict=dict(l=5, r=5, b=5, t=30),
             save_path:str=None,
             rays_per_chunk:int=10000,
             voxels_per_chunk:int=1000,
+            group_sensors_by='type',
             **kwargs):
         """Plot the bot in 3D using plotly.
         
@@ -2655,16 +2730,17 @@ class Bot3D:
             mode='markers',  # Display as markers
             marker=dict(size=3, color='black'),  # Marker size and color
             name='ORIGIN'  # Legend label
-        ))
+        )) if show_origin else None
 
         # Add the sensor pose constraints to the plot
         if show_sensor_pose_constraints and self.sensor_pose_constraint is not None:
             mesh_data = box_mesh_data(
-                self.sensor_pose_constraint.extents,
-                opacity=0.25,
+                self.sensor_pose_constraint,
+                opacity=0.2,
                 color='green',
-                name='Sensor Pose Constraints',
-                legendgroup="Sensor Pose Constraints",
+                name='Sensor Constraint',
+                legendgrouptitle_text="Problem Definition",
+                legendgroup="Problem Definition",
                 showlegend=True,
                 hoverinfo='skip'
             )
@@ -2676,10 +2752,10 @@ class Bot3D:
             for i, aabb in enumerate(self.body):
                 mesh_data = box_mesh_data(
                         extents=aabb, 
-                        color="red", 
+                        color="orange", 
                         opacity=0.2, 
                         name=f"Robot Body",
-                        legendgroup="Robot Body",
+                        legendgroup="Problem Definition",
                         showlegend=showlegend,
                         hoverinfo='skip'
                     )
@@ -2687,17 +2763,30 @@ class Bot3D:
                 showlegend = False  # Only show legend for the first box
 
         # Add the sensors to the plot
+        if show_sensor_rays is None:
+            show_sensor_rays = []
         if isinstance(show_sensor_rays, bool) and show_sensor_rays:
             show_sensor_rays = [i for i,s in enumerate(self.sensors)]
         if isinstance(show_sensor_rays, int):
             show_sensor_rays = [show_sensor_rays]
-        else:
-            show_sensor_rays = []
+
         for i, sensor_i in enumerate(self.sensors):
             if i in show_sensor_rays:
-                sensor_i.plot_me(fig, plot_rays=True, ray_length=ray_length, occlusion_aabs=self.body, max_rays=max_rays)
+                sensor_i.plot_sensor(
+                    fig, 
+                    plot_rays=True, 
+                    idx=i,
+                    ray_length=ray_length, 
+                    occlusion_aabs=self.body, 
+                    max_rays=max_rays, 
+                    group_mode=group_sensors_by,
+                    )
             else:
-                sensor_i.plot_me(fig)
+                sensor_i.plot_sensor(
+                    fig,
+                    group_mode=group_sensors_by,
+                    idx=i,
+                    )
 
         # Add the perception space
         entropies = None
@@ -2710,7 +2799,6 @@ class Bot3D:
                     voxels_per_chunk=voxels_per_chunk, rays_per_chunk=rays_per_chunk
                     )
             else:
-                print(f"Using {perception_space_colors} as colors for the perception space.")
                 _, entropies = perception_space.plot_me(
                     fig, show=False, bot=self, colors=perception_space_colors, mode='centers',
                     )
@@ -2720,6 +2808,8 @@ class Bot3D:
             height=height,
             width=width,
             title=title,
+            template='ggplot2',
+            # margin=plot_margin_dict,
             scene=dict(
                 xaxis=dict(
                     title='X',
@@ -2738,8 +2828,15 @@ class Bot3D:
                     center=dict(x=0, y=0, z=0),  # Center the camera on the origin
                     up=dict(x=0, y=0, z=1)  # Ensure the Z-axis is up
                 ),
-                aspectmode='data'  # Maintain the aspect ratio
-            )
+                aspectmode='data',  # Maintain the aspect ratio
+            ),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=0,
+                xanchor="right",
+                x=1
+            ),
         )
 
         # Show or save the plot

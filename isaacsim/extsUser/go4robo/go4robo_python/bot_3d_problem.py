@@ -812,6 +812,7 @@ class SensorPkgFlatCrossover(Crossover):
 
         # X: shape (2, n_matings, n_var)
         n_parents, n_matings, n_var = X.shape
+        eps = 1e-12
         Y = X.copy()
         
         # Get flat list of variable names and build index maps
@@ -845,6 +846,7 @@ class SensorPkgFlatCrossover(Crossover):
 
                 # 2) Position: simple blend
                 alpha = np.random.rand()
+                #alpha = np.clip(alpha, eps, 1.0-eps)  # Ensure alpha is between 0 and 1
                 for axis in ("x", "y", "z"):
                     ia = idx[f"{axis}{i}"]
                     c1[ia] = alpha * p1[ia] + (1-alpha)*p2[ia]
@@ -865,11 +867,11 @@ class SensorPkgFlatCrossover(Crossover):
                 # Normalize
                 nt1 = np.linalg.norm(qt1)
                 nt2 = np.linalg.norm(qt2)
-                if nt1 > 1e-12 and p1[idx[f"type{i}"]] != 0:
+                if nt1 > eps and p1[idx[f"type{i}"]] != 0:
                     qt1 /= nt1
                 else:
                     qt1[:] = 0  # zero‐out if inactive or degenerate
-                if nt2 > 1e-12 and p2[idx[f"type{i}"]] != 0:
+                if nt2 > eps and p2[idx[f"type{i}"]] != 0:
                     qt2 /= nt2
                 else:
                     qt2[:] = 0
@@ -906,6 +908,8 @@ class SensorPkgFlatMutation(Mutation):
         # X: shape (pop_size, n_var) or (offsprings, n_var)
         pop, n_var = X.shape
         Y = X.copy()
+
+        eps = 1e-12
 
         var_names = list(problem.vars.keys())
         max_n = problem.max_n_sensors
@@ -944,7 +948,7 @@ class SensorPkgFlatMutation(Mutation):
                                Y[p, idx[f"qz{i}"]]])
                 qs += np.random.normal(0, self.quat_sigma, 4)
                 norm = np.linalg.norm(qs)
-                if norm > 1e-12 and Y[p, idx[f"type{i}"]] != 0:
+                if norm > eps and Y[p, idx[f"type{i}"]] != 0:
                     qs /= norm
                 else:
                     qs[:] = 0
@@ -965,7 +969,7 @@ class SensorPkgQuaternionRepairTorch(Repair):
     The quaternions are extracted from the dicts, tensorized, normalized, and placed back in the dicts.
     """
     def _do(self, problem:SensorPkgOptimization, X, **kwargs):
-        eps = 1e-10 # Small value to avoid division by zero
+        eps = 1e-12 # Small value to avoid division by zero
         for x in X:
             for i in range(problem.max_n_sensors):
                 if not x[f"s{i}_type"] in problem.sensor_options.keys():
@@ -1097,11 +1101,23 @@ def get_pareto_front(df, x='Cost', y='Perception Entropy',
         utopia_point (tuple):      The “best possible” utopia corner for these objectives.
         hv_ref       (tuple):      The hypervolume reference point.
     """
-    # 1) Extract raw points
+    # Extract raw points
     raw = df[[x, y]].values.astype(float)  # shape (n,2)
     pts = raw.copy()
 
-    # 2) Flip signs if we’re maximizing
+    # Compute utopia point (ideal corner)
+    utopia = (
+        raw[:, 0].min() if x_minimize else raw[:, 0].max(),
+        raw[:, 1].min() if y_minimize else raw[:, 1].max()
+    )
+
+    # Compute hypervolume reference point
+    hv_ref = (
+        raw[:, 0].max() if x_minimize else raw[:, 0].min(),
+        raw[:, 1].max() if y_minimize else raw[:, 1].min()
+    )
+
+    # Flip signs if we’re maximizing
     if not x_minimize:
         pts[:, 0] = -pts[:, 0]
     if not y_minimize:
@@ -1110,8 +1126,7 @@ def get_pareto_front(df, x='Cost', y='Perception Entropy',
     n = pts.shape[0]
     is_dominated = np.zeros(n, dtype=bool)
 
-    # 3) Pairwise check: i is dominated if any j beats it on both dims,
-    #    and strictly better in at least one.
+    # Pairwise check: i is dominated if any j beats it on both dims, and strictly better in at least one.
     for i in range(n):
         for j in range(n):
             if j == i:
@@ -1121,31 +1136,19 @@ def get_pareto_front(df, x='Cost', y='Perception Entropy',
                 is_dominated[i] = True
                 break
 
-    # 4) Collect non-dominated
+    # Collect non-dominated
     pareto_idx = np.where(~is_dominated)[0]
     pareto_pts = pts[pareto_idx, :]
 
-    # 5) Restore original signs
+    # Restore original signs
     restored = pareto_pts.copy()
     if not x_minimize:
         restored[:, 0] = -restored[:, 0]
     if not y_minimize:
         restored[:, 1] = -restored[:, 1]
 
-    # 6) Sort points for continuity
+    # Sort points for continuity
     restored = restored[np.argsort(restored[:, 0])]
-
-    # 7) Compute utopia point (ideal corner)
-    utopia = (
-        restored[:, 0].min() if x_minimize else restored[:, 0].max(),
-        restored[:, 1].min() if y_minimize else restored[:, 1].max()
-    )
-
-    # 8) Compute hypervolume reference point
-    hv_ref = (
-        restored[:, 0].max() if x_minimize else restored[:, 0].min(),
-        restored[:, 1].max() if y_minimize else restored[:, 1].min()
-    )
 
     return restored, df.index[pareto_idx].tolist(), utopia, hv_ref
 
@@ -1165,7 +1168,7 @@ def get_hypervolume(df, ref_point=None, x='Cost', y='Perception Coverage', x_min
         hypervolume (float): The hypervolume of the Pareto front.
         ref_point (tuple): The reference point used for hypervolume calculation.
     """
-    pareto, idx, u, hv_ref = get_pareto_front(df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
+    pareto, idx, ut, hv_ref = get_pareto_front(df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
 
     # If the provided ref_point is None, use the hv_ref from get_pareto_front
     if ref_point is None:
@@ -1212,8 +1215,6 @@ def plot_hypervolume(
     assert isinstance(pareto, np.ndarray), "pareto must be a numpy array of shape (k,2)"
     assert len(pareto.shape) == 2, "pareto must be a 2D array of shape (k,2)"
     assert pareto.shape[1] == 2, "pareto must be a 2D array of shape (k,2)"
-
-
 
 
 def plot_hypervolume_over_time(
@@ -1286,12 +1287,12 @@ def plot_tradespace(combined_df:pd.DataFrame,
                     y=('Perception Entropy', '-'), 
                     x_minimize=True,
                     y_minimize=True,
-                    x_utopia=None,
-                    y_utopia=None,
+                    utopia=None,
                     hover_name='Name',
                     show_pareto=True, 
                     show=False, 
                     panzoom=True, 
+                    color_by='Generation',
                     **kwargs) -> px.scatter:
     """
     Plot the trade space of concepts based on Cost and Perception Entropy.
@@ -1333,9 +1334,8 @@ def plot_tradespace(combined_df:pd.DataFrame,
     # Find the pareto front
     pareto, idx, ut, hv_ref = get_pareto_front(combined_df, x=x[0], y=y[0], x_minimize=x_minimize, y_minimize=y_minimize)
 
-    # alt_ut = (  (x_utopia, y_utopia) if x_utopia is not None and y_utopia is not None else ut,
-    #             (x[0], y[0]) if x_minimize and y_minimize else (x[0], -y[0]) if x_minimize else (-x[0], y[0]),
-    #             ut)
+    if utopia is None:
+        utopia = ut
 
     # Add a column to the dataframe for pareto
     combined_df['Pareto Optimal'] = ''
@@ -1348,7 +1348,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
     # Plot the population of generated designs
     fig = px.scatter(
         generated_df, x=x[0], y=y[0], 
-        color='Generation', 
+        color=color_by, 
         color_continuous_scale=color_scale_blue, 
         opacity=opacity,
         title=title, 
@@ -1357,7 +1357,7 @@ def plot_tradespace(combined_df:pd.DataFrame,
         # name='Generated Design',
         hover_name=hover_name,
         hover_data=[x[0], y[0]],
-        custom_data=[hover_name]
+        custom_data=[hover_name, color_by]
         )
     
     # Set the hover template for the designs
@@ -1366,7 +1366,9 @@ def plot_tradespace(combined_df:pd.DataFrame,
         hovertemplate="<br>".join([
         "%{customdata[0]}",
         f"{x[0]} [{x[1]}]: "+"%{x:.2f}",
-        f"{y[0]} [{y[1]}]: "+"%{y:.2f} ",
+        f"{y[0]} [{y[1]}]: "+"%{y:.2f}",
+        f"{color_by:.15s}: "+"%{customdata[1]}",
+        "<extra></extra>"
         ])
     )
     
@@ -1387,11 +1389,21 @@ def plot_tradespace(combined_df:pd.DataFrame,
 
     # Plot the utopia point
     fig.add_scatter(
-        x=[ut[0]], 
-        y=[ut[1]], 
+        x=[utopia[0]], 
+        y=[utopia[1]], 
         mode='markers', 
         marker=dict(symbol='star', size=12*(width/600), color='gold'), 
         name='Ideal',
+        hoverinfo='none',  # Disable hover data
+    )
+
+    # Plot the hypervolume reference point
+    fig.add_scatter(
+        x=[hv_ref[0]], 
+        y=[hv_ref[1]], 
+        mode='markers', 
+        marker=dict(symbol='circle', size=8*(width/600), color='pink'), 
+        name='Hypervolume Reference',
         hoverinfo='none',  # Disable hover data
     )
 
@@ -1430,11 +1442,11 @@ def plot_tradespace(combined_df:pd.DataFrame,
         hovermode='closest',
         height=height, width=width,
         legend=dict(
-            # orientation="h",
+            orientation="h",
             yanchor="top",
             y=1,
-            xanchor="right",
-            x=1
+            xanchor="center",
+            x=0.5
         ),
         yaxis=dict(range=[y_min-(0.1*y_range), y_max+(0.1*y_range)]),
         xaxis=dict(range=[x_min-(0.1*x_range), x_max+(0.1*x_range)]),
@@ -1464,7 +1476,7 @@ def compare_entropy_histograms(
         colors=['blue', 'orange', 'green', 'red', 'purple'],
         bin_size=0.25,
         min_entr=0.0,
-        max_entr=15.0,
+        max_entr=17.0,
     ) -> go.Figure:
     """
     Compare the entropy distributions of different designs using histograms and CDFs.
@@ -1491,11 +1503,15 @@ def compare_entropy_histograms(
             continue
         print(f"design_{idx}_Hs: {entr}")
         print(f"Type: {type(entr)}, Length: {len(entr)}")
+
+        # Add the histogram (binning)
         fig.add_trace(
             go.Histogram(
             x=entr,
             histnorm='',
-            name=f'Hist Design {idx}',
+            name=f'Histogram',
+            legendgroup=f'Design {idx}',
+            legendgrouptitle_text=f'Design {idx}',
             marker_color=color,
             opacity=0.5,
             xbins=dict(
@@ -1507,6 +1523,7 @@ def compare_entropy_histograms(
             )
         )
 
+        # Add the CDF
         sorted_vals = sorted(entr)
         cdf = [i / len(sorted_vals) for i in range(1, len(sorted_vals) + 1)]
         fig.add_trace(
@@ -1514,17 +1531,16 @@ def compare_entropy_histograms(
             x=sorted_vals,
             y=cdf,
             mode='lines',
-            name=f'CDF Design {idx}',
+            name=f'CDF',
+            legendgroup=f'Design {idx}',
             line=dict(color=color, dash='dash'),
             yaxis='y2',
             hovertemplate="Entropy: %{x:.2f}<br>CDF: %{y:.2f}<extra></extra>",
             )
         )
 
-        # compute and plot smoothed PDF via KDE
+        # Add a smooth PDF using Gaussian KDE
         kde = gaussian_kde(entr)
-
-        # evaluate KDE on a fine grid
         x_vals = np.linspace(0, max_entr, 500)
         pdf = kde(x_vals)
 
@@ -1533,10 +1549,26 @@ def compare_entropy_histograms(
                 x=x_vals,
                 y=pdf,
                 mode='lines',
-                name=f'PDF Design {idx}',
+                name=f'PDF',
+                legendgroup=f'Design {idx}',
                 line=dict(color=color),
                 yaxis='y2',
                 hovertemplate="Entropy: %{x:.2f}<br>PDF: %{y:.2f}<extra></extra>"
+            )
+        )
+
+        # Add a vertical line for the mean
+        mean_entropy = np.mean(entr)
+        fig.add_trace(
+            go.Scatter(
+            x=[mean_entropy, mean_entropy],
+            y=[0, 1],
+            mode='lines',
+            name=f'Mean',
+            legendgroup=f'Design {idx}',
+            line=dict(color=color, dash='dot'),
+            hovertemplate=f"Mean Entropy: {mean_entropy:.2f}<extra></extra>",
+            yaxis='y2',
             )
         )
 
