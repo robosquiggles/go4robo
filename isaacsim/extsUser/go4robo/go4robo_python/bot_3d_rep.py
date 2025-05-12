@@ -862,7 +862,7 @@ class PerceptionSpace:
             color = names
             colorbar=None
         else:
-            raise ValueError("Invalid color mode. Use 'm', 'weights' or 'names'.")
+            raise ValueError("Invalid color mode. Use 'entropy', 'weights' or 'names'.")
         
         if mode == 'centers':
 
@@ -2685,7 +2685,6 @@ class Bot3D:
             max_rays:int=100,
             show=True, 
             show_origin:bool=False,
-            plot_margin_dict=dict(l=5, r=5, b=5, t=30),
             save_path:str=None,
             rays_per_chunk:int=10000,
             voxels_per_chunk:int=1000,
@@ -2717,7 +2716,7 @@ class Bot3D:
 
         height = 500 if 'height' not in kwargs else kwargs['height']
         width = 500 if 'width' not in kwargs else kwargs['width']
-        title = f"{self.name} Original" if 'title' not in kwargs else kwargs['title']
+        title = f"{self.name}" if 'title' not in kwargs else kwargs['title']
 
         # Create a plotly figure
         fig = go.Figure()
@@ -2791,6 +2790,12 @@ class Bot3D:
         # Add the perception space
         entropies = None
         if perception_space is not None:
+            plot_margin_dict=dict(
+                l=5, 
+                # r=5, 
+                b=5, 
+                # t=30
+                )
             if perception_space_colors == 'entropy':
                 assert rays_per_chunk is not None, "If using 'entropy' as colors, rays_per_chunk must be set."
                 assert voxels_per_chunk is not None, "If using 'entropy' as colors, voxels_per_chunk must be set."
@@ -2802,6 +2807,13 @@ class Bot3D:
                 _, entropies = perception_space.plot_me(
                     fig, show=False, bot=self, colors=perception_space_colors, mode='centers',
                     )
+        else:
+            plot_margin_dict=dict(
+                l=5, 
+                r=5, 
+                b=5, 
+                # t=30
+                )
 
         # Adjust the layout of the plot
         fig.update_layout(
@@ -2809,7 +2821,7 @@ class Bot3D:
             width=width,
             title=title,
             template='ggplot2',
-            # margin=plot_margin_dict,
+            margin=plot_margin_dict,
             scene=dict(
                 xaxis=dict(
                     title='X',
@@ -2835,7 +2847,8 @@ class Bot3D:
                 yanchor="bottom",
                 y=0,
                 xanchor="right",
-                x=1
+                x=1,
+                bgcolor='rgba(255, 255, 255, 0.5)' # White with 50% transparency
             ),
         )
 
