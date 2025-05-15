@@ -1220,11 +1220,16 @@ def plot_hypervolume(
 def plot_hypervolume_over_time(
         df:pd.DataFrame, 
         ref_point:tuple[float, float]=None, 
+        utopia:tuple[float, float]=None,
         x='Cost', 
         y='Perception Entropy', 
+        color=None,
         x_minimize=True, 
         y_minimize=True,
         verbose=False,
+        fig=None,
+        axis="y2",
+        normalize=False,
         ) -> go.Figure:
     """
     Plot the hypervolume over time for a given DataFrame of designs.
@@ -1241,42 +1246,67 @@ def plot_hypervolume_over_time(
     Returns:
         The plotly figure object, the reference point used for hypervolume calculation.
     """
+    print(f"Plotting hypervolume over time for {x} vs {y}") if verbose else None
     generations = df['Generation'].unique()
     if ref_point is None:
         ref_point = (
             max(df[x]) if x_minimize else min(df[x]),
             max(df[y]) if y_minimize else min(df[y])
         )
+    # Use the min and max of the data to set the reference point
+    ref_point_opposite = (
+        min(df[x]) if x_minimize else max(df[x]),
+        min(df[y]) if y_minimize else max(df[y])
+    )
+    # The theoretical max hypervolume is the area of the rectangle defined by the ref_point and ref_point_opposite
+    max_hv = abs((ref_point[0] - ref_point_opposite[0]) * (ref_point[1] - ref_point_opposite[1]))
+    print(f"Ref point is {ref_point}") if verbose else None
+    print(f"Ref point opposite is {ref_point_opposite}") if verbose else None
+    print(f"Max hypervolume is {max_hv}") if verbose else None
+
     
     assert isinstance(ref_point, tuple), "ref_point must be a tuple of (x_ref, y_ref)"
     assert len(ref_point) == 2, "ref_point must be a tuple of length 2, (x_ref, y_ref)"
 
     print(f"Using {ref_point} as the reference point for hypervolume calculation.") if verbose else None
+
             
     hv = []
     for i, gen in enumerate(generations):
         # Get the designs for this generation
         gen_df = df[df['Generation'] == i]
         hv_gen, ref_pt = get_hypervolume(gen_df, ref_point, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
+        if normalize: # If we want to normalize the hypervolume
+            hv_gen = hv_gen / max_hv
         hv.append(hv_gen)
         print(f" Gen {i} with {len(gen_df)} designs has hypervolume of {hv[-1]}") if verbose else None
     
     # Create the plot
-    fig = go.Figure()
+    if fig is None:
+        fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=generations,
         y=hv,
         mode='lines',
-        name='Hypervolume',
-        line=dict(color=color_scale_blue[-1], width=2),
-        showlegend=False,
+        name=f'HV ({x} vs {y}){", normalized" if normalize else ""}',
+        line=dict(color=color_scale_blue[-1] if color is None else color,
+                  width=2),
+        showlegend=True,
+        yaxis=axis
     ))
     fig.update_layout(
-        title=f'Hypervolume ({x} vs {y}) Over Time',
+        title=f'{"Normalized " if normalize else ""}Hypervolume Over Time',
         xaxis_title='Generation',
-        yaxis_title='Hypervolume',
+        yaxis_title=f'Hypervolume{" (normalized)" if normalize else ""}',
         template="plotly_white",
         showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1,
+            xanchor="right",
+            x=1
+        ),
     )
 
     return fig, ref_point
@@ -1589,3 +1619,41 @@ def compare_entropy_histograms(
         )
 
     fig.show()
+
+def get_pareto_spread(
+    df: pd.DataFrame,
+    x: str = 'Cost',
+    y: str = 'Perception Entropy',
+    x_minimize: bool = True,
+    y_minimize: bool = True
+) -> float:
+    """
+    Compute the Δ‐spread metric of the 2D Pareto front in `df` over objectives (x,y).
+
+    Returns:
+        delta (float): The spread metric Δ ∈ [0,∞).  Lower is more uniform.
+    """
+    # 1) extract the (restored) Pareto front, utopia corner
+    pareto_pts, _, utopia, _ = get_pareto_front(
+        df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize
+    )
+    
+    # if fewer than two points, spread is zero
+    if pareto_pts.shape[0] < 2:
+        return 0.0
+    
+    # 2) pairwise Euclidean distances between successive front members
+    deltas = np.linalg.norm(np.diff(pareto_pts, axis=0), axis=1)  # shape (N-1,)
+    d_mean = deltas.mean()
+    
+    # 3) distances from the two ends to the utopia point
+    #    (utopia is the "ideal corner" returned by get_pareto_front)
+    d_first = np.linalg.norm(pareto_pts[0]  - np.array(utopia))
+    d_last  = np.linalg.norm(pareto_pts[-1] - np.array(utopia))
+    
+    # 4) Δ‐spread formula
+    numerator   = d_first + d_last + np.abs(deltas - d_mean).sum()
+    denominator = d_first + d_last + deltas.size * d_mean
+    delta = numerator / denominator if denominator > 0 else np.nan
+    
+    return delta
