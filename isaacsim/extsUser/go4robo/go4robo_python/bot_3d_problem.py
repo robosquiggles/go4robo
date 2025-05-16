@@ -1,7 +1,7 @@
 from .bot_3d_rep import *
 
 import numpy as np
-from scipy.stats import gaussian_kde
+from scipy.stats import gaussian_kde, pearsonr
 
 import sys
 import traceback
@@ -1084,7 +1084,8 @@ def run_moo(problem:SensorPkgOptimization,
 ################################ Plotting Functions ################################
 
 def get_pareto_front(df, x='Cost', y='Perception Entropy',
-                     x_minimize=True, y_minimize=True):
+                     x_minimize=True, y_minimize=True,
+                     remove_dupes=True):
     """
     Get the non-dominated Pareto front for a DataFrame of bi-objective designs.
 
@@ -1101,20 +1102,21 @@ def get_pareto_front(df, x='Cost', y='Perception Entropy',
         utopia_point (tuple):      The “best possible” utopia corner for these objectives.
         hv_ref       (tuple):      The hypervolume reference point.
     """
+    eps= 0  # Small value to avoid division by zero
     # Extract raw points
     raw = df[[x, y]].values.astype(float)  # shape (n,2)
     pts = raw.copy()
 
     # Compute utopia point (ideal corner)
     utopia = (
-        raw[:, 0].min() if x_minimize else raw[:, 0].max(),
-        raw[:, 1].min() if y_minimize else raw[:, 1].max()
+        raw[:, 0].min() - eps if x_minimize else raw[:, 0].max() + eps,
+        raw[:, 1].min() - eps if y_minimize else raw[:, 1].max() + eps
     )
 
     # Compute hypervolume reference point
     hv_ref = (
-        raw[:, 0].max() if x_minimize else raw[:, 0].min(),
-        raw[:, 1].max() if y_minimize else raw[:, 1].min()
+        raw[:, 0].max() + eps if x_minimize else raw[:, 0].min() - eps,
+        raw[:, 1].max() + eps if y_minimize else raw[:, 1].min() - eps
     )
 
     # Flip signs if we’re maximizing
@@ -1150,10 +1152,17 @@ def get_pareto_front(df, x='Cost', y='Perception Entropy',
     # Sort points for continuity
     restored = restored[np.argsort(restored[:, 0])]
 
+    # Remove duplicates if requested
+    if remove_dupes:
+        # Remove duplicates by rounding to 3 decimal places
+        restored = np.unique(np.round(restored, 3), axis=0)
+        # Find the indices of the unique points in the original DataFrame
+        pareto_idx = [np.where(np.all(np.round(df[[x, y]].values, 3) == point, axis=1))[0][0] for point in restored]
+
     return restored, df.index[pareto_idx].tolist(), utopia, hv_ref
 
 
-def get_hypervolume(df, ref_point=None, x='Cost', y='Perception Coverage', x_minimize=True, y_minimize=False):
+def get_hypervolume(df, ref_point=None, x='Cost', y='Perception Coverage', x_minimize=True, y_minimize=False, normalize=False, verbose=False):
     """
     Calculate the hypervolume of a Pareto front from a DataFrame of designs.
     Args:
@@ -1168,24 +1177,54 @@ def get_hypervolume(df, ref_point=None, x='Cost', y='Perception Coverage', x_min
         hypervolume (float): The hypervolume of the Pareto front.
         ref_point (tuple): The reference point used for hypervolume calculation.
     """
-    pareto, idx, ut, hv_ref = get_pareto_front(df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
 
+    pareto, idx, ut, hv_ref = get_pareto_front(df, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
+    print(f" Pareto front is...") if verbose else None
+    for i, p in enumerate(pareto):
+        print(f"  {i}: {p}") if verbose else None
     # If the provided ref_point is None, use the hv_ref from get_pareto_front
     if ref_point is None:
         ref_point = hv_ref
+    print(f" Ref point is {ref_point}") if verbose else None
+    print(f" Utopia point is {ut}") if verbose else None
+    # Use the min and max of the data to set the reference point
+    ref_point_opposite = (
+        min(df[x]) if x_minimize else max(df[x]),
+        min(df[y]) if y_minimize else max(df[y])
+    )
+    print(f" Ref point opposite is {ref_point_opposite}") if verbose else None
+    # The theoretical max hypervolume is the area of the rectangle defined by the ref_point and ref_point_opposite
+    max_hv = abs((ref_point[0] - ref_point_opposite[0]) * (ref_point[1] - ref_point_opposite[1]))
+
+    print(f" Max hypervolume is {max_hv}") if verbose else None
+    hv, ref_pt = get_hypervolume_from_pareto(pareto, ref_point, x_minimize=x_minimize, y_minimize=y_minimize)
+    print(f" Hypervolume is {hv}, and used ref point {ref_point}") if verbose else None
+    if normalize:
+        # Normalize the hypervolume by dividing by the max_hv
+        hv /= max_hv
+        print(f" Normalized hypervolume is {hv}") if verbose else None
     
-    return get_hypervolume_from_pareto(pareto, ref_point, x_minimize=x_minimize, y_minimize=y_minimize)
+    return hv, ref_pt
 
 def get_hypervolume_from_pareto(pareto, ref_point, x_minimize=True, y_minimize=False):
+    ref_point = list(ref_point) # in case it is a tuple
     if not x_minimize:
         pareto[:, 0] = -pareto[:, 0]
+        ref_point[0] = -ref_point[0]
     if not y_minimize:
         pareto[:, 1] = -pareto[:, 1]
+        ref_point[1] = -ref_point[1]
     ref_point = np.array(ref_point)
     
     # Calculate the hypervolume
     hv = HV(ref_point=ref_point)
     hypervolume = hv(pareto)
+
+    #restore the original signs
+    if not x_minimize:
+        ref_point[0] = -ref_point[0]
+    if not y_minimize:
+        ref_point[1] = -ref_point[1]
     
     return hypervolume, ref_point
 
@@ -1220,7 +1259,6 @@ def plot_hypervolume(
 def plot_hypervolume_over_time(
         df:pd.DataFrame, 
         ref_point:tuple[float, float]=None, 
-        utopia:tuple[float, float]=None,
         x='Cost', 
         y='Perception Entropy', 
         color=None,
@@ -1248,6 +1286,7 @@ def plot_hypervolume_over_time(
     """
     print(f"Plotting hypervolume over time for {x} vs {y}") if verbose else None
     generations = df['Generation'].unique()
+
     if ref_point is None:
         ref_point = (
             max(df[x]) if x_minimize else min(df[x]),
@@ -1264,22 +1303,15 @@ def plot_hypervolume_over_time(
     print(f"Ref point opposite is {ref_point_opposite}") if verbose else None
     print(f"Max hypervolume is {max_hv}") if verbose else None
 
-    
-    assert isinstance(ref_point, tuple), "ref_point must be a tuple of (x_ref, y_ref)"
-    assert len(ref_point) == 2, "ref_point must be a tuple of length 2, (x_ref, y_ref)"
-
-    print(f"Using {ref_point} as the reference point for hypervolume calculation.") if verbose else None
-
+    print(f"Using {ref_point} as the reference point for {"NORMALIZED " if normalize else ""}hypervolume calculation.") if verbose else None
             
     hv = []
     for i, gen in enumerate(generations):
         # Get the designs for this generation
         gen_df = df[df['Generation'] == i]
-        hv_gen, ref_pt = get_hypervolume(gen_df, ref_point, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize)
-        if normalize: # If we want to normalize the hypervolume
-            hv_gen = hv_gen / max_hv
+        hv_gen, ref_pt = get_hypervolume(gen_df, ref_point, x=x, y=y, x_minimize=x_minimize, y_minimize=y_minimize, normalize=normalize)
         hv.append(hv_gen)
-        print(f" Gen {i} with {len(gen_df)} designs has hypervolume of {hv[-1]}") if verbose else None
+        print(f" Gen {i} with {len(gen_df)} designs has {"NORMALIZED " if normalize else ""}hypervolume of {hv[-1]}") if verbose else None
     
     # Create the plot
     if fig is None:
@@ -1657,3 +1689,28 @@ def get_pareto_spread(
     delta = numerator / denominator if denominator > 0 else np.nan
     
     return delta
+
+def get_correlation(
+    df: pd.DataFrame,
+    x: str,
+    y: str
+) -> tuple[float, float]:
+    """
+    Compute the Pearson correlation coefficient and two-tailed p-value
+    between two columns of a DataFrame.
+
+    Args:
+        df (pd.DataFrame): DataFrame containing the data.
+        x_col (str): Name of the first variable/column.
+        y_col (str): Name of the second variable/column.
+
+    Returns:
+        r (float): Pearson r, in [-1, 1].
+        p_value (float): Two-tailed significance probability.
+    """
+    # Extract arrays
+    x = df[x].to_numpy()
+    y = df[y].to_numpy()
+    # Compute Pearson r and p-value
+    r, p_value = pearsonr(x, y)
+    return r, p_value

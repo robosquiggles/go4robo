@@ -2686,8 +2686,8 @@ class Bot3D:
             show=True, 
             show_origin:bool=False,
             save_path:str=None,
-            rays_per_chunk:int=10000,
-            voxels_per_chunk:int=1000,
+            rays_per_chunk:int=12000,
+            voxels_per_chunk:int=1200,
             group_sensors_by='type',
             **kwargs):
         """Plot the bot in 3D using plotly.
