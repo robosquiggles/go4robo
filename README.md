@@ -2,13 +2,6 @@
 
 Work for my MITsdm Masters' Thesis.
 
-## Notes to Self
-
-### how to friggin ray cast
-
-value = collisions_utils.ray_cast(position=position, orientation=orientation, offset=offset)
-
-
 ## Project Setup
 
 For this project, you'll need:
