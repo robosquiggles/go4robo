@@ -8,12 +8,17 @@ from isaacsim.core.utils.stage import get_current_stage
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
-from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade
-import isaacsim.core.utils.prims as prim_utils
-import isaacsim.core.utils.collisions as collisions_utils
+from pxr import UsdGeom, Gf, Sdf, Usd, UsdPhysics, Vt, UsdShade, PhysxSchema
+
 from isaacsim.sensors.physx import _range_sensor
 
-import asyncio # Used to run sample asynchronously to not block rendering thread
+import isaacsim.core.utils.prims as prim_utils
+import isaacsim.core.utils.collisions as collisions_utils
+import isaacsim.core.utils.transformations as tf_utils
+import isaacsim.core.utils.bounds as bounds_utils
+
+
+import asyncio
 
 from collections import Counter
 import numpy as np
@@ -22,16 +27,20 @@ from typing import List, Dict, Tuple, Optional, Union
 import carb
 import time
 
+import torch
+torch.cuda.empty_cache()
+
 import re
 
 from .global_variables import EXTENSION_DESCRIPTION, EXTENSION_TITLE
 
 import os, sys
 
-bot_3d_rep_module_path = sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
+from .bot_3d_rep import *
+from .bot_3d_problem import *
 
-print(f"Looking for bot_3d_rep in {bot_3d_rep_module_path}")
-from bot_3d_rep import *
+import webbrowser
+from . import dash_app
 
 sensor_types = [MonoCamera3D, Lidar3D, StereoCamera3D]
 
@@ -81,17 +90,16 @@ class GO4RExtension(omni.ext.IExt):
 
         self.ui_elements = []
 
-        self.selected_export_path=None
+        self.selected_export_path = None
 
         # A place to store the robots
-        self.robots = []
+        self.robots: list[Bot3D] = []
 
         # These just help handle the stage selection and structure
         self.previous_selection = []
         
         # Perception Space Voxels
         self.voxel_size = 0.1
-        self.weighted_voxels = {} # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
 
         self.percep_entr_results_data = {} # {"robot_name": {"Entropy By Voxel Group": {group_id: entropy, ...},
                                            #                 "Entropy By Sensor Type": {sensor_name: entropy, ...},
@@ -102,6 +110,7 @@ class GO4RExtension(omni.ext.IExt):
         self.max_log_messages = 100  # Default value
         
         # Add a property to track the selected perception area mesh
+        self.perception_space:PerceptionSpace = PerceptionSpace(self._usd_context)
         self.perception_mesh = None
         self.perception_mesh_path = None
         
@@ -111,6 +120,50 @@ class GO4RExtension(omni.ext.IExt):
         # Events
         events = self._usd_context.get_stage_event_stream()
         self._stage_event_sub = events.create_subscription_to_pop(self._on_stage_event)
+
+        # Multi-Objective Optimization
+        self.sensor_options:set[Sensor3D] = set()
+
+        self.optimization_problem:SensorPkgOptimization = None
+        self.optimization_algorithm = None
+        self.optimization_max_sensors:int = 5
+        self.optimization_generations:int = 2
+        self.optimization_offspring:int = 2
+        self.optimization_population_size:int = 4
+        self.total_possible_designs:int = self.optimization_population_size + self.optimization_generations * self.optimization_offspring 
+
+        self.opt_results_folder_path = os.path.join(os.path.dirname(__file__), 'results')
+        if not os.path.exists(self.opt_results_folder_path):
+            os.makedirs(self.opt_results_folder_path)
+
+        # Previewer
+        # self._stop_dash_app()
+        asyncio.ensure_future(self._launch_dash())
+
+    def on_shutdown(self):
+        """Shutdown the extension"""
+
+        # Cleanup UI
+        self._cleanup_ui()
+
+        # Remove menu items
+        remove_menu_items(self._menu_items)
+
+        # Unregister action
+        action_registry = omni.kit.actions.core.get_action_registry()
+        action_registry.unregister_action(self.ext_id, f"CreateUIExtension:{EXTENSION_TITLE}")
+
+        # Cleanup stage event subscription
+        if self._stage_event_sub:
+            self._stage_event_sub = None
+
+        # Cleanup window
+        if self._window:
+            self._window.visible = False
+            self._window = None
+
+        # Force garbage collection
+        gc.collect()
 
     def _build_ui(self):
         """Build the UI for the extension"""
@@ -125,8 +178,8 @@ class GO4RExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5, height=0):
                             with ui.HStack(spacing=5):
                                 self.selected_robot_label = ui.Label("(Select one or more robot from the stage)", style = {"color": ui.color("#FF0000")})
-                                self.refresh_sensors_btn = ui.Button("Refresh Robots & Sensors", clicked_fn=self._refresh_sensor_list, height=36, width=0)
-                                self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+                                self.refresh_robot_btn = ui.Button("Refresh Robots & Sensors", clicked_fn=self._refresh_robot_list, height=36, width=0)
+                                self.disable_ui_element(self.refresh_robot_btn, text_color=ui.color("#FF0000"))
                             self.sensor_list = ui.ScrollingFrame(height=300)
                             with ui.CollapsableFrame("Data Export", height=0, collapsed=True):
                                 with ui.VStack(spacing=5, height=0):
@@ -201,15 +254,31 @@ class GO4RExtension(omni.ext.IExt):
                         with ui.VStack(spacing=5):
                             # Buttons for operations
                             with ui.HStack(spacing=5, height=0):
-                                self.analyze_btn = ui.Button("Analyze Perception Entropy", clicked_fn=self._calc_perception_entropies, width=120, height=36)
+                                self.analyze_btn = ui.Button("Analyze As-Is Perception Entropy", clicked_fn=self._batch_calc_perception_entropies, width=120, height=36)
                                 # Initially disable the button since no mesh is selected
                                 self.disable_ui_element(self.analyze_btn, text_color=ui.color("#FF0000"))
                                 self.analysis_progress_bar = ui.ProgressBar(height=36, val=0.0)
                             # self.reset_btn = ui.Button("Reset", clicked_fn=self._reset_settings, height=36)
-                            self.results_list = ui.ScrollingFrame(height=250)
+                            self.results_list = ui.ScrollingFrame(height=80)
                             # Initialize with empty results
                             with self.results_list:
                                 ui.Label("Run analysis to see results")
+
+                    ui.Spacer(height=20)
+                    
+                    with ui.CollapsableFrame("Optimization", height=0, collapsed=False):
+                        with ui.VStack(spacing=5):
+                            self.sensor_options_list = ui.ScrollingFrame(height=450)
+                            # Buttons for operations
+                            with ui.HStack(spacing=5, height=0):
+                                self.optimize_btn = ui.Button("Generate Designs", clicked_fn=self._optimize_robot, height=36, width=0)
+                                self.optimization_progress_bar = ui.ProgressBar(height=36, val=0.0)
+                                self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+                            self.results_pg_btn = ui.Button("Open Results Viewer", clicked_fn=self._launch_dash, height=36)
+                            self.disable_ui_element(self.results_pg_btn, text_color=ui.color("#FF0000"))
+                            # Initialize with empty results
+                            with self.sensor_options_list:
+                                ui.Label("Refresh Robots & Sensors")
                     
                     ui.Spacer(height=20)
                     
@@ -241,7 +310,7 @@ class GO4RExtension(omni.ext.IExt):
         """Enable a button and restore its normal style"""
         ui_element.enabled = True
         if text_color is not None:
-            ui_element.set_style({"color": text_color})
+            ui_element.set_style({"color": ui.color("#00ff00") if text_color is None else text_color})
         else:
             ui_element.set_style({})  # Reset to default style
 
@@ -250,7 +319,7 @@ class GO4RExtension(omni.ext.IExt):
         ui_element.enabled = False
         ui_element.set_style({
             "background_color": ui.color("#555555"),
-            "color": ui.color("#AAAAAA") if text_color is None else text_color,
+            "color": ui.color("#ff0000") if text_color is None else text_color,
             "opacity": 0.7
         })
 
@@ -284,11 +353,11 @@ class GO4RExtension(omni.ext.IExt):
         if not selection:
             self.selected_robot_label.text = "(Select one or more robot from the stage)"
             self.selected_robot_label.style = {"color": ui.color("#FF0000")}
-            self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.refresh_robot_btn, text_color=ui.color("#FF0000"))
 
             self.perception_mesh_label.text = "(Select one mesh from the stage)"
             self.perception_mesh_label.style = {"color": ui.color("#FF0000")}
-            self.disable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#FF0000"))
+            self.disable_ui_element(self.refresh_robot_btn, text_color=ui.color("#FF0000"))
             return
         
         for robot_path in selection:
@@ -296,7 +365,7 @@ class GO4RExtension(omni.ext.IExt):
             self.selected_prims.append(bot_prim)
 
         self.selected_robot_label.text = f"Selected: {', '.join([prim_utils.get_prim_path(bot).split('/')[-1] for bot in self.selected_prims])}"
-        self.enable_ui_element(self.refresh_sensors_btn, text_color=ui.color("#00FF00"))
+        self.enable_ui_element(self.refresh_robot_btn, text_color=ui.color("#00FF00"))
         self.selected_robot_label.style = {"color": ui.color("#00FF00")}
 
         if len(self.selected_prims) > 1:
@@ -321,6 +390,45 @@ class GO4RExtension(omni.ext.IExt):
         if get_current_stage().GetPrimAtPath("/World/GO4R_PerceptionVolume"):
             self._update_voxel_groups_from_stage()
 
+    def _zero_gravity(self):
+        """Disable gravity for all active prims in the stage"""
+        if not self.stage:
+            self.stage = get_current_stage()
+        # Iterate over all prims in the stage
+        for prim in self.stage.Traverse():
+            # Check if the prim is active and not a prototype
+            if prim.IsActive() and not prim.IsInstance():
+                # Apply RigidBodyAPI and PhysxRigidBodyAPI
+                UsdPhysics.RigidBodyAPI.Apply(prim)
+                PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+
+                # Access the PhysxRigidBodyAPI
+                physx_api = PhysxSchema.PhysxRigidBodyAPI(prim)
+
+                # Disable gravity
+                physx_api.CreateDisableGravityAttr(True)
+
+                # Optionally, increase damping to prevent drifting
+                physx_api.GetLinearDampingAttr().Set(1000.0)
+                physx_api.GetAngularDampingAttr().Set(1000.0)
+
+    def _gravity(self):
+        for prim in self.stage.Traverse():
+            # Check if the prim is active and not a prototype
+            if prim.IsActive() and not prim.IsInstance():
+                # Access the PhysxRigidBodyAPI
+                physx_api = PhysxSchema.PhysxRigidBodyAPI(prim)
+
+                # Enable gravity
+                if physx_api.GetDisableGravityAttr().IsValid():
+                    physx_api.GetDisableGravityAttr().Set(False)
+
+                # Reset damping values
+                if physx_api.GetLinearDampingAttr().IsValid():
+                    physx_api.GetLinearDampingAttr().Set(0.0)
+                if physx_api.GetAngularDampingAttr().IsValid():
+                    physx_api.GetAngularDampingAttr().Set(0.0)
+
     def _update_voxel_groups_from_stage(self):
         """Update voxel groups based on XForm hierarchy under GO4R_PerceptionVolume"""
         stage = get_current_stage()
@@ -338,8 +446,8 @@ class GO4RExtension(omni.ext.IExt):
         xform_groups = [child for child in parent_prim.GetChildren() 
                         if child.IsA(UsdGeom.Xform) and not child.IsA(UsdGeom.Mesh)]
         
-        # Map existing group IDs to maintain weights where possible
-        new_weighted_voxels = {}
+        # Clear the previously found voxel groups
+        self.perception_space = PerceptionSpace(self._usd_context)
         
         # Process XForm groups first
         for xform in xform_groups:
@@ -354,12 +462,37 @@ class GO4RExtension(omni.ext.IExt):
             
             # Find all mesh children (voxels) under this XForm
             voxel_meshes = []
+            voxel_sizes = []
+            voxel_paths = []
+            voxel_centers = []
+
             for child in xform.GetChildren():
                 if child.IsA(UsdGeom.Mesh):
                     voxel_meshes.append(child)
                     all_found_voxels.add(str(child.GetPath()))
+
+                    # Get the voxel size
+                    boundable = UsdGeom.Boundable(child.GetPrim())
+                    bbox = boundable.ComputeWorldBound(Usd.TimeCode.Default(), UsdGeom.Tokens.default_)
+                    box = bbox.ComputeAlignedBox()
+                    min_point = box.GetMin()
+                    max_point = box.GetMax()
+                    size = [max_point[i] - min_point[i] for i in range(3)]
+                    voxel_sizes.append(size)
+
+                    # Get the center of the voxel
+                    center = [(max_point[i] + min_point[i]) / 2 for i in range(3)]
+                    voxel_centers.append(center)
+
+                    # Get the path of the voxel
+                    path = str(child.GetPath())
+                    voxel_paths.append(path)
                 
-            new_weighted_voxels.update({group_id: (np.array(voxel_meshes), weight)})
+            vg = PerceptionSpace.VoxelGroup(group_id,
+                                            voxel_paths, 
+                                            torch.Tensor(voxel_centers), 
+                                            torch.Tensor(voxel_sizes))
+            self.perception_space.add_voxel_group(vg, weight)
         
         # Group ungrouped meshes to show the warning in the UI
         ungrouped_voxels = []
@@ -369,14 +502,17 @@ class GO4RExtension(omni.ext.IExt):
                 all_found_voxels.add(str(child.GetPath()))
         
         if ungrouped_voxels:
-            new_weighted_voxels.update({"UNGROUPED": (ungrouped_voxels, 0.0)})
+            # Create a new group for ungrouped voxels
+            group_id = "UNGROUPED"
+            voxel_paths = [str(mesh.GetPath()) for mesh in ungrouped_voxels]
+            voxel_sizes = [mesh.GetExtentAttr().Get()[1] for mesh in ungrouped_voxels]
+                
+            vg = PerceptionSpace.VoxelGroup(group_id, voxel_paths, voxel_sizes)
+            self.perception_space.add_voxel_group(vg, 0.0)
         
-        # Update member variables
-        self.weighted_voxels = new_weighted_voxels
         
         # Update the UI
         self._update_voxel_groups_ui()
-        # self._log_message(f"Updated {len(self.weighted_voxels)} voxel groups based on stage hierarchy")
 
     def _update_max_log_messages(self, value):
         """Update the maximum number of log messages to keep"""
@@ -416,7 +552,10 @@ class GO4RExtension(omni.ext.IExt):
         self.voxel_groups_container.clear()
         
         with self.voxel_groups_container:
-            for group_name, (voxels, weight) in self.weighted_voxels.items():
+            for i, voxel_group in enumerate(self.perception_space.voxel_groups):
+                group_name = voxel_group.name
+                voxels = voxel_group.voxels
+                weight = self.perception_space.weights[i]
                     
                 with ui.HStack(spacing=5):
 
@@ -433,9 +572,8 @@ class GO4RExtension(omni.ext.IExt):
                     def make_weight_changed_fn(g_id):
                         def on_weight_changed(value):
                             # Update the weight for this group
-                            voxels, _ = self.weighted_voxels[g_id]
-                            self.weighted_voxels[g_id] = (voxels, value.get_value_as_float())
-
+                            self.perception_space.set_voxel_group_weight(g_id, value.get_value_as_float())
+                            
                             # Update the custom weight data for the XForm
                             xform_path = f"/World/GO4R_PerceptionVolume/{g_id}"
                             xform_prim = get_current_stage().GetPrimAtPath(xform_path)
@@ -461,7 +599,8 @@ class GO4RExtension(omni.ext.IExt):
                         ui.Label(f"{len(voxels)}", width=120, style={"color": ui.color("#FF0000")})
         
         # Finally, if there are voxel groups, and robots to analyze, enable the analyze perception button
-        if len(self.weighted_voxels) > 0 and "UNGROUPED" not in self.weighted_voxels and len(self.robots) > 0:
+        names = list(self.perception_space.get_group_names())
+        if len(names) > 0 and "UNGROUPED" not in names and len(self.robots) > 0:
             self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
 
     def _add_voxel_group(self):
@@ -679,12 +818,96 @@ class GO4RExtension(omni.ext.IExt):
         
         self._log_message("Settings reset to default values")
     
-    def _refresh_sensor_list(self):
+    def _refresh_robot_list(self):
         """Refresh the list of detected sensors without analysis"""
 
         def _remove_trailing_digits(name):
             """Remove trailing underscore+digits from a name, if they are present, using re"""
             return re.sub(r'(_\d+)?$', '', name)
+        
+        def _find_xform_ancestor(prim:Usd.Prim) -> Usd.Prim:
+            """Find the nearest XForm ancestor of the given prim"""
+            while prim and not prim.IsA(UsdGeom.Xform):
+                prim = prim.GetParent()
+            return prim
+        
+        def _find_sensor_constraints(prim:Usd.Prim) -> tuple[tuple[float]]:
+            """Find the constraints for sensor placement within the given prim. 
+            Performs a BFS starting at the given prim to find the first UsdGeom.Boundable
+            with the required attributes. Attributes are primarily to have "GO4R_CONSTRAINT" 
+            in the name; only one boundable is supported at the moment.
+            
+            Args:
+                prim (Usd.Prim): The prim to search for constraints.
+            Returns:
+                tuple: A tuple containing the min and max range for the sensor positions. Generally
+                       of the form ((x_min, x_max), (y_min, y_max), (z_min, z_max))"""
+            def _find_boundable_recurse(prim:Usd.Prim) -> UsdGeom.Boundable:
+                """Find the first UsdGeom.Boundable in the prim's hierarchy"""
+                for child in prim.GetChildren():
+                    if child.IsA(UsdGeom.Boundable) and "GO4R_CONSTRAINT" in child.GetName():
+                        return UsdGeom.Boundable(child)
+                    else:
+                        boundable = _find_boundable_recurse(child)
+                        if boundable:
+                            return boundable
+                return None
+            
+            # Find the boundable using BFS
+
+            boundable = _find_boundable_recurse(prim)
+            if boundable is None:
+                # If no boundable is found, create one and return it.
+                # Recommendation is to use the one created for you and re-initialize the robot
+                self._log_message(f"Warning: No GO4R_CONSTRAINT found within in {prim.GetName()}, creating one now!")
+                # Create a new boundable
+                prim_path = f"{prim.GetPath()}/GO4R_CONSTRAINT_{prim.GetName()}"
+                boundable = prim_utils.create_prim(prim_path=prim_path,
+                                                   prim_type="Cube",
+                                                   position=np.array([0, 0, 0.5]),
+                                                   )
+                self._log_message(f"        Created new {prim_path}.")
+                self._log_message(f"        Recommendation is to adjust it and re-initialize the robot")
+            
+            bb_cache = bounds_utils.create_bbox_cache()
+            x0, y0, z0, x1, y1, z1 = bounds_utils.compute_aabb(bbox_cache=bb_cache, prim_path=boundable.GetPath())
+            return ((x0, x1), (y0, y1), (z0, z1))
+        
+        def _find_robot_body_aabbs(prim:Usd.Prim) -> tuple[tuple[float]]:
+            """Find the occluding robot body Axis-Aligned Bounding Boxes within the given prim. 
+            Performs a BFS starting at the given prim to find the first UsdGeom.Boundable
+            with the required attributes. Attributes are primarily to have "GO4R_BODY" 
+            in the name; can have multiple boundables!.
+            
+            Args:
+                prim (Usd.Prim): The prim to search for constraints.
+            Returns:
+                tuple: A tuple containing the min and max range for the sensor positions. Generally
+                       of the form ((x_min, x_max), (y_min, y_max), (z_min, z_max))"""
+            def _find_boundable_recurse(prim:Usd.Prim, boundable_prims:list) -> UsdGeom.Boundable:
+                """Find the first UsdGeom.Boundable in the prim's hierarchy"""
+                for child in prim.GetChildren():
+                    if child.IsA(UsdGeom.Boundable) and "GO4R_BODY" in child.GetName():
+                        boundable_prims.append(UsdGeom.Boundable(child))
+                    else:
+                        _find_boundable_recurse(child, boundable_prims)
+                return None
+            
+            # Find the boundable using BFS
+            boundable_prims = []
+            _find_boundable_recurse(prim, boundable_prims)
+            if boundable_prims is []:
+                # If no boundable is found, log a message saying so!
+                self._log_message(f"Warning: No GO4R_BODY found within in {prim.GetName()}.")
+                return None
+                
+            aabb_extents = []
+            for boundable in boundable_prims:
+                bb_cache = bounds_utils.create_bbox_cache()
+                x0, y0, z0, x1, y1, z1 = bounds_utils.compute_aabb(bbox_cache=bb_cache, prim_path=boundable.GetPath())
+                aabb_extents.append(((x0, x1), (y0, y1), (z0, z1)))
+
+            return aabb_extents                
 
         def _find_camera(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find cameras that are descendants of the selected robot"""
@@ -692,6 +915,12 @@ class GO4RExtension(omni.ext.IExt):
             # self._log_message(f"DEBUG: Checking for CAMERA prim {prim.GetName()} of type {prim.GetTypeName()}")
 
             if prim.IsA(UsdGeom.Camera):
+                xform_ancestor = _find_xform_ancestor(prim)
+                if xform_ancestor.GetName() == "World":
+                    self._log_message(f"Sensors must be children of a XForm, World")
+                
+                xform_ancestor_path = str(xform_ancestor.GetPath())
+                xform_ancestor_name = xform_ancestor.GetName()
                 # Skip editor cameras if a specific robot is selected
                 name = prim.GetName()
                 
@@ -740,12 +969,28 @@ class GO4RExtension(omni.ext.IExt):
                                         aspect_ratio=aspect_ratio,
                                         h_res=resolution[0] if resolution else None,
                                         v_res=resolution[1] if resolution else None,
-                                        body=prim,
+                                        body=None,#_find_sensor_body(prim) if not has_stereo_role(prim, name) else None,
                                         cost=1.0,
-                                        focal_point=(0, 0, 0)
                                         )
-                    cam3d_instance = Sensor3D_Instance(cam3d, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
-                    cam3d_instance.create_ray_casters(get_current_stage(), self._usd_context)
+                    # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
+                    if cam3d in self.sensor_options:
+                        cam3d = next((s for s in self.sensor_options if s == cam3d), cam3d)
+                    else:
+                        self.sensor_options.add(cam3d)
+
+                    tf = self._get_relative_trans_quat(source_prim=robot_prim, target_prim=xform_ancestor) # ASSUME THAT THE USER HAS PROPERLY TRANSFORMED THE CAMERA
+                    self._log_message(f"NOTE: Camera is assumed to be properly transformed to the parent transform {xform_ancestor.GetName()}")
+                    self._log_message(f"      https://docs.isaacsim.omniverse.nvidia.com/latest/reference_material/reference_conventions.html#default-camera-axes")
+                    self._log_message(f"        - Required: X+ is forward, Y+ is left, Z+ is up")
+                    self._log_message(f"        - Cameras in Isaac Sim are by default pointed Z- forward, Y+ up")
+
+                    # tf = (tf[0], self._reorient_camera_to_sensor_quat(tf[1]))
+                    
+                    cam3d_instance = Sensor3D_Instance(cam3d, 
+                                                       path=xform_ancestor_path, 
+                                                       name=_remove_trailing_digits(name), 
+                                                       tf=tf, # This is the transform from the robot to the camera INSTANCE
+                                                       usd_context=self._usd_context)
                     # self._log_message(f"Found camera: {cam3d_instance.name} with HFOV: {cam3d_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting camera properties for {name}: {str(e)}")
@@ -756,10 +1001,17 @@ class GO4RExtension(omni.ext.IExt):
             else:
                 return None
 
-        def _find_lidar(prim:Usd.Prim) -> Dict:
+        def _find_lidar(prim:Usd.Prim) -> Sensor3D_Instance:
             """Find LiDARs that are descendants of the selected robot"""
 
             # self._log_message(f"DEBUG: Checking for LiDAR prim {prim.GetName()} of type {prim.GetTypeName()}")
+
+            xform_ancestor = _find_xform_ancestor(prim)
+            if xform_ancestor.GetName() == "World":
+                self._log_message(f"Sensors must be children of a XForm, World")
+            
+            xform_ancestor_path = str(xform_ancestor.GetPath())
+            xform_ancestor_name = xform_ancestor.GetName()
 
             type_name = str(prim.GetTypeName()).lower()
             lidar_instance = None
@@ -781,19 +1033,115 @@ class GO4RExtension(omni.ext.IExt):
                                     v_res=self._get_prim_attribute(prim, "verticalResolution"),
                                     max_range=self._get_prim_attribute(prim, "maxRange"),
                                     min_range=self._get_prim_attribute(prim, "minRange"),
-                                    body=prim,
+                                    body=None,#_find_sensor_body(prim.GetParent()),
                                     cost=1.0,
                                     )
-                    lidar_instance = Sensor3D_Instance(lidar, path=prim.GetPath(), name=_remove_trailing_digits(name), tf=self._get_robot_to_sensor_transform(prim, robot_prim))
-                    lidar_instance.create_ray_casters(get_current_stage(), self._usd_context)
+                    # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
+                    if lidar in self.sensor_options:
+                        lidar = next((s for s in self.sensor_options if s == lidar), lidar)
+                    else:
+                        self.sensor_options.add(lidar)
+                    
+                    lidar_instance = Sensor3D_Instance(lidar, 
+                                                       path=xform_ancestor_path, 
+                                                       name=_remove_trailing_digits(name), 
+                                                       tf=self._get_relative_trans_quat(source_prim=robot_prim, target_prim=prim), # This is the transform from the robot to the lidar INSTANCE
+                                                       usd_context=self._usd_context)
                     # self._log_message(f"Found LiDAR: {lidar_instance.name} with HFOV: {lidar_instance.sensor.h_fov:.2f}°")
                 except Exception as e:
                     self._log_message(f"Error extracting LiDAR properties for {name}: {str(e)}")
+                    raise e
             
             return lidar_instance
+        
+        def _find_sensor_body(prim:Usd.Prim, default_box_size=1) -> Usd.Prim:
+            """Find the body of the sensor, Which is the mesh that is a child of the sensor's main XForm. Prim you pass here should be the main XForm"""
 
+            prim_path = prim.GetPath()
+            prim_name = prim.GetName()
 
-        def _assign_sensors_to_robot(prim, bot, processed_camera_paths=None):
+            for child in prim.GetChildren():
+                if child.IsA(UsdGeom.Mesh):
+                    # Check if the child is a mesh
+                    self._log_message(f"Found sensor body: {child.GetName()} for sensor {prim_name}")
+                    return child 
+            
+            self._log_message(f"No sensor body found for sensor {prim_name}, using a small {default_box_size}m box as a placeholder")
+            # If no mesh is found, Create a small box as a placeholder
+
+            min_x = - default_box_size / 2
+            min_y = - default_box_size / 2
+            min_z = - default_box_size / 2
+            max_x = min_x + default_box_size
+            max_y = min_y + default_box_size
+            max_z = min_z + default_box_size
+            
+            # Define voxel as a cube
+            voxel_points = [
+                Gf.Vec3f(min_x, min_y, min_z),
+                Gf.Vec3f(max_x, min_y, min_z),
+                Gf.Vec3f(max_x, max_y, min_z),
+                Gf.Vec3f(min_x, max_y, min_z),
+                Gf.Vec3f(min_x, min_y, max_z),
+                Gf.Vec3f(max_x, min_y, max_z),
+                Gf.Vec3f(max_x, max_y, max_z),
+                Gf.Vec3f(min_x, max_y, max_z)
+            ]
+
+            # Define the faces (6 faces, each with 4 vertices)
+            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
+            face_vertex_indices = Vt.IntArray([
+                0, 1, 2, 3,  # bottom
+                4, 5, 6, 7,  # top
+                0, 1, 5, 4,  # front
+                1, 2, 6, 5,  # right
+                2, 3, 7, 6,  # back
+                3, 0, 4, 7   # left
+            ])
+                
+            # Create voxel mesh using USD API directly
+            voxel_path = f"{prim_path}/GO4R_BODY_{prim_name}"
+            mesh_def = UsdGeom.Mesh.Define(stage, voxel_path)
+            mesh_def.CreatePointsAttr().Set(voxel_points)
+            mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
+            mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            
+            # Set the voxel's transform at its center
+            xform = UsdGeom.Xformable(mesh_def)
+            translate = UsdGeom.Xformable(prim).GetLocalTransformation()[0].ExtractTranslation()
+            rotate = UsdGeom.Xformable(prim).GetLocalTransformation()[0].ExtractRotation().GetEulerAngles()
+            xform.AddTranslateOp().Set(translate)
+            xform.AddRotateXYZOp().Set(rotate)
+            
+            # Define or get the transparent material
+            mat_path = Sdf.Path(f"/World/GO4R_PerceptionVolume/Looks/{prim_name}_body_material")
+            mat_prim = stage.GetPrimAtPath(mat_path)
+            if not mat_prim:
+                mat_prim = UsdShade.Material.Define(stage, mat_path)
+                shader_path = mat_path.AppendPath("Shader")
+                shader = UsdShade.Shader.Define(stage, shader_path)
+                shader.CreateIdAttr("UsdPreviewSurface")
+                shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.1, 0.5, 0.0)) # Orange
+                shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(0.0) # Set transparency
+                mat_prim.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+
+            # Bind the material to the voxel mesh
+            UsdShade.MaterialBindingAPI(mesh_def.GetPrim()).Bind(UsdShade.Material(mat_prim))
+
+            return mesh_def.GetPrim()
+        
+        def has_stereo_role(prim:Usd.Prim, name) -> str|None:
+            """Checks if the prim is part of a stereo camera pair. If so, returns the 
+            role ('left' or 'right'), otherwise returns None."""
+            for role in ["left", "right"]:
+                if (role in name.lower() or 
+                    (prim.HasAttribute("stereoRole") and 
+                        prim.GetAttribute("stereoRole").Get() and 
+                        prim.GetAttribute("stereoRole").Get().lower() == role)):
+                    return role
+            return None
+
+        def _assign_sensors_to_robot(prim, bot:Bot3D, processed_camera_paths=None):
             """Search a level for sensors and add them to the specified robot"""
             # Check if this node contains a sensor, regardless of whether it's a leaf
             # This allows finding sensors at any level of the hierarchy
@@ -814,24 +1162,31 @@ class GO4RExtension(omni.ext.IExt):
                 found_stereo_pair = False
                 for role in ["left", "right"]:
                     if (role in camera.name.lower() or 
-                        (prim.HasAttribute("stereoRole") and prim.GetAttribute("stereoRole").Get() == role)):
+                        (prim.HasAttribute("stereoRole") and 
+                         prim.GetAttribute("stereoRole").Get() and 
+                         prim.GetAttribute("stereoRole").Get().lower() == role)):
                         this_cam_role = role
                         this_cam_name = camera.name
-                        this_cam_path_str = prim.GetPath().pathString
+                        xform_ancestor_prim = _find_xform_ancestor(prim)
+                        this_cam_path_str = xform_ancestor_prim.GetPath().pathString
                         other_cam_role = "left" if role == "right" else "right"
-                        other_cam_name = camera.name.replace(role, other_cam_role)
-                        other_cam_path_str = str(this_cam_path_str).replace(role, other_cam_role)
+                        
+                        # Case-insensitive replacement for the other camera name
+                        pattern = re.compile(re.escape(role), re.IGNORECASE)
+                        other_cam_name = pattern.sub(other_cam_role, camera.name)
+                        other_cam_path_str = pattern.sub(other_cam_role, str(this_cam_path_str))
 
-                        # Check if the other camera is already in the sensors list
+                        # Check if the other camera is already in the bot's sensors
                         for i, sensor_instance in enumerate(bot.sensors):
                             if isinstance(sensor_instance.sensor, MonoCamera3D):
-                                if sensor_instance.name == other_cam_name:
+                                # Case-insensitive comparison
+                                if sensor_instance.name.lower() == other_cam_name.lower():
                                     # Found the other camera, create a stereo camera
-                                    self._log_message(f"Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
+                                    self._log_message(f" Pairing stereo cameras: {this_cam_name} and {other_cam_name} in robot {bot.name}")
                                     self._log_message(f"  Path 1: {this_cam_path_str}")
-                                    self._log_message(f"  Path 2: {sensor_instance.path.pathString}")
+                                    self._log_message(f"  Path 2: {sensor_instance.path}")
                                     # Find the common parent of the two cameras based on the paths
-                                    common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path.pathString])
+                                    common_parent_path = os.path.commonpath([this_cam_path_str, sensor_instance.path])
                                     # self._log_message(f"  Common: {common_parent_path}")
                                     common_parent_prim = get_current_stage().GetPrimAtPath(common_parent_path)
                                     if not common_parent_prim:
@@ -840,23 +1195,43 @@ class GO4RExtension(omni.ext.IExt):
                                     else:
                                         common_parent_name = common_parent_prim.GetName()
                                     
-                                    # Remove any training '_XX' suffix (where XX is two+ digits) from the common parent name
+                                    # Remove any trailing '_XX' suffix (where XX is two+ digits) from the common parent name
                                     if common_parent_name.endswith("_XX"):
                                         common_parent_name = common_parent_name[:-3]
 
+                                    # Get the prims to get all the transforms
+                                    bot_prim = prim_utils.get_prim_at_path(prim_path=bot.path)
+                                    s1_prim = prim_utils.get_prim_at_path(prim_path=this_cam_path_str if this_cam_role == "left" else sensor_instance.path)
+                                    s2_prim = prim_utils.get_prim_at_path(prim_path=sensor_instance.path if this_cam_role == "left" else this_cam_path_str)
+
+                                    # Get the transforms: robot --> common parent --> cameras
+                                    tf_parent = self._get_relative_trans_quat(bot_prim, common_parent_prim) # This is the transform from the robot to the common parent to be used for the stereo camera INSTANCE
+                                    tf_sensor1 = self._get_relative_trans_quat(source_prim=common_parent_prim, target_prim=s1_prim) # This is the relative transform from the common parent to the left camera
+                                    tf_sensor2 = self._get_relative_trans_quat(source_prim=common_parent_prim, target_prim=s2_prim) # This is the relative transform from the common parent to the right camera
 
                                     stereo_cam = StereoCamera3D(
                                         name=_remove_trailing_digits(common_parent_name),
-                                        sensor1=sensor_instance.sensor if this_cam_role == "left" else camera.sensor,
-                                        sensor2=sensor_instance.sensor if this_cam_role == "right" else camera.sensor,
-                                        tf_sensor1=sensor_instance.tf if this_cam_role == "left" else camera.tf,
-                                        tf_sensor2=sensor_instance.tf if this_cam_role == "right" else camera.tf,
+                                        sensor1=camera.sensor, # Set both to the same camera instance because the only difference is the transform
+                                        sensor2=camera.sensor,
+                                        tf_sensor1=tf_sensor1, # This is the transform from the common parent to the left camera
+                                        tf_sensor2=tf_sensor2, # This is the transform from the common parent to the right camera
                                         cost=sensor_instance.sensor.cost + camera.sensor.cost,
-                                        body=prim
+                                        body=None#_find_sensor_body(prim)
                                     )
-                                    stereo_instance = Sensor3D_Instance(stereo_cam, path=common_parent_path, 
-                                                                    name=_remove_trailing_digits(common_parent_name), 
-                                                                    tf=camera.tf)
+                                    # Find out if any of the cameras that have been found are equivalent to this one. If so use that one instead
+                                    if stereo_cam in self.sensor_options:
+                                        stereo_cam = next((s for s in self.sensor_options if s == stereo_cam), stereo_cam)
+                                    else:
+                                        # Add the stereo camera to the list of unique sensor options
+                                        self.sensor_options.add(stereo_cam)
+                                        # Remove the mono cameras from the list of unique sensors options
+                                    self.sensor_options.remove(sensor_instance.sensor)
+                                    self.sensor_options.remove(camera.sensor)
+                                    stereo_instance = Sensor3D_Instance(stereo_cam, 
+                                                                        path=common_parent_path, 
+                                                                        name=_remove_trailing_digits(common_parent_name), 
+                                                                        tf=tf_parent,
+                                                                        usd_context=self._usd_context)
                                     # Move the ray casters from the MonoCamera3D instance to the StereoCamera3D instance
                                     stereo_instance.ray_casters = sensor_instance.ray_casters + camera.ray_casters
                                     bot.sensors[i] = stereo_instance  # Replace the mono camera with stereo
@@ -873,15 +1248,18 @@ class GO4RExtension(omni.ext.IExt):
             for child in prim.GetChildren():
                 _assign_sensors_to_robot(child, bot, processed_camera_paths)
 
+        # TODO Find and add the sensor constraint mesh bounds as bounds
+
         self._log_message("Refreshing robots & sensors list...")
 
         stage = get_current_stage()
 
-        self.robots = []
+        self.robots = []            # Clear the list of robots
+        self.sensor_options = set() # Clear the set of sensor options
         
         total_sensors = dict.fromkeys(sensor_types, 0)
         for bot_prim in self.selected_prims:
-            bot = Bot3D(bot_prim.GetName(), path=bot_prim.GetPath())
+            bot = Bot3D(bot_prim.GetName(), path=bot_prim.GetPath(), usd_context=self._usd_context)
             self.robots.append(bot)
             # Clear existing sensors before searching again
             bot.sensors = []
@@ -895,6 +1273,17 @@ class GO4RExtension(omni.ext.IExt):
             # Search for sensors in this robot (with a new empty processed_camera_paths set)
             _assign_sensors_to_robot(robot_prim, bot)
             
+            # Search for sensor constraints in this robot
+            sensor_constraints = _find_sensor_constraints(robot_prim)
+            bot.sensor_pose_constraint = sensor_constraints # Would print a warning if not found
+
+            # Search for occluding robot bodies in this robot
+            robot_body_aabbs = _find_robot_body_aabbs(robot_prim)
+            bot.body = robot_body_aabbs # Would print a warning if not found
+
+            for s in bot.get_unique_sensor_options():
+                self.sensor_options.add(s)
+            
             found_sensors = {}
             for type in sensor_types:
                 found_sensors[type.__name__] = bot.get_sensors_by_type(type)
@@ -904,8 +1293,13 @@ class GO4RExtension(omni.ext.IExt):
         self._log_message(f"Total sensors found: " + ', '.join([f"{total_sensors[type]} {type.__name__}(s)" for type in sensor_types]))
         
         # Update the UI
-        self._update_sensor_list_ui()
+        self._update_robots_ui()
         self._update_voxel_groups_ui()
+        self._update_sensor_options_ui()
+        if self.robots[0]:
+            self._update_dash_app(robot=self.robots[0])
+
+        return self.robots
 
 
     def _display_sensor_instance_properties(self, sensor_instance:Sensor3D_Instance):
@@ -914,11 +1308,43 @@ class GO4RExtension(omni.ext.IExt):
                 with ui.CollapsableFrame(attr, height=0, collapsed=True):
                     with ui.VStack(spacing=2):
                         self._display_sensor_instance_properties(value)
-            elif "tf" in attr:
-                with ui.CollapsableFrame(attr, height=0, collapsed=True):
-                    with ui.VStack(spacing=2):
-                        ui.Label(f"position: {value[0]}")
-                        ui.Label(f"rotation: {value[1]}")
+            elif "quat_rotation" in attr:
+                with ui.HStack(spacing=5):
+                    ui.Label("ROT:", width=25)
+                    ui.Label("qw:", width=25)
+                    qw_field = ui.FloatField(width=50)
+                    qw_field.model.set_value(value[0]) 
+                    ui.Label("qx:", width=25)
+                    qx_field = ui.FloatField(width=50)
+                    qx_field.model.set_value(value[1])
+                    ui.Label("qy:", width=25)
+                    qy_field = ui.FloatField(width=50)
+                    qy_field.model.set_value(value[2])
+                    ui.Label("qz:", width=25)
+                    qz_field = ui.FloatField(width=50)
+                    qz_field.model.set_value(value[3])
+
+                    def set_quat_fn():
+                        # Retrieve values from the FloatFields
+                        qw = qw_field.model.get_value_as_float()
+                        qx = qx_field.model.get_value_as_float()
+                        qy = qy_field.model.get_value_as_float()
+                        qz = qz_field.model.get_value_as_float()
+                        # Set the quaternion values in the sensor instance
+                        sensor_instance.set_omniverse_quaterion((qw, qx, qy, qz))
+                        self._log_message(f"Set {sensor_instance.name} quaternion to {(qw, qx, qy, qz)}")
+
+                    ui.Button("SET QUAT", clicked_fn=set_quat_fn, width=0)
+            elif "translation" in attr:
+                with ui.HStack(spacing=5):
+                    ui.Label("POS:", width=25)
+                    ui.Label("x:", width=25)
+                    ui.Label(f"{value[0]}", width=50)
+                    ui.Label("y:", width=25)
+                    ui.Label(f"{value[1]}", width=50)
+                    ui.Label("z:", width=25)
+                    ui.Label(f"{value[2]}", width=50)
+
             elif "ap_constants" in attr:
                 continue # Skip average precision attributes
             elif "ray_casters" in attr:
@@ -930,7 +1356,7 @@ class GO4RExtension(omni.ext.IExt):
                 ui.Label(f"{attr}: {value}")
 
     
-    def _update_sensor_list_ui(self):
+    def _update_robots_ui(self):
         """Update the sensor list UI with the detected sensors for all robots"""
         # Clear the current sensor list
         self.sensor_list.clear()
@@ -963,7 +1389,7 @@ class GO4RExtension(omni.ext.IExt):
                                                                         'b': default_sensor_aps[sensor_instance.sensor.__class__.__name__]["b"]}
                                                         sensor_instance.sensor.ap_constants = ap_constants
                                                         
-                                                    with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#FFFFFF")}, collapsed=True):
+                                                    with ui.CollapsableFrame(f"{idx+1}. {sensor_instance.name}", height=0, style={"border_color": ui.color("#c94a00")}, collapsed=True):
                                                         with ui.VStack(spacing=2):
                                                             # Add average precision input directly at the top level
                                                             with ui.HStack(spacing=5):
@@ -993,11 +1419,252 @@ class GO4RExtension(omni.ext.IExt):
                                                             with ui.CollapsableFrame("Properties", height=0, collapsed=True):
                                                                 with ui.VStack(spacing=2):
                                                                     self._display_sensor_instance_properties(sensor_instance)
+                            
+                                # Add the other robot attributes
+                                with ui.CollapsableFrame("Other Robot Attributes", height=0, collapsed=True):
+                                    with ui.VStack(spacing=2):
+                                        # Add the robot's other attributes here
+                                        for attr, value in robot.__dict__.items():
+                                            if "sensors" in attr:
+                                                continue
+                                            if "body" in attr:
+                                                for i, body in enumerate(value):
+                                                    with ui.VStack(spacing=2):
+                                                        ui.Label(f"Body {i+1}: {body}")
+                                            else:
+                                                ui.Label(f"{attr}: {value}")
+                                            
+
+
+    def _update_optimization_problem(self):
+        try:
+            self.optimization_problem = SensorPkgOptimization(
+                bot=self.robots[0],
+                max_n_sensors=self.optimization_max_sensors,
+                sensor_options=self.sensor_options,
+                perception_space=self.perception_space,
+            )
+            self._update_dash_app(problem=self.optimization_problem)
+
+        except Exception as e:
+            self._log_message(f"Error creating optimization problem: {e}")
+            self.optimization_problem = None
+            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+            raise e
+            
+        if self.optimization_problem is not None:
+            self.enable_ui_element(self.optimize_btn, text_color=ui.color("#00FF00"))
+        else:
+            self.disable_ui_element(self.optimize_btn, text_color=ui.color("#FF0000"))
+
+    def _update_sensor_options_ui(self):
+        """Udpate the sensor options UI with the detected unique sensors for all the robots analyzed
+        For each sensor, list its name, type, FOV (HxV), Resolution (HxV), AP constants, and Cost
+        AP constants a and b and cost are adjustable and link back to the Robot sensor instance"""
+
+        # Clear the current sensor options list
+        self.sensor_options_list.clear()
+        
+        with self.sensor_options_list:
+            ####################### ROBOT OPTIONS #######################
+            with ui.VStack(spacing=5):
+                if not self.robots:
+                    ui.Label("No robots selected")
+                else:
+                    with ui.CollapsableFrame(
+                            f"Robot/Perception System Options",
+                            height=0,
+                            style={"border_width": 2, "border_color": ui.color("#0059ff")},
+                            collapsed=False
+                        ):
+                        header = {"Robot Name": 100,
+                                  "Max Sensors": 75,
+                                  "Sensor Constraint Mesh Path": 100}
+                        # Just use the first robot #TODO: Make this work for multiple robots
+                        robot = self.robots[0]
+                        with ui.HStack(spacing=5):
+                            for key, width in header.items():
+                            # Create a header row
+                                with ui.VStack(spacing=5):
+                                    ui.Label(key, width=width, style={"color": ui.color("#0059ff")})
+                                    match key:
+                                        case "Robot Name":
+                                            ui.Label(robot.name, width=width)
+                                        case "Max Sensors":
+                                            self.max_sensors_field = ui.IntField(width=50)
+                                            self.max_sensors_field.model.set_value(self.optimization_max_sensors)
+
+                                            def on_max_sensors_val_changed(new_value):
+                                                max_sensors = max(0, new_value.get_value_as_int())
+                                                self.optimization_max_sensors = max_sensors
+                                                self._log_message(f"Set max sensors to {max_sensors}")
+                                                self._update_optimization_problem()
+                                            
+                                            self.max_sensors_field.model.add_value_changed_fn(on_max_sensors_val_changed)
+                                        case "Sensor Constraint Mesh Path":
+                                            ui.Label("!!TODO!!", width=width)
+
+
+            ######################## SENSOR OPTIONS ########################
+                    with ui.CollapsableFrame(
+                            f"Sensor Options", 
+                            height=0, 
+                            style={"border_width": 2, "border_color": ui.color("#c94a00")}, 
+                            collapsed=False
+                        ):
+                        header = {"Sensor Name": 120, 
+                                  "Type": 120, 
+                                  "FOV (HxV)": 30, 
+                                  "Res (HxV)": 30, 
+                                  "AP Constants": 150, 
+                                  "Cost": 50}
+                        # For each sensor, list its name, type, FOV (HxV), Resolution (HxV), AP constants, and Cost
+                        with ui.HStack(spacing=5):
+                            for key, width in header.items():
+                                with ui.VStack(spacing=5):
+                                    # Create a header row
+                                    ui.Label(key, width=width, style={"color": ui.color("#c94a00")})
+                                    for sensor in self.sensor_options:
+                                        match key:
+                                            case "Sensor Name":
+                                                ui.Label(sensor.name, width=width)
+                                            case "Type":
+                                                ui.Label(sensor.__class__.__name__, width=width)
+                                            case "FOV (HxV)":
+                                                ui.Label(f"{sensor.h_fov:.0f}x{sensor.v_fov:.0f}", width=width)
+                                            case "Res (HxV)":
+                                                ui.Label(f"{sensor.h_fov/sensor.h_res:.0f}x{sensor.v_fov/sensor.v_res:.0f}", width=width)
+                                            case "Cost":
+                                                cost_field = ui.FloatField(width=width)
+                                                cost_field.model.set_value(sensor.cost)
+                                                
+                                                def on_cost_val_changed(new_value, sensor=sensor):
+                                                    cost = new_value.get_value_as_float()
+                                                    sensor.cost = cost
+                                                
+                                                cost_field.model.add_value_changed_fn(on_cost_val_changed)
+                                            case "AP Constants":
+                                                # Set default average precision if not set
+                                                if not hasattr(sensor, 'ap_constants') or sensor.ap_constants is None:
+                                                    ap_constants = {'a': default_sensor_aps[sensor.__class__.__name__]["a"],
+                                                                    'b': default_sensor_aps[sensor.__class__.__name__]["b"]}
+                                                    sensor.ap_constants = ap_constants
+                                                with ui.HStack(spacing=5):
+                                                    ui.Label("a:", width=0)
+                                                    a_field = ui.FloatField(width=width/2-30)
+                                                    a_field.model.set_value(sensor.ap_constants['a'])
+                                                    
+                                                    def on_a_val_changed(new_value, sensor=sensor):
+                                                        a = new_value.get_value_as_float()
+                                                        sensor.ap_constants['a'] = a
+                                                        self._log_message(f"Set {sensor.name} average precision to {a:.2f}")
+                                                        self._update_optimization_problem()
+                                                    
+                                                    a_field.model.add_value_changed_fn(on_a_val_changed)
+
+                                                    ui.Label("   b:", width=0)
+                                                    b_field = ui.FloatField(width=width/2-30)
+                                                    b_field.model.set_value(sensor.ap_constants['b'])
+
+                                                    def on_b_val_changed(new_value, sensor=sensor):
+                                                        b = new_value.get_value_as_float()
+                                                        sensor.ap_constants['b'] = b
+                                                        self._log_message(f"Set {sensor.name} average precision to {b:.2f}")
+                                                        self._update_optimization_problem()
+                                            
+                                                    b_field.model.add_value_changed_fn(on_b_val_changed)
+
+
+            ########################## MOO Options #########################
+                    with ui.CollapsableFrame(
+                            f"Multi-Objective Optimization Algorithm & Problem Options", 
+                            height=0, 
+                            style={"border_width": 2, "border_color": ui.color("#9900ff")}, 
+                            collapsed=False
+                        ):
+                        header = {"Generations": 50, 
+                                  "Population Size": 50,
+                                  "Offspring": 50}
+                        
+                        def _update_total_designs():
+                                self.total_possible_designs = self.optimization_population_size + self.optimization_offspring * self.optimization_generations
+                                self.total_designs_field.text = f"(Generates ~{self.total_possible_designs} total designs)"
+
+                        with ui.VStack(spacing=5):
+                            for key, width in header.items():
+                                with ui.HStack(spacing=5):
+                                    # Create a header row
+                                    ui.Label(key, width=100)
+                                    match key:
+                                        case "Generations":
+                                            self.generations_field = ui.IntField(width=width)
+                                            self.generations_field.model.set_value(self.optimization_generations)
+
+                                            def on_generations_val_changed(new_value):
+                                                generations = max(0, new_value.get_value_as_int())
+                                                self.optimization_generations = generations
+                                                _update_total_designs()
+                                                self._update_optimization_problem()
+                                            
+                                            self.generations_field.model.add_value_changed_fn(on_generations_val_changed)
+
+                                        case "Offspring":
+                                            self.offspring_field = ui.IntField(width=width)
+                                            self.offspring_field.model.set_value(self.optimization_offspring)
+
+                                            def on_offspring_val_changed(new_value):
+                                                offspring = max(0, new_value.get_value_as_int())
+                                                self.optimization_offspring = offspring
+                                                _update_total_designs()
+                                                self._update_optimization_problem()
+
+                                            self.offspring_field.model.add_value_changed_fn(on_offspring_val_changed)
+
+                                        case "Population Size":
+                                            self.pop_size_field = ui.IntField(width=width)
+                                            self.pop_size_field.model.set_value(self.optimization_population_size)
+
+                                            def on_pop_size_val_changed(new_value):
+                                                pop_size = max(0, new_value.get_value_as_int())
+                                                self.optimization_population_size = pop_size
+                                                _update_total_designs()
+                                                self._update_optimization_problem()
+
+                                            self.pop_size_field.model.add_value_changed_fn(on_pop_size_val_changed)
+
+                            self.total_designs_field = ui.Label(f"(Generates ~{self.total_possible_designs} total designs)")
+                            _update_total_designs()
+
+        self._update_optimization_problem()
+                                                                
+
+    def _batch_calc_perception_entropies(self):
+        """Batch calculate perception entropies for all robots and sensors"""
+        self._log_message("Batch calculating perception entropies...")
+        start_time = time.time()
+        
+        self.percep_entr_results_data = {}
+        for robot in self.robots:
+            # Call the perception entropy calculation for each robot
+            self.percep_entr_results_data[robot.name] = robot.calculate_perception_entropy(self.perception_space, verbose=True)
+
+        # Update the UI with the results
+        self._update_percep_entr_results_ui()
+        
+        # Re-enable the analyze button
+        self.enable_ui_element(self.analyze_btn, text_color=ui.color("#00FF00"))
+        torch.cuda.empty_cache() # Clear the GPU memory
+
+        self._log_message(f"Batch calculation complete. Took {time.time()-start_time:.2f} seconds")
+
 
     def _calc_perception_entropies(self, disable_raycasters=True):
         """Main function to analyze all sensors on all the robots.
         
         Must have a perception mesh voxelized, and at least one robot analyzed"""
+        self._log_message("Disabling gravity...")
+        self._zero_gravity()
+
         self._log_message("Starting perception entropy analysis...")
         self.analysis_progress_bar.model.set_value(0.0) # Reset progress bar
 
@@ -1007,18 +1674,19 @@ class GO4RExtension(omni.ext.IExt):
             self.analysis_progress_bar.model.set_value(0.0)
             return
         
+        vg_names = list(self.perception_space.get_group_names())
         # Check if we have voxel groups, throw an error if not
-        if not self.weighted_voxels:
+        if len(vg_names) == 0:
             self._log_message("Error: No voxel groups found. Please create a perception mesh first.")
             self.analysis_progress_bar.model.set_value(0.0)
             return
         
         # Check if there are ungrouped voxels, warn the user
-        if "UNGROUPED" in self.weighted_voxels:
+        if "UNGROUPED" in vg_names:
             self._log_message("Warning: There are ungrouped voxels that will not be considered!")
 
         percep_entr_results_data = {}
-        percep_entr_results_data.update({robot.name: {"total": 0.0} for robot in self.robots})
+        percep_entr_results_data.update({robot.name: None for robot in self.robots})
 
         # Calculate total number of sensors for progress tracking
         total_sensors_to_process = sum(len(robot.sensors) for robot in self.robots)
@@ -1044,7 +1712,7 @@ class GO4RExtension(omni.ext.IExt):
                             omni.kit.commands.execute('ToggleActivePrims',
                                     prim_paths=[prim_utils.get_prim_path(rc) for rc in sensor.ray_casters if rc], # Check if rc is valid
                                     active=False,
-                                    stage_or_context=self._usd_context)
+                                    stage_or_context=self.stage)
                             self._log_message(f"Disabled raycaster(s) for sensor {sensor.name}")
                         except Exception as e:
                              self._log_message(f"Warning: Could not disable raycaster for {sensor.name}: {e}")
@@ -1096,7 +1764,7 @@ class GO4RExtension(omni.ext.IExt):
                 vg_m_early_fusion_per_type.update({name: self._apply_early_fusion(measurements_for_sensor)})
         
         sum_normalized_voxel_entropy = 0.0
-        for voxel_group, voxels in self.weighted_voxels.items():
+        for voxel_group in list(self.perception_space.get_voxel_group_names()): # TODO Parallelize this as much as possible
             if voxel_group == "UNGROUPED":
                 self._log_message(f"Warning: Skipping {voxel_group} voxels")
                 continue
@@ -1161,39 +1829,48 @@ class GO4RExtension(omni.ext.IExt):
         """Update the results UI with entropy results for each robot"""
         # Clear existing results
         self.results_list.clear()
-        
-        with self.results_list:
-            with ui.VStack(spacing=5):
-                if not self.robots:
-                    ui.Label("No robots selected")
-                elif not self.percep_entr_results_data:
-                    ui.Label("Run analysis to see results")
-                else:
-                    # For each robot, create a collapsible frame with its results
-                    for robot_name, robot_results in self.percep_entr_results_data.items():
-                        
-                        with ui.CollapsableFrame(
-                            f"Robot: {robot_name}", 
-                            height=0,
-                            style={"border_width": 2, "border_color": ui.color("#0059ff")},
-                            collapsed=False
-                        ):
-                            with ui.VStack(spacing=5):
-                                
-                                for result_type, result_value in robot_results.items():
-                                    if isinstance(result_value, dict):
-                                        with ui.CollapsableFrame(
-                                            result_type, 
-                                            height=0,
-                                            style={"border_color": ui.color("#00c3ff")},
-                                            collapsed=False
-                                        ):
-                                            with ui.VStack(spacing=2):
-                                                for key, entropy in result_value.items():
-                                                    ui.Label(f"{key}: {entropy:.4f}")
-                                    else:
-                                        ui.Label(f"{result_type}: {result_value:.4f}")
-                                        
+        for robot in self.robots:
+            with self.results_list:
+                with ui.VStack(spacing=5):
+                    if not self.robots:
+                        ui.Label("No robots selected")
+                    elif not self.percep_entr_results_data:
+                        ui.Label("Run analysis to see results")
+                    else:
+                        # For each robot, create a collapsible frame with its results
+                        for robot_name, robot_results in self.percep_entr_results_data.items():
+                            with ui.CollapsableFrame(
+                                    f"Robot: {robot_name}", 
+                                    height=0,
+                                    style={"border_width": 2, "color": ui.color("#0059ff"), "border_color": ui.color("#0059ff")},
+                                    collapsed=False
+                                ):
+                                # Check the type of the results, dict or float
+                                if isinstance(robot_results, float):
+                                    # If it's a float, just list the total entropy
+                                    ui.Label(f"Total Entropy: {robot_results:.4f}")
+                                elif isinstance(robot_results, tuple):
+                                    with ui.VStack(spacing=5):
+                                        entropy, percent_coverage = robot_results
+                                        ui.Label(f"Total Entropy: {entropy:.4f}")
+                                        ui.Label(f"Total Coverage: {percent_coverage*100:.1f}%")
+                                elif isinstance(robot_results, dict):
+                                    # If it's a dict, iterate through the keys and values
+                                    with ui.VStack(spacing=5):
+                                        for result_type, result_value in robot_results.items():
+                                            if isinstance(result_value, dict):
+                                                with ui.CollapsableFrame(
+                                                    result_type, 
+                                                    height=0,
+                                                    style={"color": ui.color("#00c3ff"), "border_color": ui.color("#00c3ff")},
+                                                    collapsed=False
+                                                ):
+                                                    with ui.VStack(spacing=2):
+                                                        for key, entropy in result_value.items():
+                                                            ui.Label(f"{key}: {entropy:.4f}")
+                                            else:
+                                                ui.Label(f"{result_type}: {result_value:.4f}")
+
 
     def _get_prim_attribute(self, prim, attr_name, default_value=None):
         """Get the value of a prim attribute or return a default value"""
@@ -1212,6 +1889,95 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Error getting attribute {attr_name}: {str(e)}")
         
         return default_value
+    
+    def _get_relative_trans_quat(self, source_prim: Usd.Prim, target_prim: Usd.Prim) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+        """Get the relative translation and quaternion between two prims
+        Args:
+            source_prim (Usd.Prim): The source prim
+            target_prim (Usd.Prim): The target prim
+        Returns:
+            tuple: A tuple containing the translation (x,y,x) and quaternion (w,x,y,z)
+        """
+        import isaacsim.core.utils.xforms as xforms_utils
+        
+
+        # Verify that the source and target prims are both Xforms
+        if not (source_prim.IsA(UsdGeom.Xformable) and target_prim.IsA(UsdGeom.Xformable)):
+            self._log_message(f"Error: One or both prims are not Xforms. Source: {source_prim.GetPath()}, Target: {target_prim.GetPath()}")
+            return None, None
+
+        # Xform poses are stored as (translation, rotation) where translation is (x,y,z) and rotation is (qw,qx,qy,qz)
+        # A local pose is a transformation relative to the parent, while a world pose is a transformation relative to the stage origin
+
+        # xform_source_local_pose = xforms_utils.get_local_pose(prim_path=prim_utils.get_prim_path(source_prim))
+        xform_source_world_pose = xforms_utils.get_world_pose(prim_path=prim_utils.get_prim_path(source_prim))
+        
+        # xform_target_local_pose = xforms_utils.get_local_pose(prim_path=prim_utils.get_prim_path(target_prim))
+        xform_target_world_pose = xforms_utils.get_world_pose(prim_path=prim_utils.get_prim_path(target_prim))
+
+        # Get the transformation matrices for the source and target prims
+        source_mat = tf_utils.tf_matrix_from_pose(
+            translation=xform_source_world_pose[0],
+            orientation=xform_source_world_pose[1]
+        )
+
+        target_mat = tf_utils.tf_matrix_from_pose(
+            translation=xform_target_world_pose[0],
+            orientation=xform_target_world_pose[1]
+        )
+
+        # Compute the relative transforms using the matrices
+        rel_mat = np.linalg.inv(source_mat) @ target_mat
+
+        # Extract translation (x,y,z) and quaternion (qw,qx,qy,qz)
+        translation, rotation = tf_utils.pose_from_tf_matrix(rel_mat)
+
+        return translation, rotation
+    
+    def _reorient_camera_to_sensor_quat(self, q_orig: np.ndarray) -> np.ndarray:
+        """
+        Given original camera quaternion q_orig ([x,y,z,w], 
+        local forward = -Z, up = +Y), return new quaternion 
+        with forward = +X, up = +Z.
+        """
+        def quat_between(v0: np.ndarray, v1: np.ndarray) -> np.ndarray:
+            """
+            Return unit quaternion (x, y, z, w) rotating v0 onto v1.
+            Uses the shortest-arc formula: axis = cross(v0,v1), w = |v0||v1| + dot(v0,v1).
+            """
+            # ensure unit inputs
+            a = v0 / np.linalg.norm(v0)
+            b = v1 / np.linalg.norm(v1)
+            axis = np.cross(a, b)
+            w = np.linalg.norm(a) * np.linalg.norm(b) + np.dot(a, b)
+            q = np.concatenate([axis, [w]])
+            return q / np.linalg.norm(q)
+        
+        if not isinstance(q_orig, np.ndarray):
+            q_orig = np.array(q_orig)
+
+        print(f"Original quaternion: {q_orig}")
+        
+        # Map original forward → new forward
+        q1 = quat_between(np.array([0, 0, -1]), np.array([1, 0, 0]))
+        # Compute where original up lands, then align it w/ new up
+        r1 = R.from_quat(q1)              # alignment step 1
+        up_rot = r1.apply(np.array([0, 1, 0]))
+        q2 = quat_between(up_rot, np.array([0, 0, 1]))
+        # Combined alignment rotation
+        r_align = R.from_quat(q2) * r1    # apply q1 then q2
+        # Compose with original orientation
+        r_orig = R.from_quat(q_orig)      
+        r_new = r_orig * r_align          # apply alignment in local frame
+
+        r_quat = r_new.as_quat()            # [x, y, z, w]
+        # Convert to [x, y, z, w] format
+        r_quat = np.array([r_quat[1], r_quat[2], r_quat[0], r_quat[3]])  # [x, y, z, w]
+
+        print(f"New quaternion:      {r_quat}")
+
+        return r_quat
+
     
     def _get_world_transform(self, prim) -> Tuple[Gf.Vec3d, Gf.Rotation]:
         """Get the world transform (position and rotation) of a prim"""
@@ -1316,7 +2082,7 @@ class GO4RExtension(omni.ext.IExt):
             self._log_message(f"Created {len(voxels)} voxel meshes inside {mesh_path}")
 
             omni.kit.commands.execute('ToggleActivePrims',
-                stage_or_context=omni.usd.get_context().get_stage(),
+                stage_or_context=self.stage,
                 prim_paths=[mesh_path],
                 active=False)
 
@@ -1409,40 +2175,39 @@ class GO4RExtension(omni.ext.IExt):
         stage = get_current_stage()
 
         self.voxelize_progress_bar.model.set_value(0.5)
+
+        min_x = - voxel_size / 2
+        min_y = - voxel_size / 2
+        min_z = - voxel_size / 2
+        max_x = min_x + voxel_size
+        max_y = min_y + voxel_size
+        max_z = min_z + voxel_size
+        
+        # Define voxel as a cube
+        voxel_points = [
+            Gf.Vec3f(min_x, min_y, min_z),
+            Gf.Vec3f(max_x, min_y, min_z),
+            Gf.Vec3f(max_x, max_y, min_z),
+            Gf.Vec3f(min_x, max_y, min_z),
+            Gf.Vec3f(min_x, min_y, max_z),
+            Gf.Vec3f(max_x, min_y, max_z),
+            Gf.Vec3f(max_x, max_y, max_z),
+            Gf.Vec3f(min_x, max_y, max_z)
+        ]
+
+        # Define the faces (6 faces, each with 4 vertices)
+        face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
+        face_vertex_indices = Vt.IntArray([
+            0, 1, 2, 3,  # bottom
+            4, 5, 6, 7,  # top
+            0, 1, 5, 4,  # front
+            1, 2, 6, 5,  # right
+            2, 3, 7, 6,  # back
+            3, 0, 4, 7   # left
+        ])
         
         # Create a mesh for each occupied voxel
         for (i,j,k), p in voxel_centers:
-            # world_p = Gf.Vec3d(local_to_world.Transform(Gf.Vec3d(p))):
-            # Calculate voxel corners
-            min_x = p[0] - voxel_size / 2
-            min_y = p[1] - voxel_size / 2
-            min_z = p[2] - voxel_size / 2
-            max_x = min_x + voxel_size
-            max_y = min_y + voxel_size
-            max_z = min_z + voxel_size
-            
-            # Define voxel as a cube
-            voxel_points = [
-                Gf.Vec3f(min_x, min_y, min_z),
-                Gf.Vec3f(max_x, min_y, min_z),
-                Gf.Vec3f(max_x, max_y, min_z),
-                Gf.Vec3f(min_x, max_y, min_z),
-                Gf.Vec3f(min_x, min_y, max_z),
-                Gf.Vec3f(max_x, min_y, max_z),
-                Gf.Vec3f(max_x, max_y, max_z),
-                Gf.Vec3f(min_x, max_y, max_z)
-            ]
-            
-            # Define the faces (6 faces, each with 4 vertices)
-            face_vertex_counts = Vt.IntArray([4, 4, 4, 4, 4, 4])
-            face_vertex_indices = Vt.IntArray([
-                0, 1, 2, 3,  # bottom
-                4, 5, 6, 7,  # top
-                0, 1, 5, 4,  # front
-                1, 2, 6, 5,  # right
-                2, 3, 7, 6,  # back
-                3, 0, 4, 7   # left
-            ])
             
             # Create voxel mesh using USD API directly
             voxel_path = f"{parent_path}/{mesh_name}_voxel_{i}_{j}_{k}"
@@ -1450,6 +2215,10 @@ class GO4RExtension(omni.ext.IExt):
             mesh_def.CreatePointsAttr().Set(voxel_points)
             mesh_def.CreateFaceVertexCountsAttr().Set(face_vertex_counts)
             mesh_def.CreateFaceVertexIndicesAttr().Set(face_vertex_indices)
+            
+            # Set the voxel's transform at its center
+            xform = UsdGeom.Xformable(mesh_def)
+            xform.AddTranslateOp().Set(Gf.Vec3d(p[0], p[1], p[2]))
             
             # Define or get the transparent material
             mat_path = Sdf.Path(f"/World/GO4R_PerceptionVolume/Looks/{mesh_name}_material")
@@ -1862,124 +2631,143 @@ class GO4RExtension(omni.ext.IExt):
     async def _get_measurements_raycast(self, sensor_instance:Sensor3D_Instance, disable_raycaster=False) -> dict[str,Tuple[np.ndarray[int],float]]:
         """Get the number of points from a raycaster that pass through each of the voxels in the given list
         The voxels and voxel groups will be stored in the same order as the weighted_voxels dictionary."""
-        # Set the time for calculating how long it takes to get the measurements
         start_time = time.time()
-        # Store the measurements in a dictionary mimicking the structure of the weighted_voxels
-        # {0: ([...], 1.0)} = Group 0, with [...] voxels and weight 1.0
         measurements = {}
         for gp_name, (voxels, weight) in self.weighted_voxels.items():
-            # Ensure UNGROUPED voxels are skipped if present
             if gp_name == "UNGROUPED":
                 continue
-            measurements.update({gp_name: (np.full(len(voxels),0,int), weight)})
+            measurements[gp_name] = (np.zeros(len(voxels), dtype=int), weight)
 
-        # Check if the sensor instance has ray casters
-        if not hasattr(sensor_instance, 'ray_casters') or not sensor_instance.ray_casters:
-             self._log_message(f"Warning: Sensor {sensor_instance.name} has no ray casters. Skipping measurements.")
-             return measurements # Return empty measurements
-
-        # For each ray caster, get the number of points that hit each voxel
-        # For stereo cameras, we simply add the number of points from each camera (apply early fusion)
-
-        for i, ray_caster in enumerate(sensor_instance.ray_casters, start=1):
-            if not ray_caster: # Skip if ray_caster prim is invalid/deleted
-                self._log_message(f"Warning: Invalid ray_caster found for sensor {sensor_instance.name}. Skipping.")
+        # Build a mapping from voxel center to index for fast lookup
+        voxel_centers = {}
+        voxel_idx_map = {}
+        for gp_name, (voxels, weight) in self.weighted_voxels.items():
+            if gp_name == "UNGROUPED":
                 continue
+            for idx, voxel in enumerate(voxels):
+                center = voxel.GetAttribute("xformOp:translate").Get()
+                center_tuple = tuple(center)
+                voxel_centers[center_tuple] = (gp_name, idx)
+                voxel_idx_map[center_tuple] = (gp_name, idx)
 
-            # Enable the ray caster in case it is disabled
-            try:
-                omni.kit.commands.execute('ToggleActivePrims',
-                                        prim_paths=[prim_utils.get_prim_path(ray_caster)],
-                                        active=True,
-                                        stage_or_context=self._usd_context)
-                await self._ensure_physics_updated(pause=False, steps=1)
-            except Exception as e:
-                self._log_message(f"Warning: Failed to enable raycaster {prim_utils.get_prim_path(ray_caster)}: {e}. Skipping.")
-                continue
+        # Compute grid bounds and voxel size
+        all_centers = np.array(list(voxel_centers.keys()))
+        grid_min = np.min(all_centers, axis=0)
+        grid_max = np.max(all_centers, axis=0)
+        # Assume uniform voxel size from your settings
+        voxel_size = self.voxel_size if isinstance(self.voxel_size, float) else float(self.voxel_size[0])
 
+        # For each ray caster (sensor), get rays and process
+        ray_origins, ray_directions = sensor_instance.get_rays()
+        # Get ray origins and directions for this sensor
 
-            self._log_message(f"Generating measurements for {sensor_instance.name} ray caster {i} of {len(sensor_instance.ray_casters)}")
+        for ray_origin, ray_direction in zip(ray_origins, ray_directions):
+            # 1. Ray-mesh intersection for occlusion
+            hit_prim, hit_distance = self._single_ray_cast_to_mesh(
+                origin=carb.Float3(float(ray_origin[0]), float(ray_origin[1]), float(ray_origin[2])), 
+                direction=carb.Float3(float(ray_direction[0]), float(ray_direction[1]), float(ray_direction[2])), 
+                max_dist=sensor_instance.sensor.max_range, 
+                prim_path=None
+            )
 
-            # Enable collisions for all the voxels, disable collisions on everything else.
-            all_voxel_paths = []
-            for group_name, voxel_group in self.weighted_voxels.items():
-                 # Ensure UNGROUPED voxels are skipped if present
-                if group_name == "UNGROUPED":
-                    continue
-                all_voxel_paths.extend([str(v.GetPath()) for v in voxel_group[0]])
-
-            if not all_voxel_paths:
-                self._log_message("Warning: No valid voxels found to target for raycasting.")
-                continue # Skip this ray_caster if no voxels
-
-            self.target_prims_collision(all_voxel_paths, disable_others=True)
-
-            # Convert to a set for efficient removal later
-            remaining_voxel_paths_set = set(all_voxel_paths)
-
-            # Now, while there are still enabled voxels, cast, add the points to the measurements, then un-target any voxels that were hit
-            iterations = 0
-            print(f"Iteration\tHit paths\tVoxels hit\tRemaining")
-            print("---------\t---------\t----------\t---------")
-            while len(remaining_voxel_paths_set) > 0:
-                # Try reducing steps, e.g., to 1 or 2, if 3 is too slow/unnecessary
-                await self._ensure_physics_updated(pause=False, steps=1) # Reduced steps
-                rc_pathstr = str(prim_utils.get_prim_path(ray_caster))
-                hit_paths_raw = self.lidarInterface.get_prim_data(rc_pathstr)
-                # Remove empty hits and count occurrences efficiently
-                hit_counts = Counter(path for path in hit_paths_raw if path != "")
-
-                # If there are no hits, break out of the loop
-                if not hit_counts:
-                    break
-
-                # Get the set of unique prims that were hit in this iteration
-                unique_hit_paths_set = set(hit_counts.keys())
-
-                # Filter this set to only include paths that are still in our remaining voxels
-                # This prevents trying to process/disable things that aren't voxels or were already disabled
-                actual_voxel_hits_set = unique_hit_paths_set.intersection(remaining_voxel_paths_set)
-
-                if not actual_voxel_hits_set:
-                     self._log_message(f"  Iteration {iterations}: Hits detected, but not on remaining target voxels. Breaking.")
-                     break # No relevant hits
-
-                # Count the number of hits on each voxel using the pre-calculated counts
-                total_hits_this_iter = 0
-                for voxel_group_name, (voxels, weight) in self.weighted_voxels.items(): # Use measurements dict which excludes UNGROUPED
-                    for idx, voxel in enumerate(voxels):
-                        voxel_path = str(voxel.GetPath())
-                        # Check if the voxel was hit in this iteration using the efficient set
-                        if voxel_path in actual_voxel_hits_set:
-                            # Add the pre-calculated count
-                            count = hit_counts[voxel_path]
-                            measurements[voxel_group_name][0][idx] += count
-                            total_hits_this_iter += count
-
-
-                # Untarget the hit paths from collisions more efficiently
-                # Pass the set directly if untarget_prims_collision is updated, otherwise convert back to list
-                self.untarget_prims_collision(list(actual_voxel_hits_set))
-
-                # Remove the hit voxels from the set of remaining voxels
-                remaining_voxel_paths_set -= actual_voxel_hits_set
-
-                print(f"  {iterations}\t\t  {total_hits_this_iter}\t\t  {len(actual_voxel_hits_set)}\t\t  {len(remaining_voxel_paths_set)}")
-
-                iterations += 1
-                # Add a safety break condition
-                if iterations > 1000: # Adjust limit as needed
-                    self._log_message("Warning: Exceeded maximum iterations. Breaking loop.")
-                    break
-            
-            # Disable the ray caster
-            # Enable the ray caster in case it is disabled
-            if disable_raycaster:
-                omni.kit.commands.execute('ToggleActivePrims',
-                                    prim_paths=[prim_utils.get_prim_path(ray_caster)],
-                                    active=False,
-                                    stage_or_context=self._usd_context)
-        await self._ensure_physics_updated(pause=True, steps=1)
-        print(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
-        self._log_message(f"Measurements for {sensor_instance.name} took {iterations} iterations over {(time.time() - start_time)} sec")
+            # 2. DDA traversal up to hit_distance
+            for voxel_idx in self.dda_ray_voxel_traversal(
+                ray_origin, ray_direction, max_distance=hit_distance
+            ):
+                # Map voxel_idx (i,j,k) to world center
+                center = (
+                    grid_min[0] + (voxel_idx[0] + 0.5) * voxel_size,
+                    grid_min[1] + (voxel_idx[1] + 0.5) * voxel_size,
+                    grid_min[2] + (voxel_idx[2] + 0.5) * voxel_size,
+                )
+                # Find which group/index this voxel belongs to
+                if center in voxel_idx_map:
+                    gp_name, idx = voxel_idx_map[center]
+                    measurements[gp_name][0][idx] += 1
+        
+        print(f"Measurements for {sensor_instance.name} took {time.time() - start_time:.2f} sec")
+        self._log_message(f"Measurements for {sensor_instance.name} took {time.time() - start_time:.2f} sec")
         return measurements
+
+
+    def _optimize_robot(self):
+        """Optimize the robot's sensor poses"""
+        if self.optimization_problem is None:
+            self._log_message("No optimization problem to solve.")
+            self.disable_ui_element(self.optimize_btn)
+            return
+        self._log_message("Generating Pareto Optimal Designs...")
+
+        def update_progress_bar(progress):
+            self.optimization_progress_bar.model.set_value(progress)
+            # Force UI update
+            asyncio.ensure_future(omni.kit.app.get_app().next_update_async())
+        
+        progress_callback = ProgressBar(self.optimization_generations, update_fn=update_progress_bar)
+
+        res, pop_df = run_moo(problem = self.optimization_problem,
+                            num_generations=self.optimization_generations,
+                            num_offsprings=self.optimization_offspring,
+                            population_size=self.optimization_population_size,
+                            prior_bot=self.robots[0],
+                            progress_callback=progress_callback,
+                            save_dir=self.opt_results_folder_path)
+        
+        progress_callback.close()
+
+        self._update_dash_app(pop_df=pop_df, robot=self.robots[0], problem=self.optimization_problem)
+
+        pareto_front = get_pareto_front(pop_df)
+
+        self._log_message("Optimization complete.")
+        self._log_message(f"{len(pareto_front)} Pareto optimal designs found.")
+        self._log_message(f"Saved Optimization Problem to {self.opt_results_folder_path}")
+        self._log_message(f"Saved Optimization Designs to {self.opt_results_folder_path}")
+
+
+    def _run_dash_app(self):
+            dash_app.app.run(debug=True, use_reloader=False)
+            self._log_message("Dash app running...")
+
+    def _update_dash_app(self, pop_df:pd.DataFrame=None, robot:Bot3D=None, problem:SensorPkgOptimization=None):
+        """Update the dash app with the new data"""
+        # dash_app.app.layout = dash_app.build_layout()
+        if pop_df is not None:
+            dash_app.app.layout['pop-df-store'].data = pop_df.to_json(orient='split')
+        if robot is not None:
+            dash_app.app.layout['prior-bot-store'].data = robot.to_json()
+        if problem is not None:
+            dash_app.app.layout['problem-store'].data = problem.to_json()
+        
+        # dash_app.app.layout = dash_app.build_layout()
+        self._log_message("Dash app updated with new data.")
+
+    def _stop_dash_app(self):
+        import psutil
+        import subprocess
+        import urllib.request
+        try:
+            with urllib.request.urlopen(dash_app.url, timeout=1) as response:
+                if response.status == 200:
+                    self._log_message(f"Dash app is not reachable at {dash_app.url}, try restarting Isaac Sim")
+        except urllib.error.URLError as e:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                if 'python' in proc.info['name'] and 'dash' in ' '.join(proc.info['cmdline']):
+                    proc.terminate()
+                    proc.wait()
+        self._log_message("Dash app stopped.")
+    
+    async def _launch_dash(self):
+        """Render the dash app webpage"""
+        dash_app.app.layout = dash_app.build_layout()
+        import urllib.request
+        try:
+            with urllib.request.urlopen(dash_app.url, timeout=5) as response:
+                if response.status == 200:
+                    self._log_message(f"Dash app is reachable at {dash_app.url}")
+        except:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self._run_dash_app)
+            self._log_message(f"Dash app is now reachable at {dash_app.url}")
+
+        

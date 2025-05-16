@@ -1,5 +1,6 @@
 # Ignore these:
 isaacsim/*
+# isaacsim/extsUser/go4robo/go4robo_python/results/*
 
 # Don't ignore these:
 !.gitignore
